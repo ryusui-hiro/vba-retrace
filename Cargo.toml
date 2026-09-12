@@ -1,0 +1,24 @@
+[package]
+name = "vba-insight"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Dependency-free VBA source and Office macro project analysis library"
+license = "MIT"
+repository = "https://github.com/ryusui-hiro/vba-retrace"
+readme = "README.md"
+keywords = ["vba", "excel", "xlsm", "static-analysis"]
+categories = ["development-tools", "parser-implementations"]
+
+[lib]
+name = "vba_insight"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vba-insight"
+path = "src/bin/vba-insight.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
