@@ -622,32 +622,111 @@ pub fn parse_project(
             .stream_u
             .or_else(|| decode_field(r.stream.as_deref(), code_page))
             .unwrap_or_else(|| name.clone());
-        let raw = module_streams
+        let raw = match module_streams
             .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(&stream))
+            .find(|(n, _)| {
+                n.eq_ignore_ascii_case(&stream)
+                    || n.trim_matches('\0')
+                        .eq_ignore_ascii_case(stream.trim_matches('\0'))
+            })
             .map(|(_, b)| b.as_slice())
-            .ok_or_else(|| format!("module stream missing for {name} ({stream})"))?;
-        let declared_offset = r
-            .offset
-            .ok_or_else(|| format!("module offset missing for {name}"))?;
+        {
+            Some(b) => b,
+            None => {
+                p.modules.push(OvbaModule {
+                    name: name.clone(),
+                    stream_name: stream.clone(),
+                    text_offset: 0,
+                    module_type: r.typ,
+                    source_bytes: Vec::new(),
+                    performance_cache: Vec::new(),
+                    source_text: None,
+                    source_error: Some(format!("module stream missing for {name} ({stream})")),
+                    performance_cache_len: 0,
+                    performance_cache_fingerprint: 0,
+                });
+                continue;
+            }
+        };
+        let declared_offset = match r.offset {
+            Some(o) => o,
+            None => {
+                p.modules.push(OvbaModule {
+                    name: name.clone(),
+                    stream_name: stream.clone(),
+                    text_offset: 0,
+                    module_type: r.typ,
+                    source_bytes: Vec::new(),
+                    performance_cache: Vec::new(),
+                    source_text: None,
+                    source_error: Some(format!("module offset missing for {name}")),
+                    performance_cache_len: 0,
+                    performance_cache_fingerprint: 0,
+                });
+                continue;
+            }
+        };
         let offset = declared_offset as usize;
-        if offset >= raw.len() {
-            return Err(format!(
-                "module text offset {offset} is outside stream for {name}"
-            ));
+        if offset > raw.len() {
+            p.modules.push(OvbaModule {
+                name: name.clone(),
+                stream_name: stream.clone(),
+                text_offset: declared_offset,
+                module_type: r.typ,
+                source_bytes: Vec::new(),
+                performance_cache: Vec::new(),
+                source_text: None,
+                source_error: Some(format!(
+                    "module text offset {offset} is outside stream of length {} for {name}",
+                    raw.len()
+                )),
+                performance_cache_len: 0,
+                performance_cache_fingerprint: 0,
+            });
+            continue;
         }
-        let cache = inspect_module_stream(raw, declared_offset)?;
-        let source_bytes = decompress_container(&raw[offset..], limit)?;
-        decompressed_total = decompressed_total
-            .checked_add(source_bytes.len())
-            .ok_or("total decompressed VBA source size overflow")?;
-        if decompressed_total > limit {
-            return Err("total decompressed VBA project text exceeds configured limit".into());
-        }
-        let source_text = decode_text(&source_bytes, code_page).ok();
-        let source_error = decode_text(&source_bytes, code_page)
-            .err()
-            .map(|e| e.to_string());
+        let cache = match inspect_module_stream(raw, declared_offset) {
+            Ok(c) => c,
+            Err(e) => {
+                p.modules.push(OvbaModule {
+                    name: name.clone(),
+                    stream_name: stream.clone(),
+                    text_offset: declared_offset,
+                    module_type: r.typ,
+                    source_bytes: Vec::new(),
+                    performance_cache: Vec::new(),
+                    source_text: None,
+                    source_error: Some(format!("module performance cache error: {e}")),
+                    performance_cache_len: 0,
+                    performance_cache_fingerprint: 0,
+                });
+                continue;
+            }
+        };
+        let (source_bytes, source_text, source_error) = if offset == raw.len() {
+            (Vec::new(), None, None)
+        } else {
+            match decompress_container(&raw[offset..], limit) {
+                Ok(decomp) => {
+                    decompressed_total = decompressed_total
+                        .checked_add(decomp.len())
+                        .ok_or("total decompressed VBA source size overflow")?;
+                    if decompressed_total > limit {
+                        return Err(
+                            "total decompressed VBA project text exceeds configured limit".into(),
+                        );
+                    }
+                    let text = decode_text(&decomp, code_page).ok();
+                    let err = decode_text(&decomp, code_page).err().map(|e| e.to_string());
+                    (decomp, text, err)
+                }
+                Err(e) => (
+                    Vec::new(),
+                    None,
+                    Some(format!("source decompression error: {e}")),
+                ),
+            }
+        };
         p.modules.push(OvbaModule {
             name,
             stream_name: stream,

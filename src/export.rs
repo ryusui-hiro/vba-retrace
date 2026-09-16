@@ -2677,6 +2677,9 @@ pub fn stomping_to_json(report: &ProjectStompingReport) -> String {
         }
         let kind_str = match &f.kind {
             StompingFindingKind::SourcePurged => "source_purged",
+            StompingFindingKind::SourceCorruptedWithValidPCode(_) => {
+                "source_corrupted_with_valid_pcode"
+            }
             StompingFindingKind::ProcedureHiddenInPCode(_) => "procedure_hidden_in_pcode",
             StompingFindingKind::ProcedureMissingInPCode(_) => "procedure_missing_in_pcode",
             StompingFindingKind::SuspiciousLiteralInPCode(_) => "suspicious_literal_in_pcode",
@@ -2718,6 +2721,9 @@ pub fn stomping_to_json(report: &ProjectStompingReport) -> String {
             }
             let kind_str = match &f.kind {
                 StompingFindingKind::SourcePurged => "source_purged",
+                StompingFindingKind::SourceCorruptedWithValidPCode(_) => {
+                    "source_corrupted_with_valid_pcode"
+                }
                 StompingFindingKind::ProcedureHiddenInPCode(_) => "procedure_hidden_in_pcode",
                 StompingFindingKind::ProcedureMissingInPCode(_) => "procedure_missing_in_pcode",
                 StompingFindingKind::SuspiciousLiteralInPCode(_) => "suspicious_literal_in_pcode",
@@ -2752,6 +2758,7 @@ fn finding_to_sarif_rule(f: &StompingFinding) -> (&'static str, &'static str) {
         StompingFindingKind::PerformanceCachePurged { .. } => ("VBA-STOMP-007", "warning"),
         StompingFindingKind::HiddenGuiModule(_) => ("VBA-STOMP-008", "error"),
         StompingFindingKind::ProjectLockedOrUnviewable => ("VBA-STOMP-009", "note"),
+        StompingFindingKind::SourceCorruptedWithValidPCode(_) => ("VBA-STOMP-010", "error"),
     };
     let level = match f.severity {
         StompingSeverity::Critical | StompingSeverity::High => "error",
@@ -2792,7 +2799,10 @@ pub fn stomping_to_sarif(report: &ProjectStompingReport, file_uri: &str) -> Stri
         "{\"id\":\"VBA-STOMP-008\",\"name\":\"HiddenGuiModule\",\"shortDescription\":{\"text\":\"Module Hidden from VBA GUI\"},\"fullDescription\":{\"text\":\"Module is present in dir stream and compiled for execution but omitted from PROJECT stream manifest, making it invisible in the Office VBA GUI (Evil Clippy technique).\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-STOMP-009\",\"name\":\"ProjectLockedOrUnviewable\",\"shortDescription\":{\"text\":\"Project Locked or Unviewable\"},\"fullDescription\":{\"text\":\"VBA project contains protection/lock attributes (CMG/DPB/GC) making the macro unviewable or password-protected in the VBA IDE.\"},\"defaultConfiguration\":{\"level\":\"note\"}}"
+        "{\"id\":\"VBA-STOMP-009\",\"name\":\"ProjectLockedOrUnviewable\",\"shortDescription\":{\"text\":\"Project Locked or Unviewable\"},\"fullDescription\":{\"text\":\"VBA project contains protection/lock attributes (CMG/DPB/GC) making the macro unviewable or password-protected in the VBA IDE.\"},\"defaultConfiguration\":{\"level\":\"note\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-STOMP-010\",\"name\":\"SourceCorruptedWithValidPCode\",\"shortDescription\":{\"text\":\"Corrupted Source Container with Executable P-Code\"},\"fullDescription\":{\"text\":\"Module source code container failed decompression or is malformed while executable compiled P-code remains, indicating anti-analysis stomping evasion.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

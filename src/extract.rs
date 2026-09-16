@@ -248,23 +248,57 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
         if let Some(formula) = &cell.formula {
             let f_clean = formula
                 .trim()
-                .trim_start_matches(['=', '+', '-', '@'])
+                .trim_start_matches(|c: char| {
+                    c.is_whitespace() || c == '=' || c == '+' || c == '-' || c == '@'
+                })
                 .trim();
             let f_lower = f_clean.to_ascii_lowercase();
-            let is_dde = f_lower.starts_with("cmd|")
-                || f_lower.starts_with("powershell|")
-                || f_lower.starts_with("pwsh|")
-                || f_lower.starts_with("msiexec|")
-                || f_lower.starts_with("cscript|")
-                || f_lower.starts_with("wscript|")
-                || f_lower.starts_with("rundll32|")
-                || f_lower.starts_with("regsvr32|")
-                || f_lower.starts_with("mshta|")
-                || f_lower.starts_with("certutil|")
-                || f_lower.starts_with("bitsadmin|")
-                || f_lower.contains("|'")
-                || f_lower.starts_with("dde(")
-                || f_lower.starts_with("dde.execute(");
+
+            // 1. DDE binary and execution detection
+            let is_dde_func = f_lower.starts_with("dde(") || f_lower.starts_with("dde.execute(");
+            let is_dde_pipe = if let Some((target, _)) = f_clean.split_once('|') {
+                let target_clean = target
+                    .trim()
+                    .trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+                let target_lower = target_clean.to_ascii_lowercase();
+                let file_name = target_lower
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(&target_lower);
+                let base = file_name.strip_suffix(".exe").unwrap_or(file_name);
+                matches!(
+                    base,
+                    "cmd"
+                        | "powershell"
+                        | "pwsh"
+                        | "mshta"
+                        | "cscript"
+                        | "wscript"
+                        | "rundll32"
+                        | "regsvr32"
+                        | "certutil"
+                        | "bitsadmin"
+                        | "msiexec"
+                        | "msexcel"
+                        | "excel"
+                        | "hh"
+                        | "bash"
+                        | "sh"
+                        | "python"
+                        | "python3"
+                        | "conhost"
+                        | "wt"
+                        | "schtasks"
+                        | "reg"
+                        | "at"
+                        | "curl"
+                ) || f_lower.contains("|'")
+            } else {
+                false
+            };
+            let is_dde = is_dde_func || is_dde_pipe;
+
+            // 2. Excel 4.0 (XLM) macro functions
             let is_xlm = f_lower.starts_with("exec(")
                 || f_lower.starts_with("call(")
                 || f_lower.starts_with("register(")
@@ -272,7 +306,51 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.starts_with("formula(")
                 || f_lower.starts_with("alert(")
                 || f_lower.starts_with("halt(")
-                || f_lower.starts_with("register.id(");
+                || f_lower.starts_with("register.id(")
+                || f_lower.starts_with("popen(")
+                || f_lower.starts_with("fcall(")
+                || f_lower.starts_with("fopen(")
+                || f_lower.starts_with("fwrite(")
+                || f_lower.starts_with("fclose(")
+                || f_lower.starts_with("initiate(")
+                || f_lower.starts_with("terminate(")
+                || f_lower.starts_with("request(")
+                || f_lower.starts_with("poke(");
+
+            // 3. Remote workbook link injection (UNC, HTTP, HTTPS, FTP)
+            let is_remote_link = (f_lower.contains("[http://")
+                || f_lower.contains("[https://")
+                || f_lower.contains("[ftp://")
+                || f_lower.contains("['http://")
+                || f_lower.contains("['https://")
+                || f_lower.contains("['ftp://")
+                || f_lower.contains("['\\\\")
+                || f_lower.contains("[\\\\"))
+                && (f_lower.contains("]") || f_lower.contains("']"));
+
+            // 4. External web service request / data exfiltration
+            let is_webservice = f_lower.starts_with("webservice(")
+                || f_lower.contains(" webservice(")
+                || f_lower.contains("+webservice(")
+                || f_lower.contains("-webservice(")
+                || f_lower.contains("&webservice(")
+                || f_lower.starts_with("filterxml(")
+                || f_lower.contains("webservice(");
+
+            // 5. Suspicious executable download hyperlink
+            let is_suspicious_hyperlink = f_lower.starts_with("hyperlink(")
+                && (f_lower.contains(".exe")
+                    || f_lower.contains(".scr")
+                    || f_lower.contains(".vbs")
+                    || f_lower.contains(".js")
+                    || f_lower.contains(".hta")
+                    || f_lower.contains(".bat")
+                    || f_lower.contains(".cmd")
+                    || f_lower.contains(".ps1")
+                    || f_lower.contains(".iso")
+                    || f_lower.contains(".zip")
+                    || f_lower.contains(".dll"));
+
             if is_dde {
                 extracted.diagnostics.push(format!(
                     "Security warning: Potential DDE execution formula in cell '{}'!{}: '{}'",
@@ -281,6 +359,21 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
             } else if is_xlm {
                 extracted.diagnostics.push(format!(
                     "Security warning: Potential Excel 4.0 (XLM) macro execution formula in cell '{}'!{}: '{}'",
+                    cell.sheet_name, cell.cell_ref, formula
+                ));
+            } else if is_remote_link {
+                extracted.diagnostics.push(format!(
+                    "Security warning: Potential remote workbook link injection in cell '{}'!{}: '{}'",
+                    cell.sheet_name, cell.cell_ref, formula
+                ));
+            } else if is_webservice {
+                extracted.diagnostics.push(format!(
+                    "Security warning: Potential external data request / exfiltration formula in cell '{}'!{}: '{}'",
+                    cell.sheet_name, cell.cell_ref, formula
+                ));
+            } else if is_suspicious_hyperlink {
+                extracted.diagnostics.push(format!(
+                    "Security warning: Suspicious executable download hyperlink in cell '{}'!{}: '{}'",
                     cell.sheet_name, cell.cell_ref, formula
                 ));
             }
@@ -527,6 +620,12 @@ fn convert(p: OvbaProject) -> ExtractedProject {
         ));
     }
     for m in p.modules {
+        if m.name.contains('\0') {
+            result.diagnostics.push(format!(
+                "Security warning: Module name contains null byte (evasion attempt): '{}'",
+                m.name.escape_default()
+            ));
+        }
         let diagnostic = m.source_error.clone();
         if let Some(e) = &diagnostic {
             result.diagnostics.push(format!("{}: {e}", m.name));
@@ -710,9 +809,10 @@ pub fn detect_project_stomping(
 
     for module in &project.modules {
         let matching_disasm = disasms.iter().find(|d| d.module_name == module.name);
-        let mut report = crate::stomping::detect_vba_stomping(
+        let mut report = crate::stomping::detect_vba_stomping_with_error(
             &module.name,
             module.source_text.as_deref(),
+            module.diagnostic.as_deref(),
             matching_disasm,
         );
 

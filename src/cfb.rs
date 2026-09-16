@@ -75,6 +75,9 @@ impl<'a> CompoundFile<'a> {
         let mut sid = first_difat;
         let mut seen = HashSet::new();
         let per = sector_size / 4 - 1;
+        if num_difat > limits.max_cfb_sectors {
+            return Err("CFB DIFAT sector count exceeds configured limit".into());
+        }
         for _ in 0..num_difat {
             if sid == END || sid == FREE || !seen.insert(sid) {
                 return Err("invalid or cyclic CFB DIFAT chain".into());
@@ -124,8 +127,9 @@ impl<'a> CompoundFile<'a> {
                 .chunks_exact(2)
                 .map(|b| u16::from_le_bytes([b[0], b[1]]))
                 .collect::<Vec<_>>();
-            let name = String::from_utf16(&units)
+            let raw_name = String::from_utf16(&units)
                 .map_err(|_| format!("invalid UTF-16 CFB directory name in entry {id}"))?;
+            let name = raw_name.trim_matches('\0').to_string();
             let kind = r[66];
             let start_sector = u32le(r, 116)?;
             let size = u64le(r, 120)?;
@@ -145,7 +149,8 @@ impl<'a> CompoundFile<'a> {
         if entries.is_empty() || entries[0].kind != 5 {
             return Err("CFB root directory entry is missing".into());
         }
-        assign_paths(&mut entries, 0, "", 0)?;
+        let mut visited_storages = HashSet::new();
+        assign_paths(&mut entries, 0, "", 0, &mut visited_storages)?;
         let mini_stream = read_regular(
             data,
             sector_size,
@@ -239,13 +244,17 @@ fn assign_paths(
     storage: usize,
     prefix: &str,
     depth: usize,
+    visited_storages: &mut HashSet<usize>,
 ) -> Result<(), String> {
-    if depth > 512 {
+    if depth > 128 {
         return Err("CFB directory nesting limit exceeded".into());
+    }
+    if !visited_storages.insert(storage) {
+        return Err("CFB directory storage contains a cycle".into());
     }
     let child = entries.get(storage).map(|e| e.child).unwrap_or(FREE);
     let mut seen = HashSet::new();
-    walk_siblings(entries, child, prefix, depth, &mut seen)
+    walk_siblings(entries, child, prefix, depth, &mut seen, visited_storages)
 }
 fn walk_siblings(
     entries: &mut [DirectoryEntry],
@@ -253,11 +262,12 @@ fn walk_siblings(
     parent: &str,
     depth: usize,
     seen: &mut HashSet<u32>,
+    visited_storages: &mut HashSet<usize>,
 ) -> Result<(), String> {
     if id == FREE || id == END {
         return Ok(());
     }
-    if depth > 512 {
+    if depth > 128 {
         return Err("CFB directory tree depth exceeded".into());
     }
     let idx = id as usize;
@@ -277,11 +287,11 @@ fn walk_siblings(
     };
     let kind = entries[idx].kind;
     entries[idx].path = path.clone();
-    walk_siblings(entries, left, parent, depth + 1, seen)?;
+    walk_siblings(entries, left, parent, depth + 1, seen, visited_storages)?;
     if kind == 1 {
-        assign_paths(entries, idx, &path, depth + 1)?;
+        assign_paths(entries, idx, &path, depth + 1, visited_storages)?;
     }
-    walk_siblings(entries, right, parent, depth + 1, seen)
+    walk_siblings(entries, right, parent, depth + 1, seen, visited_storages)
 }
 fn sector(data: &[u8], size: usize, sid: u32) -> Result<&[u8], String> {
     let off = (sid as usize)

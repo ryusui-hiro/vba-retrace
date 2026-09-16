@@ -36,6 +36,8 @@ impl StompingSeverity {
 pub enum StompingFindingKind {
     /// The source code is absent, emptied, or purged while compiled P-code instructions exist.
     SourcePurged,
+    /// The source code container could not be decompressed or is damaged while compiled P-code instructions exist.
+    SourceCorruptedWithValidPCode(String),
     /// A procedure is present in the P-code execution stream but absent from the source code.
     ProcedureHiddenInPCode(String),
     /// A procedure declared in the source code does not exist in the P-code stream.
@@ -189,6 +191,26 @@ static SENSITIVE_CALLS: &[&str] = &[
     "System.Diagnostics.Process",
     "ExecuteExcel4Macro",
     "MacScript",
+    "CallByName",
+    "Application.Run",
+    "ShellExecuteEx",
+    "NtCreateSection",
+    "ZwMapViewOfSection",
+    "NtMapViewOfSection",
+    "SetTimer",
+    "KillTimer",
+    "VirtualAllocEx",
+    "OpenProcess",
+    "GetProcAddress",
+    "LoadLibrary",
+    "LoadLibraryA",
+    "LoadLibraryW",
+    "LdrLoadDll",
+    "CreateRemoteThread",
+    "HeapAlloc",
+    "IsDebuggerPresent",
+    "CheckRemoteDebuggerPresent",
+    "Sleep",
 ];
 
 /// Common auto-execution hook procedures frequently targeted in macro attacks.
@@ -224,6 +246,16 @@ pub fn is_auto_exec_hook(name: &str) -> bool {
 pub fn detect_vba_stomping(
     module_name: &str,
     source_text: Option<&str>,
+    pcode: Option<&DisassembledPCodeModule>,
+) -> ModuleStompingReport {
+    detect_vba_stomping_with_error(module_name, source_text, None, pcode)
+}
+
+/// Inspect a module for evidence of VBA Stomping, taking into account any source decompression or stream corruption errors.
+pub fn detect_vba_stomping_with_error(
+    module_name: &str,
+    source_text: Option<&str>,
+    source_error: Option<&str>,
     pcode: Option<&DisassembledPCodeModule>,
 ) -> ModuleStompingReport {
     // Analyze source text first
@@ -329,8 +361,20 @@ pub fn detect_vba_stomping(
         score = score.saturating_add(35);
     }
 
-    // 1. Source Purged Check: P-code exists with executable instructions, but source is empty or contains no real code
-    if pcode_instruction_count > 0 && (source_lines == 0 || source_effective_code == 0) {
+    // 1. Source Corrupted or Purged Check: P-code exists with executable instructions
+    if let Some(err) = source_error {
+        if pcode_instruction_count > 0 {
+            findings.push(StompingFinding {
+                severity: StompingSeverity::Critical,
+                kind: StompingFindingKind::SourceCorruptedWithValidPCode(err.to_string()),
+                description: format!(
+                    "Module '{}' has {} P-code instructions across {} lines, but its source code container is corrupted or malformed ('{}') (anti-analysis stomping evasion).",
+                    module_name, pcode_instruction_count, pcode_line_count, err
+                ),
+            });
+            score = score.saturating_add(95);
+        }
+    } else if pcode_instruction_count > 0 && (source_lines == 0 || source_effective_code == 0) {
         findings.push(StompingFinding {
             severity: StompingSeverity::Critical,
             kind: StompingFindingKind::SourcePurged,

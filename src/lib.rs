@@ -45,7 +45,7 @@ pub use pcode::{
 };
 pub use stomping::{
     ModuleStompingReport, ProjectStompingReport, StompingFinding, StompingFindingKind,
-    StompingSeverity, detect_vba_stomping,
+    StompingSeverity, detect_vba_stomping, detect_vba_stomping_with_error,
 };
 
 /// Analyze already-decoded VBA text units using default resource limits.
