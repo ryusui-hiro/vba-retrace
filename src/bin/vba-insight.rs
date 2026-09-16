@@ -78,8 +78,15 @@ fn run() -> Result<(), String> {
             "--host" => {
                 host_profile = match args.next().as_deref() {
                     Some("excel") => HostProfile::Excel,
+                    Some("word") => HostProfile::Word,
+                    Some("powerpoint") => HostProfile::PowerPoint,
+                    Some("access") => HostProfile::Access,
                     Some("generic") | Some("unknown") => HostProfile::Unknown,
-                    _ => return Err("--host must be excel or generic".into()),
+                    _ => {
+                        return Err(
+                            "--host must be excel, word, powerpoint, access, or generic".into()
+                        );
+                    }
                 };
                 host_overridden = true;
             }

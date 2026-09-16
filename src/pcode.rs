@@ -1293,6 +1293,31 @@ pub fn disassemble_pcode_module(
                                         detailed_operands.push(PCodeOperandValue::RawDword(val));
                                     }
                                 }
+                                if arg == PCodeArgKind::Func {
+                                    let low = (val & 0xFFFF) as u16;
+                                    let high = ((val >> 16) & 0xFFFF) as u16;
+                                    let name_cand = get_id(low, identifiers, vba_ver, is_64bit);
+                                    let resolved = if !name_cand.starts_with("id_") {
+                                        Some(name_cand)
+                                    } else {
+                                        let high_cand =
+                                            get_id(high, identifiers, vba_ver, is_64bit);
+                                        if !high_cand.starts_with("id_") {
+                                            Some(high_cand)
+                                        } else {
+                                            None
+                                        }
+                                    };
+                                    if let Some(proc_name) = resolved {
+                                        formatted_inst.push_str(&format!("({}) ", proc_name));
+                                        if !declared_procedures.contains(&proc_name) {
+                                            declared_procedures.push(proc_name.clone());
+                                        }
+                                        if target_name.is_none() {
+                                            target_name = Some(proc_name);
+                                        }
+                                    }
+                                }
                             }
                             if is_64bit && arg == PCodeArgKind::Context && offset + 4 <= bytes.len()
                             {

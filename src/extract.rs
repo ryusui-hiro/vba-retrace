@@ -440,7 +440,49 @@ pub fn decode_extracted_bytes(
 /// (`vbaProject.bin`, legacy `.xls`), and extract the VBA project accordingly.
 pub fn extract_macro_container(data: &[u8], limits: &Limits) -> Result<ExtractedProject, String> {
     if data.starts_with(b"PK\x03\x04") {
-        extract_xlsm(data, limits)
+        match extract_xlsm(data, limits) {
+            Ok(project) => Ok(project),
+            Err(orig_err) => {
+                // Fallback: If standard OPC resolution fails, look for direct vbaProject.bin in the ZIP archive
+                // (e.g. stripped or non-standard macro-enabled packages, malware containers, or raw zips)
+                if let Ok(zip) = ZipArchive::open(data, limits) {
+                    let candidate_paths = [
+                        "vbaProject.bin",
+                        "xl/vbaProject.bin",
+                        "word/vbaProject.bin",
+                        "ppt/vbaProject.bin",
+                    ];
+                    let mut found_entry = None;
+                    for path in candidate_paths {
+                        if let Some(entry) = zip.find(path) {
+                            found_entry = Some(entry);
+                            break;
+                        }
+                    }
+                    if found_entry.is_none() {
+                        for entry in &zip.entries {
+                            if entry.name.ends_with("vbaProject.bin") {
+                                found_entry = Some(entry);
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(entry) = found_entry {
+                        let extracted_res = zip
+                            .read(entry)
+                            .and_then(|bin| extract_vba_project(&bin, limits));
+                        if let Ok(mut extracted) = extracted_res {
+                            extracted.diagnostics.push(format!(
+                                "OPC resolution failed ({orig_err}); extracted directly from entry '{}'",
+                                entry.name
+                            ));
+                            return Ok(extracted);
+                        }
+                    }
+                }
+                Err(orig_err)
+            }
+        }
     } else if data.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
         extract_vba_project(data, limits)
     } else {

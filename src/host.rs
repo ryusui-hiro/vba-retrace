@@ -5,6 +5,9 @@ pub enum HostProfile {
     #[default]
     Unknown,
     Excel,
+    Word,
+    PowerPoint,
+    Access,
 }
 
 pub(crate) fn direct_host_entry_candidate(trigger: &str) -> bool {

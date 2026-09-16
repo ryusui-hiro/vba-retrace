@@ -3,10 +3,10 @@ use std::process::Command;
 use vba_insight::export::{Disclosure, inspect_to_json, inspect_to_markdown, stomping_to_sarif};
 use vba_insight::extract::extract_macro_container;
 use vba_insight::host::HostProfile;
-use vba_insight::stomping::StompingSeverity;
+use vba_insight::stomping::{StompingFindingKind, StompingSeverity};
 use vba_insight::{AnalysisOptions, Limits, inspect_macro_file};
 
-/// CRC32 helper following IEEE 802.3 polygon.
+/// CRC32 helper following IEEE 802.3 polynomial.
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xffff_ffffu32;
     for &byte in data {
@@ -103,13 +103,17 @@ fn allocate_mini_stream(data: &[u8], mini: &mut Vec<u8>, minifat: &mut [u32]) ->
     (start_sector, data.len() as u64)
 }
 
-/// Synthesize a realistic CFB (OLE Compound File) containing a VBA Project.
-fn synthesize_cfb(
+/// Synthesize a realistic CFB (OLE Compound File) containing one or more modules in a VBA Project.
+fn synthesize_cfb_project(
     proj_name: &str,
-    module_name: &str,
-    source_code: &str,
-    pcode_bytes: &[u8],
+    modules: &[(&str, &str, &[u8])],
+    identifiers: &[&str],
 ) -> Vec<u8> {
+    assert!(
+        modules.len() <= 3,
+        "test synthesizer supports up to 3 modules in 2 directory sectors"
+    );
+
     let mut dir_raw = Vec::new();
     record_dir(0x0001, &1u32.to_le_bytes(), &mut dir_raw); // SYSKIND = Win32
     record_dir(0x0002, &0x0409u32.to_le_bytes(), &mut dir_raw); // LCID
@@ -128,43 +132,48 @@ fn synthesize_cfb(
     record_dir(0x0008, &0u32.to_le_bytes(), &mut dir_raw);
     dir_raw.extend_from_slice(&0x0009u16.to_le_bytes());
     dir_raw.extend_from_slice(&4u32.to_le_bytes());
-    dir_raw.extend_from_slice(&1u32.to_le_bytes());
+    dir_raw.extend_from_slice(&0x0097u32.to_le_bytes());
     dir_raw.extend_from_slice(&1u16.to_le_bytes());
 
     // PROJECTMODULES header
     dir_raw.extend_from_slice(&0x000fu16.to_le_bytes());
     dir_raw.extend_from_slice(&2u32.to_le_bytes());
-    dir_raw.extend_from_slice(&1u16.to_le_bytes()); // 1 module
+    dir_raw.extend_from_slice(&(modules.len() as u16).to_le_bytes());
     dir_raw.extend_from_slice(&0x0013u16.to_le_bytes());
     dir_raw.extend_from_slice(&2u32.to_le_bytes());
     dir_raw.extend_from_slice(&0xffffu16.to_le_bytes()); // cookie
 
-    // Module record
-    record_dir(0x0019, module_name.as_bytes(), &mut dir_raw);
-    let name16 = module_name
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    record_dir(0x0047, &name16, &mut dir_raw);
-    record_dir(0x001a, module_name.as_bytes(), &mut dir_raw);
-    dir_raw.extend_from_slice(&0x0032u16.to_le_bytes());
-    dir_raw.extend_from_slice(&(name16.len() as u32).to_le_bytes());
-    dir_raw.extend_from_slice(&name16);
-    record_dir(0x001c, b"", &mut dir_raw);
-    dir_raw.extend_from_slice(&0x0048u16.to_le_bytes());
-    dir_raw.extend_from_slice(&0u32.to_le_bytes());
+    for &(mod_name, _, pcode) in modules {
+        record_dir(0x0019, mod_name.as_bytes(), &mut dir_raw);
+        let name16 = mod_name
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        record_dir(0x0047, &name16, &mut dir_raw);
+        record_dir(0x001a, mod_name.as_bytes(), &mut dir_raw);
+        dir_raw.extend_from_slice(&0x0032u16.to_le_bytes());
+        dir_raw.extend_from_slice(&(name16.len() as u32).to_le_bytes());
+        dir_raw.extend_from_slice(&name16);
+        record_dir(0x001c, b"", &mut dir_raw);
+        dir_raw.extend_from_slice(&0x0048u16.to_le_bytes());
+        dir_raw.extend_from_slice(&0u32.to_le_bytes());
 
-    // Text offset record (0x0031)
-    let text_offset = pcode_bytes.len() as u32;
-    record_dir(0x0031, &text_offset.to_le_bytes(), &mut dir_raw);
-    record_dir(0x001e, &0u32.to_le_bytes(), &mut dir_raw);
-    record_dir(0x002c, &0xffffu16.to_le_bytes(), &mut dir_raw);
-    record_dir(0x0021, &0u32.to_le_bytes(), &mut dir_raw);
-    dir_raw.extend_from_slice(&0x002bu16.to_le_bytes());
-    dir_raw.extend_from_slice(&0u32.to_le_bytes());
+        // Text offset record (0x0031)
+        let text_offset = pcode.len() as u32;
+        record_dir(0x0031, &text_offset.to_le_bytes(), &mut dir_raw);
+        record_dir(0x001e, &0u32.to_le_bytes(), &mut dir_raw);
+        record_dir(0x002c, &0xffffu16.to_le_bytes(), &mut dir_raw);
+        record_dir(0x0021, &0u32.to_le_bytes(), &mut dir_raw);
+        dir_raw.extend_from_slice(&0x002bu16.to_le_bytes());
+        dir_raw.extend_from_slice(&0u32.to_le_bytes());
+    }
 
     let dir_comp = comp_ovba(&dir_raw);
-    let project_stream = format!("Name={proj_name}\r\nModule={module_name}\r\n").into_bytes();
+    let mut project_str = format!("Name={proj_name}\r\n");
+    for &(mod_name, _, _) in modules {
+        project_str.push_str(&format!("Module={mod_name}\r\n"));
+    }
+    let project_stream = project_str.into_bytes();
 
     // Build _VBA_PROJECT stream with magic 0x61CC
     let mut vba_project_stream = Vec::new();
@@ -186,39 +195,35 @@ fn synthesize_cfb(
     vba_project_stream.extend_from_slice(&0u32.to_le_bytes()); // table before IDs
     vba_project_stream.extend_from_slice(&[0; 6]);
 
-    // Identifiers: w0=2, num_total=2, w1=0 -> 2 identifiers
-    vba_project_stream.extend_from_slice(&2u16.to_le_bytes()); // w0
-    vba_project_stream.extend_from_slice(&2u16.to_le_bytes()); // num_total_ids
+    let num_ids = identifiers.len() as u16;
+    vba_project_stream.extend_from_slice(&num_ids.to_le_bytes()); // w0
+    vba_project_stream.extend_from_slice(&num_ids.to_le_bytes()); // num_total_ids
     vba_project_stream.extend_from_slice(&0u16.to_le_bytes()); // w1
     vba_project_stream.extend_from_slice(&[0; 4]);
 
-    // Ident 1: CalculateTotal
-    vba_project_stream.push(0);
-    vba_project_stream.push(14);
-    vba_project_stream.extend_from_slice(b"CalculateTotal");
-    vba_project_stream.extend_from_slice(&[0; 4]);
-
-    // Ident 2: TaxRate
-    vba_project_stream.push(0);
-    vba_project_stream.push(7);
-    vba_project_stream.extend_from_slice(b"TaxRate");
-    vba_project_stream.extend_from_slice(&[0; 4]);
-
-    // Module stream = P-Code bytes followed by compressed source text
-    let mut module_stream = pcode_bytes.to_vec();
-    let comp_src = comp_ovba(source_code.as_bytes());
-    module_stream.extend_from_slice(&comp_src);
+    for id in identifiers {
+        vba_project_stream.push(0);
+        vba_project_stream.push(id.len() as u8);
+        vba_project_stream.extend_from_slice(id.as_bytes());
+        vba_project_stream.extend_from_slice(&[0; 4]);
+    }
 
     // Build mini-stream and MiniFAT dynamically
     let mut mini = Vec::new();
-    let mut minifat = vec![0xffff_ffffu32; 128];
+    let mut minifat = vec![0xffff_ffffu32; 256];
 
     let (dir_start, dir_size) = allocate_mini_stream(&dir_comp, &mut mini, &mut minifat);
     let (proj_start, proj_size) = allocate_mini_stream(&project_stream, &mut mini, &mut minifat);
     let (vba_start, vba_size) = allocate_mini_stream(&vba_project_stream, &mut mini, &mut minifat);
-    let (mod_start, mod_size) = allocate_mini_stream(&module_stream, &mut mini, &mut minifat);
 
-    // Mini stream container size must be multiple of 512 bytes
+    let mut mod_allocs = Vec::new();
+    for &(_, src, pcode) in modules {
+        let mut mod_bytes = pcode.to_vec();
+        mod_bytes.extend_from_slice(&comp_ovba(src.as_bytes()));
+        let (start, sz) = allocate_mini_stream(&mod_bytes, &mut mini, &mut minifat);
+        mod_allocs.push((start, sz));
+    }
+
     let mini_sectors_512 = mini.len().div_ceil(512);
     mini.resize(mini_sectors_512 * 512, 0);
 
@@ -237,35 +242,35 @@ fn synthesize_cfb(
     put_cfb_entry(
         &mut dir_entries,
         1,
+        "PROJECT",
+        2,
+        0xffff_ffff,
+        2,
+        0xffff_ffff,
+        proj_start,
+        proj_size,
+    );
+    put_cfb_entry(
+        &mut dir_entries,
+        2,
         "VBA",
         1,
         0xffff_ffff,
-        5,
-        2,
+        0xffff_ffff,
+        3,
         0xffff_ffff,
         0,
     );
     put_cfb_entry(
         &mut dir_entries,
-        2,
+        3,
         "dir",
-        2,
-        0xffff_ffff,
-        3,
-        0xffff_ffff,
-        dir_start,
-        dir_size,
-    );
-    put_cfb_entry(
-        &mut dir_entries,
-        3,
-        module_name,
         2,
         0xffff_ffff,
         4,
         0xffff_ffff,
-        mod_start,
-        mod_size,
+        dir_start,
+        dir_size,
     );
     put_cfb_entry(
         &mut dir_entries,
@@ -273,22 +278,31 @@ fn synthesize_cfb(
         "_VBA_PROJECT",
         2,
         0xffff_ffff,
-        0xffff_ffff,
+        5,
         0xffff_ffff,
         vba_start,
         vba_size,
     );
-    put_cfb_entry(
-        &mut dir_entries,
-        5,
-        "PROJECT",
-        2,
-        0xffff_ffff,
-        0xffff_ffff,
-        0xffff_ffff,
-        proj_start,
-        proj_size,
-    );
+
+    for (i, (&(mod_name, _, _), &(m_start, m_sz))) in modules.iter().zip(&mod_allocs).enumerate() {
+        let entry_id = 5 + i;
+        let right = if i + 1 < modules.len() {
+            (5 + i + 1) as u32
+        } else {
+            0xffff_ffff
+        };
+        put_cfb_entry(
+            &mut dir_entries,
+            entry_id,
+            mod_name,
+            2,
+            0xffff_ffff,
+            right,
+            0xffff_ffff,
+            m_start,
+            m_sz,
+        );
+    }
 
     let total_file_sectors = 4 + mini_sectors_512;
     let mut file = vec![0u8; 512 + total_file_sectors * 512];
@@ -345,24 +359,81 @@ fn synthesize_cfb(
     file
 }
 
-/// Package CFB bytes into an OpenXML (.xlsm) ZIP container.
-fn synthesize_xlsm(cfb_data: &[u8]) -> Vec<u8> {
-    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.ms-excel.sheet.macroEnabled.main+xml\"/><Override PartName=\"/xl/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/></Types>";
-    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
-    let wb = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><workbookPr codeName=\"ThisWorkbook\"/><sheets><sheet name=\"Orders\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>";
-    let wb_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/></Relationships>";
+/// Backward-compatible single module CFB synthesizer.
+fn synthesize_cfb(
+    proj_name: &str,
+    module_name: &str,
+    source_code: &str,
+    pcode_bytes: &[u8],
+) -> Vec<u8> {
+    synthesize_cfb_project(
+        proj_name,
+        &[(module_name, source_code, pcode_bytes)],
+        &["CalculateTotal", "TaxRate"],
+    )
+}
 
-    let entries: [(&str, &[u8]); 5] = [
-        ("[Content_Types].xml", content_types.as_bytes()),
-        ("_rels/.rels", pkg_rels.as_bytes()),
-        ("xl/workbook.xml", wb.as_bytes()),
-        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
-        ("xl/vbaProject.bin", cfb_data),
-    ];
+/// Synthesize a valid CAFE P-code line map buffer from line instruction slices.
+fn synthesize_pcode_line_map(lines: &[&[u8]]) -> Vec<u8> {
+    let mut pcode = Vec::new();
+    pcode.extend_from_slice(&0xCAFEu16.to_le_bytes()); // 0xCAFE
+    pcode.extend_from_slice(&[0x00, 0x00]); // profile header
+    pcode.extend_from_slice(&(lines.len() as u16).to_le_bytes()); // line count
 
+    let mut rel_offset = 0u32;
+    for line in lines {
+        pcode.extend_from_slice(&[0u8; 4]); // prefix
+        pcode.extend_from_slice(&(line.len() as u16).to_le_bytes()); // length
+        pcode.extend_from_slice(&[0u8; 2]); // middle
+        pcode.extend_from_slice(&rel_offset.to_le_bytes()); // relative offset
+        rel_offset += line.len() as u32;
+    }
+
+    pcode.extend_from_slice(&[0u8; 10]); // padding before code table
+
+    for line in lines {
+        pcode.extend_from_slice(line);
+    }
+
+    pcode
+}
+
+/// Build a FuncDefn instruction targeting an identifier index.
+fn build_func_defn(ident_idx: u16) -> Vec<u8> {
+    let mut inst = Vec::new();
+    inst.extend_from_slice(&150u16.to_le_bytes()); // FuncDefn
+    let id_code = ((0x100 + 4 + ident_idx) << 1) as u32;
+    inst.extend_from_slice(&id_code.to_le_bytes());
+    inst
+}
+
+/// Build a LitStr instruction containing a string literal with proper padding.
+fn build_lit_str(s: &str) -> Vec<u8> {
+    let mut inst = Vec::new();
+    inst.extend_from_slice(&182u16.to_le_bytes()); // 32-bit LitStr (translates to 185)
+    inst.extend_from_slice(&(s.len() as u16).to_le_bytes());
+    inst.extend_from_slice(s.as_bytes());
+    if s.len() & 1 != 0 {
+        inst.push(0); // 1 byte padding for odd lengths
+    }
+    inst
+}
+
+/// Build an ArgsCall instruction calling a procedure by identifier index.
+fn build_args_call(ident_idx: u16, arg_count: u16) -> Vec<u8> {
+    let mut inst = Vec::new();
+    inst.extend_from_slice(&65u16.to_le_bytes()); // ArgsCall
+    let id_code = (0x100 + 4 + ident_idx) << 1;
+    inst.extend_from_slice(&id_code.to_le_bytes());
+    inst.extend_from_slice(&arg_count.to_le_bytes());
+    inst
+}
+
+/// Package entries into a valid standard ZIP archive.
+fn synthesize_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut z = Vec::new();
     let mut records = Vec::new();
-    for (name, payload) in entries {
+    for &(name, payload) in entries {
         let name_b = name.as_bytes();
         let crc = crc32(payload);
         let local_offset = z.len() as u32;
@@ -406,15 +477,87 @@ fn synthesize_xlsm(cfb_data: &[u8]) -> Vec<u8> {
     z
 }
 
+/// Package CFB bytes into an OpenXML (.xlsm) ZIP container.
+fn synthesize_xlsm(cfb_data: &[u8]) -> Vec<u8> {
+    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.ms-excel.sheet.macroEnabled.main+xml\"/><Override PartName=\"/xl/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/></Types>";
+    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
+    let wb = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><workbookPr codeName=\"ThisWorkbook\"/><sheets><sheet name=\"Orders\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>";
+    let wb_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/></Relationships>";
+
+    synthesize_zip(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", pkg_rels.as_bytes()),
+        ("xl/workbook.xml", wb.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb_data),
+    ])
+}
+
+/// Package CFB bytes into a Word (.docm) macro container.
+fn synthesize_docm(cfb_data: &[u8]) -> Vec<u8> {
+    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.ms-word.document.macroEnabled.main+xml\"/><Override PartName=\"/word/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/></Types>";
+    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>";
+    let doc = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>";
+    let doc_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/></Relationships>";
+
+    synthesize_zip(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", pkg_rels.as_bytes()),
+        ("word/document.xml", doc.as_bytes()),
+        ("word/_rels/document.xml.rels", doc_rels.as_bytes()),
+        ("word/vbaProject.bin", cfb_data),
+    ])
+}
+
+/// Package CFB bytes into a PowerPoint (.pptm) macro container.
+fn synthesize_pptm(cfb_data: &[u8]) -> Vec<u8> {
+    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml\"/><Override PartName=\"/ppt/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/></Types>";
+    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"ppt/presentation.xml\"/></Relationships>";
+    let pres =
+        "<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"/>";
+    let pres_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/></Relationships>";
+
+    synthesize_zip(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", pkg_rels.as_bytes()),
+        ("ppt/presentation.xml", pres.as_bytes()),
+        ("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes()),
+        ("ppt/vbaProject.bin", cfb_data),
+    ])
+}
+
+/// Package CFB bytes into an Excel Binary (.xlsb) macro container.
+fn synthesize_xlsb(cfb_data: &[u8]) -> Vec<u8> {
+    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"bin\" ContentType=\"application/vnd.ms-excel.sheet.binary.macroEnabled.main\"/><Override PartName=\"/xl/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/></Types>";
+    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.bin\"/></Relationships>";
+    let dummy_bin = b"\xD0\xCF\x11\xE0";
+    let wb_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/></Relationships>";
+
+    synthesize_zip(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", pkg_rels.as_bytes()),
+        ("xl/workbook.bin", dummy_bin),
+        ("xl/_rels/workbook.bin.rels", wb_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb_data),
+    ])
+}
+
+/// Package CFB bytes into a stripped ZIP container without OPC XML metadata.
+fn synthesize_stripped_zip(cfb_data: &[u8], entry_name: &str) -> Vec<u8> {
+    synthesize_zip(&[(entry_name, cfb_data)])
+}
+
 #[test]
 fn e2e_clean_production_xlsm_inspection() {
     let src = "Attribute VB_Name = \"OrdersModule\"\nSub CalculateTotal()\n    Dim total As Double\n    total = 100 * 1.1\nEnd Sub\n";
-    // 0xCAFE header line map with a simple NOP line
-    let mut pcode = vec![0; 0x20]; // preamble
-    pcode[0..2].copy_from_slice(&0xCAFEu16.to_le_bytes());
-    pcode[2..4].copy_from_slice(&1u16.to_le_bytes()); // 1 line
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
 
-    let cfb = synthesize_cfb("ProductionProject", "OrdersModule", src, &pcode);
+    let cfb = synthesize_cfb_project(
+        "ProductionProject",
+        &[("OrdersModule", src, &pcode)],
+        &["CalculateTotal"],
+    );
     let xlsm = synthesize_xlsm(&cfb);
 
     let options = AnalysisOptions {
@@ -451,23 +594,271 @@ fn e2e_clean_production_xlsm_inspection() {
 
 #[test]
 fn e2e_weaponized_stomping_detection_and_sarif_export() {
-    // Purged or deceptive source
-    let deceptive_src = "Attribute VB_Name = \"MalModule\"\nSub Harmless()\nEnd Sub\n";
-    let mut pcode = vec![0; 0x20];
-    pcode[0..2].copy_from_slice(&0xCAFEu16.to_le_bytes());
+    // 1. Deceptive source code in the VBA text stream
+    let deceptive_src = "Attribute VB_Name = \"MalModule\"\nSub InnocentDocSummary()\n    Dim msg As String\n    msg = \"Harmless Invoice Report\"\nEnd Sub\n";
 
-    let cfb = synthesize_cfb("AttackProject", "MalModule", deceptive_src, &pcode);
+    // 2. Weaponized P-code line map:
+    // Line 0: FuncDefn for "EvilPayload" (divergent procedure name)
+    // Line 1: LitStr with suspicious powershell payload
+    // Line 2: LitStr with suspicious url
+    // Line 3: ArgsCall for "URLDownloadToFileA"
+    let line0 = build_func_defn(0); // ident 0: EvilPayload
+    let line1 = build_lit_str("powershell -ExecutionPolicy Bypass -enc SQBFAFgA");
+    let line2 = build_lit_str("https://c2.evil-attacker.com/payload.exe");
+    let line3 = build_args_call(1, 1); // ident 1: URLDownloadToFileA
+    let pcode = synthesize_pcode_line_map(&[&line0, &line1, &line2, &line3]);
+
+    let identifiers = &["EvilPayload", "URLDownloadToFileA"];
+    let cfb = synthesize_cfb_project(
+        "AttackProject",
+        &[("MalModule", deceptive_src, &pcode)],
+        identifiers,
+    );
     let xlsm = synthesize_xlsm(&cfb);
 
     let options = AnalysisOptions::default();
     let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
 
     let report = inspection.stomping_report;
+    assert!(report.has_stomping);
+    assert_eq!(report.overall_severity, StompingSeverity::Critical);
+
+    let mal_mod = &report.modules[0];
+    assert!(mal_mod.is_stomped);
+    assert_eq!(mal_mod.severity, StompingSeverity::Critical);
+    assert_eq!(mal_mod.confidence_score, 100);
+
+    // Verify individual finding types
+    let has_hidden_proc = mal_mod.findings.iter().any(|f| {
+        matches!(
+            &f.kind,
+            StompingFindingKind::ProcedureHiddenInPCode(name) if name == "EvilPayload"
+        )
+    });
+    let has_missing_proc = mal_mod.findings.iter().any(|f| {
+        matches!(
+            &f.kind,
+            StompingFindingKind::ProcedureMissingInPCode(name) if name == "InnocentDocSummary"
+        )
+    });
+    let has_suspicious_ps = mal_mod.findings.iter().any(|f| {
+        matches!(
+            &f.kind,
+            StompingFindingKind::SuspiciousLiteralInPCode(lit) if lit.contains("powershell")
+        )
+    });
+    let has_suspicious_url = mal_mod.findings.iter().any(|f| {
+        matches!(
+            &f.kind,
+            StompingFindingKind::SuspiciousLiteralInPCode(lit) if lit.contains("https://")
+        )
+    });
+    let has_sensitive_call = mal_mod.findings.iter().any(|f| {
+        matches!(
+            &f.kind,
+            StompingFindingKind::SensitiveCallInPCode(name) if name == "URLDownloadToFileA"
+        )
+    });
+
+    assert!(has_hidden_proc, "should detect hidden procedure in P-code");
+    assert!(
+        has_missing_proc,
+        "should detect missing procedure from source in P-code"
+    );
+    assert!(
+        has_suspicious_ps,
+        "should detect suspicious powershell command"
+    );
+    assert!(has_suspicious_url, "should detect suspicious URL");
+    assert!(
+        has_sensitive_call,
+        "should detect sensitive URLDownloadToFileA API call"
+    );
+
     // SARIF export validation
     let sarif_out = stomping_to_sarif(&report, "infected_invoice.xlsm");
     assert!(sarif_out.contains("sarif-schema-2.1.0.json"));
     assert!(sarif_out.contains("infected_invoice.xlsm"));
+    assert!(sarif_out.contains("VBA-STOMP-002"));
+    assert!(sarif_out.contains("VBA-STOMP-004"));
+    assert!(sarif_out.contains("VBA-STOMP-005"));
     assert!(sarif_out.contains("vba-insight"));
+}
+
+#[test]
+fn e2e_docm_container_extraction_and_inspection() {
+    let src = "Attribute VB_Name = \"DocModule\"\nSub WordOpenHandler()\n    MsgBox \"Doc opened\"\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+
+    let cfb = synthesize_cfb_project(
+        "WordDocumentProject",
+        &[("DocModule", src, &pcode)],
+        &["WordOpenHandler"],
+    );
+    let docm = synthesize_docm(&cfb);
+
+    let extracted = extract_macro_container(&docm, &Limits::default())
+        .expect("extract_macro_container for .docm should succeed");
+    assert_eq!(extracted.name.as_deref(), Some("WordDocumentProject"));
+    assert_eq!(extracted.modules.len(), 1);
+    assert_eq!(extracted.modules[0].name, "DocModule");
+
+    let inspection = inspect_macro_file(
+        &docm,
+        &AnalysisOptions {
+            host_profile: HostProfile::Word,
+            ..Default::default()
+        },
+    )
+    .expect("inspect_macro_file for .docm should succeed");
+
+    assert_eq!(
+        inspection.stomping_report.overall_severity,
+        StompingSeverity::Clean
+    );
+    assert!(!inspection.stomping_report.has_stomping);
+}
+
+#[test]
+fn e2e_pptm_container_extraction_and_inspection() {
+    let src = "Attribute VB_Name = \"SlideModule\"\nSub OnSlideShowPageChange()\n    ' Slide change handler\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+
+    let cfb = synthesize_cfb_project(
+        "PowerPointProject",
+        &[("SlideModule", src, &pcode)],
+        &["OnSlideShowPageChange"],
+    );
+    let pptm = synthesize_pptm(&cfb);
+
+    let extracted = extract_macro_container(&pptm, &Limits::default())
+        .expect("extract_macro_container for .pptm should succeed");
+    assert_eq!(extracted.name.as_deref(), Some("PowerPointProject"));
+    assert_eq!(extracted.modules.len(), 1);
+    assert_eq!(extracted.modules[0].name, "SlideModule");
+
+    let inspection = inspect_macro_file(
+        &pptm,
+        &AnalysisOptions {
+            host_profile: HostProfile::PowerPoint,
+            ..Default::default()
+        },
+    )
+    .expect("inspect_macro_file for .pptm should succeed");
+
+    assert_eq!(
+        inspection.stomping_report.overall_severity,
+        StompingSeverity::Clean
+    );
+    assert!(!inspection.stomping_report.has_stomping);
+}
+
+#[test]
+fn e2e_xlsb_container_extraction_and_inspection() {
+    let src = "Attribute VB_Name = \"BinarySheetModule\"\nSub BinaryCalc()\n    Dim total As Long\n    total = 500\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+
+    let cfb = synthesize_cfb_project(
+        "XlsbProject",
+        &[("BinarySheetModule", src, &pcode)],
+        &["BinaryCalc"],
+    );
+    let xlsb = synthesize_xlsb(&cfb);
+
+    let extracted = extract_macro_container(&xlsb, &Limits::default())
+        .expect("extract_macro_container for .xlsb should succeed");
+    assert_eq!(extracted.name.as_deref(), Some("XlsbProject"));
+    assert_eq!(extracted.modules.len(), 1);
+    assert_eq!(extracted.modules[0].name, "BinarySheetModule");
+
+    let inspection = inspect_macro_file(&xlsb, &AnalysisOptions::default())
+        .expect("inspect_macro_file for .xlsb should succeed");
+
+    assert_eq!(
+        inspection.stomping_report.overall_severity,
+        StompingSeverity::Clean
+    );
+}
+
+#[test]
+fn e2e_stripped_zip_fallback_extraction() {
+    let src = "Attribute VB_Name = \"FallbackModule\"\nSub FallbackMain()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+
+    let cfb = synthesize_cfb_project(
+        "FallbackProject",
+        &[("FallbackModule", src, &pcode)],
+        &["FallbackMain"],
+    );
+
+    // Scenario 1: Stripped ZIP with xl/vbaProject.bin
+    let stripped_zip_xl = synthesize_stripped_zip(&cfb, "xl/vbaProject.bin");
+    let extracted_xl = extract_macro_container(&stripped_zip_xl, &Limits::default())
+        .expect("fallback extraction should succeed for xl/vbaProject.bin");
+    assert_eq!(extracted_xl.name.as_deref(), Some("FallbackProject"));
+    assert_eq!(extracted_xl.modules.len(), 1);
+    assert!(
+        extracted_xl
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("extracted directly from entry 'xl/vbaProject.bin'"))
+    );
+
+    // Scenario 2: Stripped ZIP with root vbaProject.bin
+    let stripped_zip_root = synthesize_stripped_zip(&cfb, "vbaProject.bin");
+    let extracted_root = extract_macro_container(&stripped_zip_root, &Limits::default())
+        .expect("fallback extraction should succeed for root vbaProject.bin");
+    assert_eq!(extracted_root.name.as_deref(), Some("FallbackProject"));
+    assert!(
+        extracted_root
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("extracted directly from entry 'vbaProject.bin'"))
+    );
+}
+
+#[test]
+fn e2e_multi_module_container_inspection() {
+    let src1 = "Attribute VB_Name = \"OrderModule\"\nSub CalcOrderTotal()\n    Dim total As Double\n    total = 250.0\nEnd Sub\n";
+    let src2 = "Attribute VB_Name = \"AuditClass\"\nSub LogAuditEntry()\n    ' Audit entry logger\nEnd Sub\n";
+
+    let line_mod1 = build_func_defn(0);
+    let pcode1 = synthesize_pcode_line_map(&[&line_mod1]);
+
+    let line_mod2 = build_func_defn(1);
+    let pcode2 = synthesize_pcode_line_map(&[&line_mod2]);
+
+    let cfb = synthesize_cfb_project(
+        "MultiModuleCorp",
+        &[
+            ("OrderModule", src1, &pcode1),
+            ("AuditClass", src2, &pcode2),
+        ],
+        &["CalcOrderTotal", "LogAuditEntry"],
+    );
+    let xlsm = synthesize_xlsm(&cfb);
+
+    let inspection = inspect_macro_file(&xlsm, &AnalysisOptions::default())
+        .expect("multi-module inspection should succeed");
+
+    assert_eq!(
+        inspection.extracted.name.as_deref(),
+        Some("MultiModuleCorp")
+    );
+    assert_eq!(inspection.extracted.modules.len(), 2);
+    assert_eq!(inspection.stomping_report.modules.len(), 2);
+    assert_eq!(
+        inspection.stomping_report.overall_severity,
+        StompingSeverity::Clean
+    );
+
+    let json_out = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(json_out.contains("OrderModule"));
+    assert!(json_out.contains("AuditClass"));
 }
 
 #[test]

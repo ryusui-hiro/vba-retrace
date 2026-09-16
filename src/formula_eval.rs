@@ -690,9 +690,8 @@ impl Evaluator<'_> {
                     (number * factor).round() / factor,
                 )))
             }
-            "len" | "left" | "right" | "mid" | "concatenate" | "value" => {
-                self.evaluate_string_function(name, arguments, depth + 1)
-            }
+            "len" | "left" | "right" | "mid" | "concatenate" | "value" | "trim" | "upper"
+            | "lower" => self.evaluate_string_function(name, arguments, depth + 1),
             _ => Err("unsupported"),
         }
     }
@@ -802,6 +801,30 @@ impl Evaluator<'_> {
                     value.push_str(&to_string(&self.eval_scalar(argument, depth + 1)?)?);
                     self.check_string_size(&value)?;
                 }
+                Ok(EvalValue::Scalar(FormulaValue::String(value)))
+            }
+            "upper" | "lower" if arguments.len() == 1 => {
+                let text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let value = if name == "upper" {
+                    text.to_ascii_uppercase()
+                } else {
+                    text.to_ascii_lowercase()
+                };
+                self.check_string_size(&value)?;
+                Ok(EvalValue::Scalar(FormulaValue::String(value)))
+            }
+            "trim" if arguments.len() == 1 => {
+                let text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let mut words = text.split_whitespace();
+                let mut value = String::new();
+                if let Some(first) = words.next() {
+                    value.push_str(first);
+                    for w in words {
+                        value.push(' ');
+                        value.push_str(w);
+                    }
+                }
+                self.check_string_size(&value)?;
                 Ok(EvalValue::Scalar(FormulaValue::String(value)))
             }
             _ => Err("unsupported"),
@@ -1055,5 +1078,30 @@ mod tests {
         assert_eq!(range.status, "unsupported");
         let address = evaluate_formula("=XFE1", Some("Data"), &[], Default::default());
         assert_eq!(address.status, "unsupported");
+    }
+
+    #[test]
+    fn evaluates_upper_lower_and_trim() {
+        let cells = [cell("A1", "  Hello   World  ", "str")];
+        let upper_res = evaluate_formula("=UPPER(A1)", Some("Data"), &cells, Default::default());
+        assert_eq!(upper_res.status, "resolved");
+        assert_eq!(
+            upper_res.value,
+            Some(FormulaValue::String("  HELLO   WORLD  ".into()))
+        );
+
+        let lower_res = evaluate_formula("=LOWER(A1)", Some("Data"), &cells, Default::default());
+        assert_eq!(lower_res.status, "resolved");
+        assert_eq!(
+            lower_res.value,
+            Some(FormulaValue::String("  hello   world  ".into()))
+        );
+
+        let trim_res = evaluate_formula("=TRIM(A1)", Some("Data"), &cells, Default::default());
+        assert_eq!(trim_res.status, "resolved");
+        assert_eq!(
+            trim_res.value,
+            Some(FormulaValue::String("Hello World".into()))
+        );
     }
 }
