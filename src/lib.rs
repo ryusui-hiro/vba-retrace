@@ -1,7 +1,42 @@
-//! Static analysis primitives for VBA source and macro-enabled Office files.
+//! # vba-insight
+//!
+//! Complete, dependency-free Rust library and CLI for static analysis of VBA source code,
+//! direct macro extraction from Office containers (`.xlsm`, `.xlsb`, `.docm`, `.pptm`, legacy `.xls`, `vbaProject.bin`),
+//! built-in standard P-code disassembly (VBA6 & VBA7, 32-bit and 64-bit), and automated
+//! VBA Stomping / tampering detection.
 //!
 //! The crate never executes macros and never performs network access. Findings
 //! distinguish facts from unresolved or host-dependent behavior.
+//!
+//! ## Key Capabilities
+//!
+//! - **Safe & Self-Contained**: Implemented entirely with Rust's standard library (`std`).
+//!   Deterministic execution, zero external dependencies.
+//! - **Static Analysis**: Tokenization, AST parsing, MS-VBAL type checking, scoping, CFG construction,
+//!   reaching definitions, and error propagation modeling.
+//! - **Container Extraction**: Pure Rust extraction from OOXML packages (`.xlsm`, `.docm`, `.pptm`),
+//!   legacy Compound File Binary (`.xls`, `vbaProject.bin`), and MS-OVBA decompression.
+//! - **P-Code Disassembler**: Full coverage of 264 VBA opcodes and `_VBA_PROJECT` identifier resolution.
+//! - **VBA Stomping Detection**: Identifies purged source text, hidden procedures in P-code,
+//!   suspicious URLs/executables, dangerous API calls (process injection, memory evasion),
+//!   and ghost modules.
+//!
+//! ## Quick Examples
+//!
+//! ### Analyzing Pure VBA Source Text
+//!
+//! ```rust
+//! use vba_insight::{analyze_sources, SourceUnit};
+//!
+//! let sources = vec![SourceUnit {
+//!     name: "Module1.bas".to_string(),
+//!     text: "Public Sub HelloWorld()\n    MsgBox \"Hello\"\nEnd Sub\n".to_string(),
+//! }];
+//!
+//! let report = analyze_sources(&sources).expect("analysis should succeed");
+//! assert!(!report.project.code_executed);
+//! assert_eq!(report.project.modules.len(), 1);
+//! ```
 
 pub mod analyze;
 pub mod cfb;
@@ -28,10 +63,15 @@ pub mod typecheck;
 pub mod zip;
 
 pub use analyze::{AnalysisOptions, analyze, detect_entry_points};
+pub use export::{
+    Disclosure, disasm_to_json, disasm_to_markdown, inspect_to_json, inspect_to_markdown,
+    stomping_to_json, stomping_to_markdown, stomping_to_sarif, to_dot, to_dot_with_disclosure,
+    to_json,
+};
 pub use extract::{
-    ExtractedModulePCodeAnalysis, ExtractedProjectPCodeAnalysis, PCodeAnalysisOptions,
-    detect_project_stomping, disassemble_extracted_module, disassemble_extracted_project,
-    extract_macro_container,
+    ExtractedModule, ExtractedModulePCodeAnalysis, ExtractedProject, ExtractedProjectPCodeAnalysis,
+    PCodeAnalysisOptions, detect_project_stomping, disassemble_extracted_module,
+    disassemble_extracted_project, extract_macro_container, extract_xlsm,
 };
 pub use formula_eval::{
     FormulaEvaluation, FormulaEvaluationLimits, FormulaValue, evaluate_formula,

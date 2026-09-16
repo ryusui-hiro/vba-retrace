@@ -174,18 +174,110 @@ cargo run -- stomping malicious.xlsm --format sarif
 cargo run -- inspect workbook.xlsm --format markdown
 ```
 
-Library entry point:
+## Library API Usage
+
+`vba-insight` is designed as a standalone, zero-dependency library (`vba_insight`) with full crate root re-exports.
+
+### 1. Analyzing VBA Source Code
 
 ```rust
-use vba_insight::{analyze, AnalysisOptions, SourceUnit};
+use vba_insight::{analyze_sources, AnalysisOptions, SourceUnit};
 
-let result = analyze(&[SourceUnit {
+let sources = vec![SourceUnit {
     name: "Module1.bas".into(),
-    text: "Public Sub Start()\nEnd Sub\n".into(),
-}], &AnalysisOptions::default())?;
-assert!(!result.project.code_executed);
-# Ok::<(), Box<dyn std::error::Error>>(())
+    text: "Public Sub Start()\n    MsgBox \"Hello\"\nEnd Sub\n".into(),
+}];
+
+let analysis = analyze_sources(&sources)?;
+assert!(!analysis.project.code_executed);
+assert_eq!(analysis.project.modules.len(), 1);
+# Ok::<(), String>(())
 ```
+
+### 2. Comprehensive Macro File Inspection
+
+Extracts macro streams from any container (`.xlsm`, `.xlsb`, `.docm`, `.pptm`, legacy `.xls`, `vbaProject.bin`), disassembles P-code, detects VBA Stomping, and runs complete semantic analysis:
+
+```rust
+use vba_insight::{inspect_macro_file, inspect_to_markdown, AnalysisOptions};
+
+let container_bytes = std::fs::read("workbook.xlsm").unwrap_or_default();
+if !container_bytes.is_empty() {
+    let inspection = inspect_macro_file(&container_bytes, &AnalysisOptions::default())?;
+    println!("Modules extracted: {}", inspection.extracted.modules.len());
+    println!("Stomping findings: {}", inspection.stomping_report.findings.len());
+
+    // Generate Markdown report
+    let md = inspect_to_markdown(&inspection);
+    println!("{md}");
+}
+# Ok::<(), String>(())
+```
+
+### 3. Automated VBA Stomping Detection & SARIF Reporting
+
+Detect discrepancies between compressed source text and compiled P-code, exporting directly to SARIF v2.1.0 for GitHub Advanced Security / CI integration:
+
+```rust
+use vba_insight::{
+    extract_macro_container, detect_project_stomping, stomping_to_sarif, Limits
+};
+
+let container_bytes = std::fs::read("malicious.docm").unwrap_or_default();
+if !container_bytes.is_empty() {
+    let extracted = extract_macro_container(&container_bytes, &Limits::bounded())?;
+    let report = detect_project_stomping(&extracted)?;
+
+    if report.is_stomped {
+        let sarif = stomping_to_sarif(&report, "malicious.docm");
+        std::fs::write("stomping_results.sarif", sarif).ok();
+    }
+}
+# Ok::<(), String>(())
+```
+
+### 4. Built-in Standard P-Code Disassembly
+
+Disassemble standard VBA6 / VBA7 P-code without requiring external opcode tables:
+
+```rust
+use vba_insight::{extract_macro_container, disassemble_extracted_project, disasm_to_markdown, Limits};
+
+let container_bytes = std::fs::read("sample.xlsm").unwrap_or_default();
+if !container_bytes.is_empty() {
+    let extracted = extract_macro_container(&container_bytes, &Limits::bounded())?;
+    let disassembly = disassemble_extracted_project(&extracted)?;
+    let markdown = disasm_to_markdown(&disassembly);
+    println!("{markdown}");
+}
+# Ok::<(), String>(())
+```
+
+## VBA Stomping & Tampering Rules
+
+`vba-insight` implements 10 specialized detection rules covering advanced evasion techniques:
+
+| Rule ID | Finding Kind | Severity | Description |
+|---|---|---|---|
+| `VBA-STOMP-001` | `PurgedSourceWithValidPCode` | Critical | Source code was wiped or blanked out, but executable P-code remains |
+| `VBA-STOMP-002` | `HiddenPCodeProcedure` | High | Procedures exist in P-code that do not appear in the source code |
+| `VBA-STOMP-003` | `SuspiciousStringInPCodeOnly` | High | Suspicious URLs (`http://`, `https://`), IPs, or executables (`.exe`, `.dll`, `.ps1`) in P-code only |
+| `VBA-STOMP-004` | `SensitiveCallInPCodeOnly` | Critical | Dangerous APIs (`VirtualAlloc`, `WriteProcessMemory`, `CreateRemoteThread`, `ShellExecute`, etc.) present only in P-code |
+| `VBA-STOMP-005` | `IdentifierDiscrepancy` | Medium | Identifiers found in P-code do not match identifiers declared in source text |
+| `VBA-STOMP-006` | `SignificantSizeDiscrepancy` | Low | Disproportionately large P-code cache relative to source size |
+| `VBA-STOMP-007` | `MissingSourceStreamWithPCode` | High | Module stream is missing from CFB storage while P-code stream exists |
+| `VBA-STOMP-008` | `CorruptedSourceStreamWithPCode` | Critical | Module stream exists but decompression failed, while P-code is valid |
+| `VBA-STOMP-009` | `GhostModuleStream` | High | Unreferenced module streams detected in CFB storage (hidden from `dir` stream) |
+| `VBA-STOMP-010` | `SourceCorruptedWithValidPCode` | Critical | Source text decompression corrupted or truncated, while valid P-code executes |
+
+## Worksheet Cell Threat Detection
+
+In addition to VBA code, the engine scans worksheet cells in OOXML workbooks for dangerous formulas:
+- **DDE Execution**: Detects dynamic data exchange formulas (e.g. `=cmd|'/c calc'!A0`, `="cmd.exe"|...`).
+- **Remote Injection**: Flags UNC paths (`\\evil-server\share`) and remote URLs (`http://`, `ftp://`).
+- **Data Exfiltration**: Identifies `=WEBSERVICE(...)` formulas that can exfiltrate sensitive cell data.
+- **Suspicious Hyperlinks**: Catches `=HYPERLINK(...)` formulas pointing to executable or script targets (`.exe`, `.scr`, `.bat`, `.ps1`, `.vbs`, `.js`).
+- **Legacy XLM 4.0 Macros**: Flags `=CALL(...)`, `=EXEC(...)`, and `=REGISTER(...)` macro calls.
 
 For an in-memory `.xlsm`, `analyze_xlsm(&bytes, &AnalysisOptions::default())` returns both the semantic report and extracted project/cache metadata. This convenience entry point selects the Excel host profile; use `analyze_extracted_project` when you need to choose the host profile explicitly.
 
