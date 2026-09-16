@@ -64,6 +64,47 @@ pub fn decode_text(bytes: &[u8], code_page: Option<u16>) -> Result<String, Decod
     })
 }
 
+/// Blank the serialized designer preamble of exported class/form modules while
+/// preserving byte offsets, line endings, and the complete source supplied by the caller.
+pub fn mask_designer_preamble(name: &str, source: &str) -> String {
+    let extension = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .rsplit_once('.')
+        .map(|x| x.1.to_ascii_lowercase());
+    if !matches!(extension.as_deref(), Some("cls" | "frm")) {
+        return source.to_owned();
+    }
+    let mut offset = 0usize;
+    let mut preamble_end = None;
+    for line in source.split_inclusive('\n') {
+        if line
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("attribute vb_name")
+        {
+            preamble_end = Some(offset);
+            break;
+        }
+        offset += line.len();
+    }
+    let Some(end) = preamble_end else {
+        return source.to_owned();
+    };
+    let mut bytes = source.as_bytes().to_vec();
+    let mut i = 0usize;
+    while i < end {
+        let width = source[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+        if bytes[i] != b'\r' && bytes[i] != b'\n' {
+            bytes[i..i + width].fill(b' ');
+        }
+        i += width;
+    }
+    String::from_utf8(bytes)
+        .expect("replacing UTF-8 code points with same-width ASCII spaces preserves UTF-8")
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn decode_legacy(bytes: &[u8], cp: u16) -> Result<String, DecodeError> {
     use std::ffi::CString;
@@ -133,7 +174,76 @@ fn decode_legacy(bytes: &[u8], cp: u16) -> Result<String, DecodeError> {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(target_os = "windows")]
+fn decode_legacy(bytes: &[u8], cp: u16) -> Result<String, DecodeError> {
+    // These code pages reject MB_ERR_INVALID_CHARS by contract. To preserve
+    // this crate's no-lossy-fallback guarantee, reject them instead of asking
+    // Windows to silently replace or drop invalid input.
+    if matches!(
+        cp,
+        42 | 65000 | 50220..=50222 | 50225 | 50227 | 50229 | 57002..=57011
+    ) {
+        return Err(DecodeError::UnsupportedEncoding(format!(
+            "Windows code page {cp} cannot be decoded strictly"
+        )));
+    }
+    let input_len = i32::try_from(bytes.len()).map_err(|_| {
+        DecodeError::InvalidEncoding(format!("Windows code page {cp} input is too large"))
+    })?;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MultiByteToWideChar(
+            code_page: u32,
+            flags: u32,
+            input: *const u8,
+            input_len: i32,
+            output: *mut u16,
+            output_len: i32,
+        ) -> i32;
+        fn GetLastError() -> u32;
+    }
+
+    const MB_ERR_INVALID_CHARS: u32 = 0x0000_0008;
+    let needed = unsafe {
+        MultiByteToWideChar(
+            u32::from(cp),
+            MB_ERR_INVALID_CHARS,
+            bytes.as_ptr(),
+            input_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if needed <= 0 {
+        let error = unsafe { GetLastError() };
+        let message = format!("Windows code page {cp}");
+        return Err(if error == 87 {
+            DecodeError::UnsupportedEncoding(message)
+        } else {
+            DecodeError::InvalidEncoding(message)
+        });
+    }
+    let mut wide = vec![0u16; needed as usize];
+    let written = unsafe {
+        MultiByteToWideChar(
+            u32::from(cp),
+            MB_ERR_INVALID_CHARS,
+            bytes.as_ptr(),
+            input_len,
+            wide.as_mut_ptr(),
+            needed,
+        )
+    };
+    if written != needed {
+        return Err(DecodeError::InvalidEncoding(format!(
+            "Windows code page {cp}"
+        )));
+    }
+    String::from_utf16(&wide)
+        .map_err(|_| DecodeError::InvalidEncoding(format!("Windows code page {cp}")))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn decode_legacy(_bytes: &[u8], cp: u16) -> Result<String, DecodeError> {
     Err(DecodeError::UnsupportedEncoding(format!(
         "Windows code page {cp} on this platform"
@@ -172,5 +282,27 @@ mod tests {
             decode_text(&[0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea], Some(932)).unwrap(),
             "日本語"
         );
+    }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn decodes_vba_cp932_with_windows_nls_and_rejects_incomplete_sequences() {
+        assert_eq!(
+            decode_text(&[0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea], Some(932)).unwrap(),
+            "日本語"
+        );
+        assert!(matches!(
+            decode_text(&[0x82], Some(932)),
+            Err(DecodeError::InvalidEncoding(_))
+        ));
+    }
+    #[test]
+    fn masks_form_designer_preamble_without_shifting_source_locations() {
+        let source = "VERSION 5.00\r\nBegin VB.Form UserForm1\r\nEnd\r\nAttribute VB_Name = \"UserForm1\"\r\nOption Explicit\r\n";
+        let masked = mask_designer_preamble("UserForm1.frm", source);
+        assert_eq!(masked.len(), source.len());
+        assert_eq!(masked.lines().count(), source.lines().count());
+        assert!(!masked.contains("Begin VB.Form"));
+        assert!(masked.contains("Attribute VB_Name"));
+        assert!(mask_designer_preamble("Module1.bas", source).contains("Begin VB.Form"));
     }
 }

@@ -121,8 +121,22 @@ impl<'a> ZipArchive<'a> {
         }
         let flags = u16le(self.data, off + 6).ok_or("truncated local header")?;
         let method = u16le(self.data, off + 8).ok_or("truncated local header")?;
-        if flags & 1 != 0 || method != e.method {
+        if flags != e.flags || flags & 1 != 0 || method != e.method {
             return Err(format!("local and central headers disagree for {}", e.name));
+        }
+        if flags & 0x0008 == 0 {
+            let crc = u32le(self.data, off + 14).ok_or("truncated local header")?;
+            let compressed = u32le(self.data, off + 18).ok_or("truncated local header")?;
+            let uncompressed = u32le(self.data, off + 22).ok_or("truncated local header")?;
+            if crc != e.crc32
+                || compressed as u64 != e.compressed_size
+                || uncompressed as u64 != e.uncompressed_size
+            {
+                return Err(format!(
+                    "local and central sizes or CRC disagree for {}",
+                    e.name
+                ));
+            }
         }
         let nlen = u16le(self.data, off + 26).ok_or("truncated local header")? as usize;
         let xlen = u16le(self.data, off + 28).ok_or("truncated local header")? as usize;
@@ -258,5 +272,13 @@ mod tests {
             a.read(a.find("xl/vbaProject.bin").unwrap()).unwrap(),
             b"hello"
         );
+    }
+    #[test]
+    fn rejects_local_header_crc_or_size_disagreement() {
+        let mut z = zip_one(b"xl/vbaProject.bin", b"abc");
+        z[14] ^= 1;
+        let archive = ZipArchive::open(&z, &Limits::default()).unwrap();
+        let entry = archive.find("xl/vbaProject.bin").unwrap();
+        assert!(archive.read(entry).unwrap_err().contains("CRC"));
     }
 }

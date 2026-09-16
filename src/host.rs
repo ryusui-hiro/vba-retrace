@@ -7,6 +7,18 @@ pub enum HostProfile {
     Excel,
 }
 
+pub(crate) fn direct_host_entry_candidate(trigger: &str) -> bool {
+    matches!(
+        trigger,
+        "legacy_excel_auto_macro_candidate"
+            | "workbook_event_candidate"
+            | "worksheet_event_candidate"
+            | "manual_macro_candidate"
+            | "excel_ontime_scheduled_macro_candidate"
+            | "excel_application_event_handler_candidate"
+    )
+}
+
 pub mod excel {
     /// Excel object-model names that are useful data-access anchors. These are
     /// candidates only; runtime workbook and range binding remain unresolved.
@@ -15,15 +27,31 @@ pub mod excel {
             name.to_ascii_lowercase().as_str(),
             "range"
                 | "cells"
+                | "listobjects"
+                | "listcolumns"
+                | "listrows"
+                | "databodyrange"
+                | "headerrowrange"
+                | "totalsrowrange"
+                | "add"
+                | "delete"
+                | "resize"
                 | "rows"
                 | "columns"
                 | "worksheets"
                 | "sheets"
                 | "workbooks"
                 | "names"
+                | "referstorange"
                 | "offset"
                 | "currentregion"
                 | "usedrange"
+                | "value"
+                | "value2"
+                | "formula"
+                | "formula2"
+                | "formular1c1"
+                | "formula2r1c1"
         )
     }
 
@@ -36,6 +64,7 @@ pub mod excel {
                 | "range"
                 | "name"
                 | "names"
+                | "referstorange"
                 | "workbooks"
                 | "worksheets"
                 | "chart"
@@ -95,13 +124,22 @@ pub mod excel {
             name.to_ascii_lowercase().as_str(),
             "range"
                 | "cells"
+                | "listobjects"
+                | "listcolumns"
+                | "listrows"
+                | "databodyrange"
+                | "headerrowrange"
+                | "totalsrowrange"
                 | "rows"
                 | "columns"
                 | "value"
                 | "value2"
                 | "formula"
-                | "formulatext"
+                | "formula2"
+                | "formular1c1"
+                | "formula2r1c1"
                 | "offset"
+                | "end"
                 | "resize"
                 | "currentregion"
                 | "usedrange"

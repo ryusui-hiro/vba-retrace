@@ -1,8 +1,12 @@
 //! Direct read-only extraction of VBA sources and cache metadata from `.xlsm` files.
 
 use crate::cfb::CompoundFile;
-use crate::compiled::PCodeLineMap;
-use crate::model::Limits;
+use crate::compiled::{
+    PCodeBranchBase, PCodeInstructionSchema, PCodeLineMap, PCodeSemanticPathReport,
+    PCodeSemanticSchema, analyze_pcode_semantic_paths, decode_pcode_lines_with_schema,
+    fingerprint_fnv1a64, inspect_vba7_line_map,
+};
+use crate::model::{Limits, WorkbookCellInfo, WorkbookDefinedNameInfo, WorkbookSheetInfo};
 use crate::ovba::{OvbaProject, parse_project};
 use crate::source::decode_text;
 use crate::zip::ZipArchive;
@@ -13,6 +17,13 @@ pub struct CacheRecord {
     pub byte_length: usize,
     pub fingerprint: u64,
     pub interpretation: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SrpCacheRecord {
+    pub stream_name: String,
+    pub byte_length: usize,
+    pub fingerprint: u64,
 }
 #[derive(Clone, Debug, Default)]
 pub struct ExtractedModule {
@@ -31,24 +42,246 @@ pub struct ExtractedModule {
 #[derive(Clone, Debug, Default)]
 pub struct ExtractedProject {
     pub name: Option<String>,
+    /// Workbook VBA codename from SpreadsheetML `workbookPr`, when present.
+    pub workbook_code_name: Option<String>,
     pub code_page: Option<u16>,
     pub system_kind: Option<u32>,
+    pub project_version_tag: Option<u16>,
     pub modules: Vec<ExtractedModule>,
+    pub workbook_sheets: Vec<WorkbookSheetInfo>,
+    pub workbook_defined_names: Vec<WorkbookDefinedNameInfo>,
+    pub workbook_tables: Vec<crate::model::WorkbookTableInfo>,
+    pub workbook_tables_truncated: bool,
+    pub workbook_cells: Vec<WorkbookCellInfo>,
+    pub workbook_cells_truncated: bool,
     pub references: Vec<String>,
+    pub project_references: Vec<crate::ovba::OvbaReference>,
+    pub identifiers: Vec<String>,
     pub conditional_constants: std::collections::BTreeMap<String, String>,
     pub project_cache: CacheRecord,
+    pub srp_caches: Vec<SrpCacheRecord>,
     pub metadata: Vec<(String, String)>,
     pub diagnostics: Vec<String>,
     pub compiled_representation_status: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct ExtractedModulePCodeAnalysis {
+    pub module_name: String,
+    pub decoded: crate::compiled::PCodeDecodeReport,
+    pub semantic_paths: PCodeSemanticPathReport,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExtractedProjectPCodeAnalysis {
+    pub modules: Vec<ExtractedModulePCodeAnalysis>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PCodeAnalysisOptions {
+    pub profile: crate::compiled::PCodeLayoutProfile,
+    pub max_lines: usize,
+    pub max_modules: usize,
+    pub max_instructions: usize,
+    pub max_paths: usize,
+    pub max_steps: usize,
+    pub branch_base: PCodeBranchBase,
+}
+
+impl Default for PCodeAnalysisOptions {
+    fn default() -> Self {
+        Self {
+            profile: crate::compiled::PCodeLayoutProfile::Vba7Observed,
+            max_lines: 65_535,
+            max_modules: 1_024,
+            max_instructions: 100_000,
+            max_paths: 10_000,
+            max_steps: 100_000,
+            branch_base: PCodeBranchBase::InstructionStart,
+        }
+    }
+}
+
+/// Decode and semantically explore one extracted module's observed compiled
+/// representation with caller-supplied, version-specific schemas. A missing
+/// line map returns `Ok(None)`; no opcode or operand meanings are inferred.
+pub fn analyze_extracted_module_pcode(
+    module: &ExtractedModule,
+    instruction_schema: &PCodeInstructionSchema,
+    semantic_schema: &PCodeSemanticSchema,
+    max_instructions: usize,
+    max_paths: usize,
+    max_steps: usize,
+    branch_base: PCodeBranchBase,
+) -> Result<Option<(crate::compiled::PCodeDecodeReport, PCodeSemanticPathReport)>, String> {
+    let Some(line_map) = module.pcode_layout.as_ref() else {
+        return Ok(None);
+    };
+    let decoded = decode_pcode_lines_with_schema(line_map, instruction_schema, max_instructions)?;
+    let semantic =
+        analyze_pcode_semantic_paths(&decoded, semantic_schema, max_paths, max_steps, branch_base)?;
+    Ok(Some((decoded, semantic)))
+}
+
+/// Options-struct variant of `analyze_extracted_module_pcode`.
+pub fn analyze_extracted_module_pcode_with_options(
+    module: &ExtractedModule,
+    instruction_schema: &PCodeInstructionSchema,
+    semantic_schema: &PCodeSemanticSchema,
+    options: &PCodeAnalysisOptions,
+) -> Result<Option<(crate::compiled::PCodeDecodeReport, PCodeSemanticPathReport)>, String> {
+    analyze_extracted_module_pcode(
+        module,
+        instruction_schema,
+        semantic_schema,
+        options.max_instructions,
+        options.max_paths,
+        options.max_steps,
+        options.branch_base,
+    )
+}
+
+/// Analyze all extracted modules that have a selected p-code line map. Modules
+/// without a map are skipped; the result is bounded by `max_modules` and keeps
+/// the caller-supplied schema status explicit.
+#[allow(clippy::too_many_arguments)]
+pub fn analyze_extracted_project_pcode(
+    project: &ExtractedProject,
+    instruction_schema: &PCodeInstructionSchema,
+    semantic_schema: &PCodeSemanticSchema,
+    max_modules: usize,
+    max_instructions: usize,
+    max_paths: usize,
+    max_steps: usize,
+    branch_base: PCodeBranchBase,
+) -> Result<ExtractedProjectPCodeAnalysis, String> {
+    let mut result = ExtractedProjectPCodeAnalysis::default();
+    for module in &project.modules {
+        if result.modules.len() >= max_modules {
+            result.truncated = true;
+            break;
+        }
+        let Some((decoded, semantic_paths)) = analyze_extracted_module_pcode(
+            module,
+            instruction_schema,
+            semantic_schema,
+            max_instructions,
+            max_paths,
+            max_steps,
+            branch_base,
+        )?
+        else {
+            continue;
+        };
+        result.modules.push(ExtractedModulePCodeAnalysis {
+            module_name: module.name.clone(),
+            decoded,
+            semantic_paths,
+        });
+    }
+    Ok(result)
+}
+
+/// Options-struct variant of `analyze_extracted_project_pcode`.
+pub fn analyze_extracted_project_pcode_with_options(
+    project: &ExtractedProject,
+    instruction_schema: &PCodeInstructionSchema,
+    semantic_schema: &PCodeSemanticSchema,
+    options: &PCodeAnalysisOptions,
+) -> Result<ExtractedProjectPCodeAnalysis, String> {
+    analyze_extracted_project_pcode(
+        project,
+        instruction_schema,
+        semantic_schema,
+        options.max_modules,
+        options.max_instructions,
+        options.max_paths,
+        options.max_steps,
+        options.branch_base,
+    )
+}
+
 pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, String> {
     let zip = ZipArchive::open(data, limits)?;
-    let entry = zip
-        .find("xl/vbaProject.bin")
-        .ok_or_else(|| "OOXML package has no xl/vbaProject.bin part".to_string())?;
+    let package = crate::opc::resolve_xlsm_package(
+        &zip,
+        limits.max_zip_entries,
+        limits.max_workbook_cells,
+        limits.max_workbook_formula_references,
+        limits.max_workbook_formula_cell_links,
+        limits.max_workbook_tables,
+    )?;
+    let entry = zip.find(&package.vba_project_part).ok_or_else(|| {
+        format!(
+            "OOXML VBA project part is missing: {}",
+            package.vba_project_part
+        )
+    })?;
     let bin = zip.read(entry)?;
-    extract_vba_project(&bin, limits)
+    let mut extracted = extract_vba_project(&bin, limits)?;
+    extracted.workbook_code_name = package.workbook_code_name;
+    extracted.workbook_sheets = package.workbook_sheets;
+    extracted.workbook_defined_names = package.workbook_defined_names;
+    extracted.workbook_tables = package.workbook_tables;
+    extracted.workbook_tables_truncated = package.workbook_tables_truncated;
+    extracted.workbook_cells = package.workbook_cells;
+    extracted.workbook_cells_truncated = package.workbook_cells_truncated;
+    extracted.diagnostics.extend(package.workbook_diagnostics);
+    Ok(extracted)
+}
+
+/// Extract an `.xlsm` and attach a caller-selected observed p-code line-map
+/// profile to each module. The raw cache remains unverified; this only applies
+/// the structural profile and preserves malformed/no-map states as metadata.
+pub fn extract_xlsm_with_pcode_profile(
+    data: &[u8],
+    limits: &Limits,
+    profile: crate::compiled::PCodeLayoutProfile,
+    max_lines: usize,
+) -> Result<ExtractedProject, String> {
+    let mut project = extract_xlsm(data, limits)?;
+    attach_pcode_profile(&mut project, profile, max_lines);
+    Ok(project)
+}
+
+fn attach_pcode_profile(
+    project: &mut ExtractedProject,
+    profile: crate::compiled::PCodeLayoutProfile,
+    max_lines: usize,
+) {
+    project.compiled_representation_status =
+        "vba7_observed_line_map_only; opcode semantics are not decoded".into();
+    for module in &mut project.modules {
+        match inspect_vba7_line_map(&module.performance_cache, profile, max_lines) {
+            Ok(Some(map)) => {
+                module.pcode_layout_status = "line_map_parsed_raw_bytes_only".into();
+                module.pcode_layout = Some(map);
+            }
+            Ok(None) => {
+                module.pcode_layout_status = "no_valid_line_map_found_for_selected_profile".into();
+            }
+            Err(error) => {
+                module.pcode_layout_status = "malformed_line_map".into();
+                project
+                    .diagnostics
+                    .push(format!("{} p-code layout: {error}", module.name));
+            }
+        }
+    }
+}
+
+/// Extract a raw VBA project binary and attach a caller-selected observed
+/// p-code line-map profile to its modules.
+pub fn extract_vba_project_with_pcode_profile(
+    data: &[u8],
+    limits: &Limits,
+    profile: crate::compiled::PCodeLayoutProfile,
+    max_lines: usize,
+) -> Result<ExtractedProject, String> {
+    let mut project = extract_vba_project(data, limits)?;
+    attach_pcode_profile(&mut project, profile, max_lines);
+    Ok(project)
 }
 
 pub fn extract_vba_project(data: &[u8], limits: &Limits) -> Result<ExtractedProject, String> {
@@ -59,6 +292,7 @@ pub fn extract_vba_project(data: &[u8], limits: &Limits) -> Result<ExtractedProj
     let project = cfb.stream_by_path("PROJECT")?;
     let cache = cfb.stream_by_path("VBA/_VBA_PROJECT")?;
     let mut streams = Vec::new();
+    let mut srp_caches = Vec::new();
     let mut total = 0usize;
     for e in &cfb.entries {
         if e.kind != 2
@@ -75,6 +309,14 @@ pub fn extract_vba_project(data: &[u8], limits: &Limits) -> Result<ExtractedProj
         if total > limits.max_decompressed_bytes {
             return Err("total VBA streams exceed configured limit".into());
         }
+        if is_srp_stream_path(&e.path) {
+            srp_caches.push(SrpCacheRecord {
+                stream_name: e.name.clone(),
+                byte_length: bytes.len(),
+                fingerprint: fingerprint_fnv1a64(&bytes),
+            });
+            continue;
+        }
         let name = e.path.rsplit('/').next().unwrap_or(&e.name).to_string();
         streams.push((name, bytes));
     }
@@ -86,7 +328,32 @@ pub fn extract_vba_project(data: &[u8], limits: &Limits) -> Result<ExtractedProj
         limits.max_decompressed_bytes,
         limits.max_modules,
     )?;
-    Ok(convert(ovba))
+    let mut extracted = convert(ovba);
+    extracted.srp_caches = srp_caches;
+    if let Some(Ok(idents)) = cache
+        .as_deref()
+        .map(crate::pcode::parse_vba_project_identifiers)
+    {
+        extracted.identifiers = idents;
+    }
+    Ok(extracted)
+}
+
+fn is_srp_stream_path(path: &str) -> bool {
+    let mut parts = path.split('/');
+    matches!((parts.next(), parts.next(), parts.next()), (Some(storage), Some(name), None)
+        if storage.eq_ignore_ascii_case("VBA") && is_srp_stream_name(name))
+}
+
+fn is_srp_stream_name(name: &str) -> bool {
+    let Some(hex) = name.strip_prefix("__SRP_").or_else(|| {
+        name.get(..6)
+            .filter(|prefix| prefix.eq_ignore_ascii_case("__SRP_"))
+            .map(|_| &name[6..])
+    }) else {
+        return false;
+    };
+    (1..=25).contains(&hex.len()) && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn convert(p: OvbaProject) -> ExtractedProject {
@@ -94,12 +361,14 @@ fn convert(p: OvbaProject) -> ExtractedProject {
         name: p.name,
         code_page: p.code_page,
         system_kind: p.system_kind,
+        project_version_tag: p.project_version,
         references: p.references,
+        project_references: p.project_references,
         conditional_constants: p.compile_constants,
         ..ExtractedProject::default()
     };
     result.compiled_representation_status =
-        "opaque_version_dependent_performance_cache; not disassembled or verified".into();
+        "opaque_version_dependent_performance_cache; SRP streams inventoried; not disassembled or verified".into();
     result.project_cache=CacheRecord{module:"<project>".into(),byte_length:p.project_performance_cache_len,fingerprint:p.project_performance_cache_fingerprint,interpretation:"MS-OVBA performance cache is implementation/version dependent and MUST be ignored on read".into()};
     result.metadata.push((
         "VBA project version field".into(),
@@ -141,9 +410,19 @@ pub fn sources_from_extracted(project: &ExtractedProject) -> Vec<crate::model::S
         .modules
         .iter()
         .filter_map(|m| {
-            m.source_text.as_ref().map(|text| crate::model::SourceUnit {
-                name: m.name.clone(),
-                text: text.clone(),
+            m.source_text.as_ref().map(|text| {
+                let extension = match m.module_type.as_deref() {
+                    Some("procedural") => Some("bas"),
+                    Some("document_or_class") => Some("cls"),
+                    _ => None,
+                };
+                let name = extension
+                    .map(|ext| format!("{}.{}", m.name, ext))
+                    .unwrap_or_else(|| m.name.clone());
+                crate::model::SourceUnit {
+                    name,
+                    text: text.clone(),
+                }
             })
         })
         .collect()
@@ -154,6 +433,97 @@ pub fn decode_extracted_bytes(
     code_page: Option<u16>,
 ) -> Result<String, String> {
     decode_text(&module.source_bytes, code_page).map_err(|e| e.to_string())
+}
+
+/// Automatically determine whether input bytes are an OOXML ZIP package
+/// (`.xlsm`, `.xlsb`, `.docm`, `.pptm`, etc.) or a raw CFB compound binary
+/// (`vbaProject.bin`, legacy `.xls`), and extract the VBA project accordingly.
+pub fn extract_macro_container(data: &[u8], limits: &Limits) -> Result<ExtractedProject, String> {
+    if data.starts_with(b"PK\x03\x04") {
+        extract_xlsm(data, limits)
+    } else if data.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
+        extract_vba_project(data, limits)
+    } else {
+        Err("unrecognized macro container format (expected ZIP or CFB/OLE header)".into())
+    }
+}
+
+/// Disassemble P-code for an extracted module using the standard built-in opcode tables.
+pub fn disassemble_extracted_module(
+    module: &ExtractedModule,
+    identifiers: &[String],
+    is_64bit: bool,
+    vba_ver: u16,
+) -> Result<crate::pcode::DisassembledPCodeModule, String> {
+    crate::pcode::disassemble_pcode_module(
+        &module.name,
+        &module.performance_cache,
+        module.text_offset,
+        identifiers,
+        is_64bit,
+        vba_ver,
+    )
+}
+
+/// Disassemble P-code for all modules in an extracted project using built-in standard tables.
+pub fn disassemble_extracted_project(
+    project: &ExtractedProject,
+) -> Result<Vec<crate::pcode::DisassembledPCodeModule>, String> {
+    let is_64bit = project.system_kind == Some(3);
+    let vba_ver = if let Some(tag) = project.project_version_tag {
+        if tag >= 0x97 {
+            7
+        } else if tag >= 0x6B {
+            6
+        } else {
+            5
+        }
+    } else {
+        7
+    };
+
+    let mut results = Vec::new();
+    for module in &project.modules {
+        if !module.performance_cache.is_empty() {
+            let Ok(disasm) =
+                disassemble_extracted_module(module, &project.identifiers, is_64bit, vba_ver)
+            else {
+                continue;
+            };
+            results.push(disasm);
+        }
+    }
+    Ok(results)
+}
+
+/// Check the entire extracted project for VBA Stomping and tampering indicators.
+pub fn detect_project_stomping(
+    project: &ExtractedProject,
+) -> Result<crate::stomping::ProjectStompingReport, String> {
+    let disasms = disassemble_extracted_project(project)?;
+    let mut module_reports = Vec::new();
+    let mut max_severity = crate::stomping::StompingSeverity::Clean;
+
+    for module in &project.modules {
+        let matching_disasm = disasms.iter().find(|d| d.module_name == module.name);
+        let report = crate::stomping::detect_vba_stomping(
+            &module.name,
+            module.source_text.as_deref(),
+            matching_disasm,
+        );
+        if report.severity > max_severity {
+            max_severity = report.severity;
+        }
+        module_reports.push(report);
+    }
+
+    let has_stomping = module_reports.iter().any(|r| r.is_stomped);
+
+    Ok(crate::stomping::ProjectStompingReport {
+        overall_severity: max_severity,
+        has_stomping,
+        modules: module_reports,
+    })
 }
 
 #[cfg(test)]
@@ -168,26 +538,460 @@ mod tests {
                 .contains("ZIP")
         );
     }
+
+    #[test]
+    fn pcode_analysis_defaults_are_bounded_and_profile_explicit() {
+        let options = PCodeAnalysisOptions::default();
+        assert_eq!(
+            options.profile,
+            crate::compiled::PCodeLayoutProfile::Vba7Observed
+        );
+        assert!(options.max_lines > 0);
+        assert!(options.max_modules > 0);
+        assert!(options.max_instructions > 0);
+        assert!(options.max_paths > 0);
+        assert!(options.max_steps > 0);
+        assert_eq!(
+            options.branch_base,
+            crate::compiled::PCodeBranchBase::InstructionStart
+        );
+    }
+
+    #[test]
+    fn runs_caller_supplied_pcode_semantics_from_an_extracted_module() {
+        let module = ExtractedModule {
+            name: "Mod1".into(),
+            pcode_layout: Some(crate::compiled::PCodeLineMap {
+                profile: crate::compiled::PCodeLayoutProfile::Vba7Observed,
+                cafe_offset: 0,
+                profile_header_raw: [0, 0],
+                line_count: 1,
+                directory_offset: 6,
+                code_table_offset: 28,
+                code_bytes_total: 8,
+                lines: vec![crate::compiled::PCodeLineSegment {
+                    source_line: 0,
+                    line_length: 8,
+                    record_prefix_raw: [0; 4],
+                    record_middle_raw: [0; 2],
+                    relative_code_offset_raw: 0,
+                    cache_offset: Some(100),
+                    raw_bytes: vec![0x01, 0x00, 0x06, 0x00, 0x02, 0x00, 0x03, 0x00],
+                    raw_word_count: 4,
+                    has_partial_word: false,
+                }],
+                mnemonics_decoded: false,
+            }),
+            ..ExtractedModule::default()
+        };
+        let instruction_schema = crate::compiled::PCodeInstructionSchema {
+            id: "extracted-branch".into(),
+            opcode_mask: 0xffff,
+            opcode_shift: 0,
+            operation_type_mask: 0,
+            operation_type_shift: 0,
+            definitions: vec![
+                crate::compiled::PCodeOpcodeDefinition {
+                    opcode: 1,
+                    operation_type: None,
+                    mnemonic: "Branch".into(),
+                    operands: vec![crate::compiled::PCodeOperandEncoding::SignedWord16],
+                },
+                crate::compiled::PCodeOpcodeDefinition {
+                    opcode: 2,
+                    operation_type: None,
+                    mnemonic: "ReturnFallthrough".into(),
+                    operands: Vec::new(),
+                },
+                crate::compiled::PCodeOpcodeDefinition {
+                    opcode: 3,
+                    operation_type: None,
+                    mnemonic: "ReturnTarget".into(),
+                    operands: Vec::new(),
+                },
+            ],
+        };
+        let semantic_schema = crate::compiled::PCodeSemanticSchema {
+            id: "extracted-branch".into(),
+            max_stack: 4,
+            definitions: vec![
+                crate::compiled::PCodeSemanticDefinition {
+                    opcode: 1,
+                    operation_type: None,
+                    actions: vec![crate::compiled::PCodeSemanticAction::BranchRelative {
+                        operand_index: 0,
+                    }],
+                },
+                crate::compiled::PCodeSemanticDefinition {
+                    opcode: 2,
+                    operation_type: None,
+                    actions: vec![crate::compiled::PCodeSemanticAction::Return {
+                        has_value: false,
+                    }],
+                },
+                crate::compiled::PCodeSemanticDefinition {
+                    opcode: 3,
+                    operation_type: None,
+                    actions: vec![crate::compiled::PCodeSemanticAction::Return {
+                        has_value: false,
+                    }],
+                },
+            ],
+        };
+        let (_, semantic) = analyze_extracted_module_pcode(
+            &module,
+            &instruction_schema,
+            &semantic_schema,
+            16,
+            4,
+            8,
+            crate::compiled::PCodeBranchBase::InstructionStart,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(semantic.paths.len(), 2);
+        assert!(semantic.paths.iter().all(|path| path.complete));
+        let project_analysis = analyze_extracted_project_pcode(
+            &ExtractedProject {
+                modules: vec![module.clone(), ExtractedModule::default()],
+                ..ExtractedProject::default()
+            },
+            &instruction_schema,
+            &semantic_schema,
+            4,
+            16,
+            4,
+            8,
+            crate::compiled::PCodeBranchBase::InstructionStart,
+        )
+        .unwrap();
+        assert_eq!(project_analysis.modules.len(), 1);
+        assert_eq!(project_analysis.modules[0].module_name, "Mod1");
+        assert!(!project_analysis.truncated);
+        assert!(
+            analyze_extracted_module_pcode(
+                &ExtractedModule::default(),
+                &instruction_schema,
+                &semantic_schema,
+                16,
+                4,
+                8,
+                crate::compiled::PCodeBranchBase::InstructionStart,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
     #[test]
     fn extracts_module_from_synthetic_xlsm_package() {
         let bin = fixture_cfb();
+        let raw_profiled = extract_vba_project_with_pcode_profile(
+            &bin,
+            &Limits::default(),
+            crate::compiled::PCodeLayoutProfile::Vba7Observed,
+            65_535,
+        )
+        .unwrap();
+        assert_eq!(raw_profiled.modules.len(), 1);
+        assert_eq!(
+            raw_profiled.modules[0].pcode_layout_status,
+            "no_valid_line_map_found_for_selected_profile"
+        );
         let x = extract_xlsm(&fixture_zip(&bin), &Limits::default()).unwrap();
+        let profiled = extract_xlsm_with_pcode_profile(
+            &fixture_zip(&bin),
+            &Limits::default(),
+            crate::compiled::PCodeLayoutProfile::Vba7Observed,
+            65_535,
+        )
+        .unwrap();
+        assert!(
+            profiled
+                .compiled_representation_status
+                .contains("line_map_only")
+        );
+        assert_eq!(
+            profiled.modules[0].pcode_layout_status,
+            "no_valid_line_map_found_for_selected_profile"
+        );
         assert_eq!(x.name.as_deref(), Some("TestProject"));
         assert_eq!(x.code_page, Some(1252));
         assert_eq!(x.system_kind, Some(1));
+        assert_eq!(x.project_version_tag, Some(0x3164));
+        assert_eq!(x.workbook_code_name.as_deref(), Some("MainBookCode"));
         assert_eq!(
             x.conditional_constants.get("Win64").map(String::as_str),
             Some("1")
         );
         assert_eq!(x.modules.len(), 1);
         assert_eq!(x.modules[0].name, "Mod1");
+        assert_eq!(x.workbook_sheets.len(), 2);
+        assert_eq!(x.workbook_sheets[0].name, "Orders");
+        assert_eq!(
+            x.workbook_sheets[0].code_name.as_deref(),
+            Some("OrdersCode")
+        );
+        assert_eq!(x.workbook_sheets[0].sheet_id, Some(1));
+        assert_eq!(x.workbook_sheets[0].kind, "worksheet");
+        assert_eq!(
+            x.workbook_sheets[0].part_name.as_deref(),
+            Some("xl/worksheets/sheet1.xml")
+        );
+        assert_eq!(x.workbook_sheets[0].resolution, "resolved_internal");
+        assert_eq!(x.workbook_sheets[1].state.as_deref(), Some("veryHidden"));
+        assert_eq!(
+            x.workbook_sheets[1].part_name.as_deref(),
+            Some("xl/worksheets/sheet2.xml")
+        );
+        assert_eq!(x.workbook_defined_names.len(), 4);
+        assert_eq!(x.workbook_defined_names[0].name, "TaxRate");
+        assert_eq!(x.workbook_defined_names[0].formula, "0.075");
+        assert_eq!(
+            x.workbook_defined_names[0].scope_resolution,
+            "workbook_scope"
+        );
+        assert_eq!(x.workbook_defined_names[1].name, "OrdersData");
+        assert_eq!(x.workbook_defined_names[1].formula, "'Orders'!$A$1:$B$10");
+        assert_eq!(x.workbook_defined_names[1].local_sheet_id, Some(0));
+        assert_eq!(
+            x.workbook_defined_names[1].local_sheet_name.as_deref(),
+            Some("Orders")
+        );
+        assert_eq!(
+            x.workbook_defined_names[1].scope_resolution,
+            "sheet_scope_candidate"
+        );
+        assert_eq!(
+            x.workbook_defined_names[1].formula_reference_resolution,
+            "partial_formula_reference_scan"
+        );
+        assert_eq!(
+            x.workbook_defined_names[1]
+                .formula_reference_candidates
+                .len(),
+            1
+        );
+        assert_eq!(
+            x.workbook_defined_names[1].formula_reference_candidates[0].reference,
+            "'Orders'!$A$1:$B$10"
+        );
+        assert_eq!(
+            x.workbook_defined_names[1].formula_reference_candidates[0].workbook_cell_indices,
+            vec![0, 1, 6, 7]
+        );
+        assert_eq!(x.workbook_defined_names[2].hidden, Some(true));
+        assert!(x.workbook_defined_names[2].built_in);
+        assert_eq!(x.workbook_defined_names[3].formula, "=\"A\"&\"B\"");
+        assert_eq!(x.workbook_cells.len(), 9);
+        assert_eq!(x.workbook_cells[0].cell_ref, "A1");
+        assert_eq!(x.workbook_cells[0].row, Some(1));
+        assert_eq!(x.workbook_cells[0].column, Some(1));
+        assert_eq!(x.workbook_cells[0].value.as_deref(), Some("10"));
+        assert_eq!(x.workbook_cells[1].value.as_deref(), Some("Shared & Text"));
+        assert_eq!(x.workbook_cells[1].resolution, "shared_string");
+        assert_eq!(x.workbook_cells[2].value.as_deref(), Some(" Inline Text "));
+        assert_eq!(x.workbook_cells[2].resolution, "inline_string");
+        assert_eq!(
+            x.workbook_cells[3].formula.as_deref(),
+            Some("A1+TaxRate+OrdersTable[Shared & Text]")
+        );
+        assert_eq!(x.workbook_cells[3].stored_value.as_deref(), Some("11"));
+        assert_eq!(x.workbook_cells[3].resolution, "formula_cached_value");
+        assert_eq!(x.workbook_cells[3].formula_reference_candidates.len(), 3);
+        assert_eq!(
+            x.workbook_cells[3].formula_reference_candidates[0].reference,
+            "A1"
+        );
+        assert_eq!(
+            x.workbook_cells[3].formula_reference_candidates[0].workbook_cell_indices,
+            vec![0]
+        );
+        assert_eq!(
+            x.workbook_cells[3].formula_reference_candidates[1].reference,
+            "TaxRate"
+        );
+        assert_eq!(
+            x.workbook_cells[3].formula_reference_candidates[1].defined_name_index_candidate,
+            Some(0)
+        );
+        assert_eq!(
+            x.workbook_cells[3].formula_reference_candidates[1]
+                .defined_name_resolution
+                .as_deref(),
+            Some("workbook_defined_name_candidate")
+        );
+        let table_reference = &x.workbook_cells[3].formula_reference_candidates[2];
+        assert_eq!(
+            table_reference.reference_kind,
+            "structured_table_reference_candidate"
+        );
+        assert_eq!(table_reference.table_index_candidate, Some(0));
+        assert_eq!(table_reference.table_column_index_candidate, Some(1));
+        assert_eq!(table_reference.workbook_cell_indices, vec![7]);
+        assert_eq!(x.workbook_cells[4].value.as_deref(), Some("true"));
+        assert_eq!(x.workbook_cells[5].value.as_deref(), Some("Rich Text"));
+        assert_eq!(x.workbook_cells[8].sheet_name, "Archive");
+        assert_eq!(x.workbook_tables.len(), 1);
+        assert_eq!(x.workbook_tables[0].display_name, "OrdersTable");
+        assert_eq!(x.workbook_tables[0].sheet_name, "Orders");
+        assert_eq!(
+            x.workbook_tables[0].cell_range_bounds,
+            Some(crate::model::CellRangeBounds {
+                first_row: 1,
+                first_column: 1,
+                last_row: 2,
+                last_column: 2,
+            })
+        );
+        assert_eq!(x.workbook_tables[0].columns, vec!["10", "Shared & Text"]);
+        assert_eq!(x.workbook_tables[0].resolution, "resolved_internal");
+        assert!(!x.workbook_cells_truncated);
+        let bounded = extract_xlsm(
+            &fixture_zip(&bin),
+            &Limits {
+                max_workbook_cells: 3,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(bounded.workbook_cells.len(), 3);
+        assert!(bounded.workbook_cells_truncated);
+        let tables_bounded = extract_xlsm(
+            &fixture_zip(&bin),
+            &Limits {
+                max_workbook_tables: 0,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        assert!(tables_bounded.workbook_tables.is_empty());
+        assert!(tables_bounded.workbook_tables_truncated);
         assert_eq!(
             x.modules[0].source_text.as_deref(),
-            Some("Public Sub Hello()\r\nEnd Sub\r\n")
+            Some(
+                "Public Sub S()\r\nx=ThisWorkbook.Worksheets(\"Orders\").Range(\"A1\").Value\r\nEnd Sub\r\n"
+            )
         );
         assert_eq!(x.modules[0].cache.byte_length, 2);
         assert!(x.compiled_representation_status.contains("opaque"));
+        assert_eq!(x.srp_caches.len(), 1);
+        assert_eq!(x.srp_caches[0].stream_name, "__SRP_A1B2");
+        assert_eq!(x.srp_caches[0].byte_length, 3);
+        assert_eq!(
+            x.srp_caches[0].fingerprint,
+            fingerprint_fnv1a64(&[0x53, 0x52, 0x50])
+        );
         assert_eq!(x.references[0], "stdole");
+        assert_eq!(x.project_references.len(), 1);
+        assert_eq!(x.project_references[0].kind, "registered_type_library");
+        assert_eq!(x.project_references[0].name.as_deref(), Some("stdole"));
+        assert_eq!(sources_from_extracted(&x)[0].name, "Mod1.bas");
+        let (analysis, full_extract) = crate::analyze_xlsm(
+            &fixture_zip(&bin),
+            &crate::AnalysisOptions {
+                host_profile: crate::host::HostProfile::Excel,
+                ..crate::AnalysisOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(full_extract.modules[0].name, "Mod1");
+        assert_eq!(analysis.project.input_kind, "xlsm_vba_project");
+        assert_eq!(analysis.host_profile, crate::host::HostProfile::Excel);
+        assert_eq!(analysis.project.name.as_deref(), Some("TestProject"));
+        assert_eq!(
+            analysis
+                .project
+                .conditional_constants
+                .get("Win64")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            analysis.project.modules[0]
+                .conditional_constants
+                .get("win64")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            analysis.project.modules[0].module_kind.as_deref(),
+            Some("standard")
+        );
+        assert_eq!(analysis.project.modules[0].procedures[0].name, "S");
+        assert_eq!(analysis.excel_worksheet_accesses.len(), 1);
+        assert_eq!(
+            analysis.excel_worksheet_accesses[0].workbook_cell_indices,
+            vec![0]
+        );
+        assert!(analysis.data_access_value_flows.iter().any(|flow| {
+            flow.excel_worksheet_access_index == Some(0)
+                && flow.role == "excel_read_to_variable_candidate"
+        }));
+        let structure_json = crate::export::to_json(
+            &analysis,
+            Some(&full_extract),
+            crate::export::Disclosure::StructureOnly,
+        );
+        assert!(structure_json.contains("\"srp_cache_count\": 1"));
+        assert!(structure_json.contains("\"stream_name\":null"));
+        assert!(!structure_json.contains("__SRP_A1B2"));
+        assert!(structure_json.contains("\"table_count\":1"));
+        assert!(structure_json.contains("\"tables\":null"));
+        assert!(!structure_json.contains("OrdersTable"));
+        let source_json = crate::export::to_json(
+            &analysis,
+            Some(&full_extract),
+            crate::export::Disclosure::IncludeSource,
+        );
+        assert!(source_json.contains("__SRP_A1B2"));
+        assert!(source_json.contains("opaque version-dependent SRP cache; ignored on read"));
+        assert!(source_json.contains("\"table_count\":1"));
+        assert!(source_json.contains("structured_table_reference_candidate"));
+        assert!(source_json.contains("\"table_id_candidate\":0"));
+        assert!(source_json.contains("\"workbook_cell_ids\":[7]"));
+        assert!(source_json.contains("OrdersTable"));
+    }
+
+    #[test]
+    fn follows_workbook_relationship_to_a_nonconventional_vba_part_path() {
+        let bin = fixture_cfb();
+        let package =
+            fixture_zip_with_vba_part(&bin, "custom/vba-project.bin", "../custom/vba-project.bin");
+        let extracted = extract_xlsm(&package, &Limits::default()).unwrap();
+        assert_eq!(extracted.modules.len(), 1);
+        assert_eq!(extracted.modules[0].name, "Mod1");
+        assert_eq!(
+            extracted.modules[0].source_text.as_deref(),
+            Some(
+                "Public Sub S()\r\nx=ThisWorkbook.Worksheets(\"Orders\").Range(\"A1\").Value\r\nEnd Sub\r\n"
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_an_external_vba_project_relationship_without_fetching_it() {
+        let package = fixture_zip_with_vba_part_mode(
+            b"not fetched",
+            "custom/vba-project.bin",
+            "https://example.invalid/vba-project.bin",
+            Some("External"),
+        );
+        let error = extract_xlsm(&package, &Limits::default()).unwrap_err();
+        assert!(error.contains("VBA project relationship must target a package part"));
+    }
+
+    #[test]
+    fn recognizes_only_spec_shaped_srp_stream_names_in_the_vba_storage() {
+        assert!(is_srp_stream_name("__SRP_A"));
+        assert!(is_srp_stream_name("__srp_0123456789abcdef012345678"));
+        assert!(!is_srp_stream_name("__SRP_"));
+        assert!(!is_srp_stream_name("__SRP_G"));
+        assert!(!is_srp_stream_name("__SRP_0123456789abcdef0123456789"));
+        assert!(is_srp_stream_path("VBA/__SRP_A1B2"));
+        assert!(is_srp_stream_path("vba/__srp_a1b2"));
+        assert!(!is_srp_stream_path("VBA/Sub/__SRP_A1B2"));
+        assert!(!is_srp_stream_path("Other/__SRP_A1B2"));
     }
     fn record(id: u16, payload: &[u8], out: &mut Vec<u8>) {
         out.extend_from_slice(&id.to_le_bytes());
@@ -288,10 +1092,12 @@ mod tests {
         let dir = comp(&dir);
         let project = b"Name=TestProject\r\nReference=stdole\r\n".to_vec();
         let vcache = vec![0xcc, 0x61, 0xff, 0xff, 0, 0, 0];
-        let source = comp(b"Public Sub Hello()\r\nEnd Sub\r\n");
+        let source = comp(
+            b"Public Sub S()\r\nx=ThisWorkbook.Worksheets(\"Orders\").Range(\"A1\").Value\r\nEnd Sub\r\n",
+        );
         let mut module = vec![0xde, 0xad];
         module.extend_from_slice(&source);
-        let mut mini = vec![0u8; 576];
+        let mut mini = vec![0u8; 704];
         let mut at = 0;
         mini[at..at + dir.len()].copy_from_slice(&dir);
         at = 384;
@@ -300,7 +1106,9 @@ mod tests {
         mini[at..at + vcache.len()].copy_from_slice(&vcache);
         at = 512;
         mini[at..at + module.len()].copy_from_slice(&module);
-        // The directory occupies mini-sectors 0..5; the other streams occupy 6, 7, and 8.
+        at = 640;
+        mini[at..at + 3].copy_from_slice(&[0x53, 0x52, 0x50]);
+        // The directory occupies mini-sectors 0..5; the other streams occupy 6..10.
         let mut dir_entries = vec![0u8; 1024];
         entry(
             &mut dir_entries,
@@ -311,7 +1119,7 @@ mod tests {
             0xffff_ffff,
             1,
             4,
-            576,
+            704,
         );
         entry(
             &mut dir_entries,
@@ -352,7 +1160,7 @@ mod tests {
             "_VBA_PROJECT",
             2,
             0xffff_ffff,
-            0xffff_ffff,
+            6,
             0xffff_ffff,
             4,
             7,
@@ -367,6 +1175,17 @@ mod tests {
             0xffff_ffff,
             6,
             project.len() as u64,
+        );
+        entry(
+            &mut dir_entries,
+            6,
+            "__SRP_A1B2",
+            2,
+            0xffff_ffff,
+            0xffff_ffff,
+            0xffff_ffff,
+            10,
+            3,
         );
         let mut file = vec![0u8; 512 + 6 * 512];
         file[..8].copy_from_slice(&[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
@@ -402,13 +1221,16 @@ mod tests {
         put32(&mut file, 2060, 4);
         put32(&mut file, 2064, 5);
         put32(&mut file, 2068, 0xffff_fffe);
-        for i in 5..9 {
+        for i in 5..10 {
             put32(&mut file, 2048 + i * 4, 0xffff_fffe);
         }
-        for i in 8..128 {
+        put32(&mut file, 2048 + 8 * 4, 9);
+        put32(&mut file, 2048 + 9 * 4, 0xffff_fffe);
+        put32(&mut file, 2048 + 10 * 4, 0xffff_fffe);
+        for i in 11..128 {
             put32(&mut file, 2048 + i * 4, 0xffff_ffff);
         }
-        file[2560..3136].copy_from_slice(&mini);
+        file[2560..2560 + mini.len()].copy_from_slice(&mini);
         file
     }
     #[allow(clippy::too_many_arguments)]
@@ -446,40 +1268,102 @@ mod tests {
         b[i..i + 4].copy_from_slice(&v.to_le_bytes());
     }
     fn fixture_zip(payload: &[u8]) -> Vec<u8> {
-        let name = b"xl/vbaProject.bin";
-        let crc = crc32(payload);
+        fixture_zip_with_vba_part_mode(payload, "xl/vbaProject.bin", "vbaProject.bin", None)
+    }
+
+    fn fixture_zip_with_vba_part(payload: &[u8], part_name: &str, target: &str) -> Vec<u8> {
+        fixture_zip_with_vba_part_mode(payload, part_name, target, None)
+    }
+
+    fn fixture_zip_with_vba_part_mode(
+        payload: &[u8],
+        part_name: &str,
+        target: &str,
+        target_mode: Option<&str>,
+    ) -> Vec<u8> {
+        let package_relationships = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
+        let target_mode = target_mode
+            .map(|mode| format!(" TargetMode=\"{mode}\""))
+            .unwrap_or_default();
+        let workbook_relationships = format!(
+            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"{target}\"{target_mode}/><Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet2.xml\"/><Relationship Id=\"rId4\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings\" Target=\"sharedStrings.xml\"/></Relationships>"
+        );
+        let content_types = format!(
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.ms-excel.sheet.macroEnabled.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/><Override PartName=\"/xl/worksheets/sheet2.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/><Override PartName=\"/xl/sharedStrings.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml\"/><Override PartName=\"/xl/tables/table1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml\"/><Override PartName=\"/{part_name}\" ContentType=\"application/vnd.ms-office.vbaProject\"/></Types>"
+        );
+        let workbook = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><workbookPr codeName=\"MainBookCode\"/><sheets><sheet name=\"Orders\" sheetId=\"1\" r:id=\"rId2\"/><sheet name=\"Archive\" sheetId=\"2\" state=\"veryHidden\" r:id=\"rId3\"/></sheets><definedNames><definedName name=\"TaxRate\">0.075</definedName><definedName name=\"OrdersData\" localSheetId=\"0\">'Orders'!$A$1:$B$10</definedName><definedName name=\"_xlnm.Print_Area\" localSheetId=\"0\" hidden=\"1\">'Orders'!$A$1:$B$10</definedName><definedName name=\"FormulaJoin\">=&quot;A&quot;&amp;&quot;B&quot;</definedName></definedNames></workbook>";
+        let sheet1 = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetPr codeName=\"OrdersCode\"/><sheetData><row r=\"1\"><c r=\"A1\"><v>10</v></c><c r=\"B1\" t=\"s\"><v>0</v></c><c r=\"C1\" t=\"inlineStr\"><is><t xml:space=\"preserve\"> Inline Text </t></is></c><c r=\"D1\"><f>A1+TaxRate+OrdersTable[Shared &amp; Text]</f><v>11</v></c><c r=\"E1\" t=\"b\"><v>1</v></c><c r=\"F1\" t=\"s\"><v>1</v></c></row><row r=\"2\"><c r=\"A2\"><v>20</v></c><c r=\"B2\" t=\"inlineStr\"><is><t>OK</t></is></c></row></sheetData><tableParts count=\"1\"><tablePart r:id=\"rId1\"/></tableParts></worksheet>";
+        let sheet2 = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\"><c r=\"A1\"><v>3</v></c></row></sheetData></worksheet>";
+        let sheet1_relationships = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/table\" Target=\"../tables/table1.xml\"/></Relationships>";
+        let table1 = "<table xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" id=\"1\" name=\"OrdersTable\" displayName=\"OrdersTable\" ref=\"A1:B2\" headerRowCount=\"1\" totalsRowCount=\"0\"><autoFilter ref=\"A1:B2\"/><tableColumns count=\"2\"><tableColumn id=\"1\" name=\"10\"/><tableColumn id=\"2\" name=\"Shared &amp; Text\"/></tableColumns></table>";
+        let shared_strings = "<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" count=\"2\" uniqueCount=\"2\"><si><t>Shared &amp; Text</t></si><si><r><t>Rich</t></r><r><t xml:space=\"preserve\"> Text</t></r></si></sst>";
+        let entries = [
+            ("[Content_Types].xml", content_types.as_bytes()),
+            ("_rels/.rels", package_relationships.as_bytes()),
+            ("xl/workbook.xml", workbook.as_bytes()),
+            (
+                "xl/_rels/workbook.xml.rels",
+                workbook_relationships.as_bytes(),
+            ),
+            ("xl/worksheets/sheet1.xml", sheet1.as_bytes()),
+            (
+                "xl/worksheets/_rels/sheet1.xml.rels",
+                sheet1_relationships.as_bytes(),
+            ),
+            ("xl/worksheets/sheet2.xml", sheet2.as_bytes()),
+            ("xl/sharedStrings.xml", shared_strings.as_bytes()),
+            ("xl/tables/table1.xml", table1.as_bytes()),
+            (part_name, payload),
+        ];
         let mut z = Vec::new();
-        z.extend_from_slice(&0x04034b50u32.to_le_bytes());
-        z.extend_from_slice(&20u16.to_le_bytes());
-        z.extend_from_slice(&0u16.to_le_bytes());
-        z.extend_from_slice(&0u16.to_le_bytes());
-        z.extend_from_slice(&[0; 4]);
-        z.extend_from_slice(&crc.to_le_bytes());
-        z.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        z.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        z.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        z.extend_from_slice(&0u16.to_le_bytes());
-        z.extend_from_slice(name);
-        z.extend_from_slice(payload);
+        let mut records = Vec::new();
+        for (name, payload) in &entries {
+            let name = name.as_bytes();
+            let crc = crc32(payload);
+            let local_offset = z.len() as u32;
+            z.extend_from_slice(&0x04034b50u32.to_le_bytes());
+            z.extend_from_slice(&20u16.to_le_bytes());
+            z.extend_from_slice(&0u16.to_le_bytes());
+            z.extend_from_slice(&0u16.to_le_bytes());
+            z.extend_from_slice(&[0; 4]);
+            z.extend_from_slice(&crc.to_le_bytes());
+            z.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            z.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            z.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            z.extend_from_slice(&0u16.to_le_bytes());
+            z.extend_from_slice(name);
+            z.extend_from_slice(payload);
+            records.push((name, crc, payload.len() as u32, local_offset));
+        }
         let cd = z.len();
-        z.extend_from_slice(&0x02014b50u32.to_le_bytes());
-        z.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        z.extend_from_slice(&crc.to_le_bytes());
-        z.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        z.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        z.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        z.extend_from_slice(&[0; 6]);
-        z.extend_from_slice(&[0; 6]);
-        z.extend_from_slice(&0u32.to_le_bytes());
-        z.extend_from_slice(name);
+        for (name, crc, size, local_offset) in &records {
+            z.extend_from_slice(&0x02014b50u32.to_le_bytes());
+            z.extend_from_slice(&[20, 0, 20, 0, 0, 0]);
+            z.extend_from_slice(&0u16.to_le_bytes());
+            z.extend_from_slice(&[0; 4]);
+            z.extend_from_slice(&crc.to_le_bytes());
+            z.extend_from_slice(&size.to_le_bytes());
+            z.extend_from_slice(&size.to_le_bytes());
+            z.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            z.extend_from_slice(&[0; 6]);
+            z.extend_from_slice(&[0; 6]);
+            z.extend_from_slice(&local_offset.to_le_bytes());
+            z.extend_from_slice(name);
+        }
         let cdsize = z.len() - cd;
         z.extend_from_slice(&0x06054b50u32.to_le_bytes());
         z.extend_from_slice(&[0; 4]);
-        z.extend_from_slice(&1u16.to_le_bytes());
-        z.extend_from_slice(&1u16.to_le_bytes());
+        z.extend_from_slice(&(records.len() as u16).to_le_bytes());
+        z.extend_from_slice(&(records.len() as u16).to_le_bytes());
         z.extend_from_slice(&(cdsize as u32).to_le_bytes());
         z.extend_from_slice(&(cd as u32).to_le_bytes());
         z.extend_from_slice(&0u16.to_le_bytes());
         z
+    }
+
+    #[test]
+    fn extract_macro_container_rejects_random_data() {
+        let err = extract_macro_container(b"Not an office file", &Limits::default()).unwrap_err();
+        assert!(err.contains("unrecognized macro container format"));
     }
 }

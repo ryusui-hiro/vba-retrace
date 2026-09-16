@@ -414,4 +414,51 @@ mod tests {
                 .contains("Compound File")
         );
     }
+    #[test]
+    fn opens_a_minimal_v4_compound_file() {
+        let sector_size = 4096usize;
+        let mut bytes = vec![0u8; sector_size * 4];
+        bytes[..8].copy_from_slice(&SIG);
+        bytes[26..28].copy_from_slice(&4u16.to_le_bytes());
+        bytes[30..32].copy_from_slice(&12u16.to_le_bytes());
+        bytes[32..34].copy_from_slice(&6u16.to_le_bytes());
+        bytes[44..48].copy_from_slice(&1u32.to_le_bytes());
+        bytes[48..52].copy_from_slice(&1u32.to_le_bytes());
+        bytes[56..60].copy_from_slice(&4096u32.to_le_bytes());
+        bytes[60..64].copy_from_slice(&END.to_le_bytes());
+        bytes[64..68].copy_from_slice(&0u32.to_le_bytes());
+        bytes[68..72].copy_from_slice(&END.to_le_bytes());
+        bytes[72..76].copy_from_slice(&0u32.to_le_bytes());
+        bytes[76..80].copy_from_slice(&0u32.to_le_bytes());
+        for entry in 1..109 {
+            bytes[76 + entry * 4..80 + entry * 4].copy_from_slice(&FREE.to_le_bytes());
+        }
+        bytes[sector_size..sector_size + 4].copy_from_slice(&0xfffffffdu32.to_le_bytes());
+        bytes[sector_size + 4..sector_size + 8].copy_from_slice(&END.to_le_bytes());
+        let directory = sector_size * 2;
+        let name = "Root Entry".encode_utf16().collect::<Vec<_>>();
+        for (index, unit) in name.iter().enumerate() {
+            bytes[directory + index * 2..directory + index * 2 + 2]
+                .copy_from_slice(&unit.to_le_bytes());
+        }
+        bytes[directory + 64..directory + 66]
+            .copy_from_slice(&((name.len() as u16 + 1) * 2).to_le_bytes());
+        bytes[directory + 66] = 5;
+        for offset in [68usize, 72, 76] {
+            bytes[directory + offset..directory + offset + 4].copy_from_slice(&FREE.to_le_bytes());
+        }
+        bytes[directory + 116..directory + 120].copy_from_slice(&END.to_le_bytes());
+        bytes[directory + 120..directory + 128].copy_from_slice(&0u64.to_le_bytes());
+        let cfb = CompoundFile::open(&bytes, &Limits::default()).unwrap();
+        assert_eq!(cfb.entries.len(), 1);
+        assert_eq!(cfb.entries[0].name, "Root Entry");
+        assert_eq!(cfb.entries[0].kind, 5);
+        let mut cyclic = bytes;
+        cyclic[sector_size + 4..sector_size + 8].copy_from_slice(&1u32.to_le_bytes());
+        assert!(
+            CompoundFile::open(&cyclic, &Limits::default())
+                .unwrap_err()
+                .contains("cyclic")
+        );
+    }
 }

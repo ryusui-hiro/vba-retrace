@@ -48,3 +48,20 @@ jobs:
         run: cargo +1.93.0 test --all-targets --locked
       - name: Run Clippy
         run: cargo +1.93.0 clippy --all-targets --locked -- -D warnings
+
+  windows:
+    name: windows-${{ matrix.toolchain }}
+    runs-on: windows-2022
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [1.88.0, 1.93.0]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal
+      - name: Test native Windows code-page decoding
+        run: rustup run ${{ matrix.toolchain }} cargo test --all-targets --locked
