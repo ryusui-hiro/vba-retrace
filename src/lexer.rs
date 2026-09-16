@@ -46,6 +46,19 @@ pub fn lex(source: &str, max_tokens: usize) -> (Vec<Token>, Vec<(Span, String)>)
             statement_start = true;
             continue;
         }
+        if b == b'\r' {
+            if bytes.get(i + 1) == Some(&b'\n') {
+                i += 1;
+                col += 1;
+                continue;
+            }
+            tokens.push(mk(TokenKind::Newline, "\n".into(), i, i + 1, line, col));
+            i += 1;
+            line += 1;
+            col = 1;
+            statement_start = true;
+            continue;
+        }
         let character = source[i..].chars().next().unwrap();
         if is_vba_whitespace(character) {
             i += character.len_utf8();
@@ -61,7 +74,13 @@ pub fn lex(source: &str, max_tokens: usize) -> (Vec<Token>, Vec<(Span, String)>)
         {
             let mut j = i + 1;
             if j < bytes.len() && bytes[j] == b'\r' {
-                j += 1;
+                if bytes.get(j + 1) == Some(&b'\n') {
+                    j += 1;
+                }
+                i = j + 1;
+                line += 1;
+                col = 1;
+                continue;
             }
             if j < bytes.len() && bytes[j] == b'\n' {
                 i = j + 1;
@@ -631,5 +650,16 @@ mod tests {
         assert_eq!(tokens.iter().filter(|token| token.text == "#").count(), 2);
         assert!(tokens.iter().any(|token| token.text == "record"));
         assert!(tokens.iter().any(|token| token.text == "fileNo"));
+    }
+
+    #[test]
+    fn handles_lone_cr_line_endings_and_line_continuation() {
+        let (tokens, errors) = lex("Sub Foo()\r    x = 1 _\r    + 2\rEnd Sub\r", 100);
+        assert!(errors.is_empty());
+        let newlines = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::Newline)
+            .count();
+        assert_eq!(newlines, 3);
     }
 }

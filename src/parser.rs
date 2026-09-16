@@ -931,7 +931,7 @@ fn top_level_delimiter_index(tokens: &[Token], delimiter: &str) -> Option<usize>
         }
         match token.text.as_str() {
             "(" | "[" => depth += 1,
-            ")" | "]" => depth -= 1,
+            ")" | "]" => depth = (depth - 1).max(0),
             _ => {}
         }
     }
@@ -1045,7 +1045,7 @@ fn top_level_keyword_positions(tokens: &[Token], keyword: &str) -> Vec<usize> {
         }
         match token.text.as_str() {
             "(" | "[" => depth += 1,
-            ")" | "]" => depth -= 1,
+            ")" | "]" => depth = (depth - 1).max(0),
             _ => {}
         }
     }
@@ -1571,7 +1571,7 @@ fn parse_array_dimensions(tokens: &[Token]) -> Vec<crate::model::ArrayDimension>
             let to = dimension.iter().enumerate().find_map(|(index, token)| {
                 match token.text.as_str() {
                     "(" | "[" => depth += 1,
-                    ")" | "]" => depth -= 1,
+                    ")" | "]" => depth = (depth - 1).max(0),
                     _ => {}
                 }
                 (depth == 0 && token.text.eq_ignore_ascii_case("to")).then_some(index)
@@ -1702,7 +1702,7 @@ fn split_top_level<'a>(ts: &'a [Token], delim: &str) -> Vec<&'a [Token]> {
     for (i, t) in ts.iter().enumerate() {
         match t.text.as_str() {
             "(" | "[" => depth += 1,
-            ")" | "]" => depth -= 1,
+            ")" | "]" => depth = (depth - 1).max(0),
             _ => {}
         }
         if depth == 0 && t.text == delim {
@@ -1962,7 +1962,7 @@ fn find_top_level_else(ts: &[Token]) -> Option<usize> {
     for (i, t) in ts.iter().enumerate() {
         match t.text.as_str() {
             "(" | "[" => depth += 1,
-            ")" | "]" => depth -= 1,
+            ")" | "]" => depth = (depth - 1).max(0),
             _ => {}
         }
         if depth == 0 && clause_keyword_at(ts, i, "else") {
@@ -2152,7 +2152,7 @@ fn assignment_rhs(ts: &[Token]) -> Option<&[Token]> {
     for (i, t) in ts.iter().enumerate() {
         match t.text.as_str() {
             "(" | "[" => depth += 1,
-            ")" | "]" => depth -= 1,
+            ")" | "]" => depth = (depth - 1).max(0),
             "=" if depth == 0 && t.kind == TokenKind::Symbol => return ts.get(i + 1..),
             _ => {}
         }
@@ -2165,7 +2165,7 @@ fn assignment_lhs(ts: &[Token]) -> Option<&[Token]> {
     for (i, token) in ts.iter().enumerate() {
         match token.text.as_str() {
             "(" | "[" => depth += 1,
-            ")" | "]" => depth -= 1,
+            ")" | "]" => depth = (depth - 1).max(0),
             "=" if depth == 0 && token.kind == TokenKind::Symbol => return Some(&ts[..i]),
             _ => {}
         }
@@ -3318,5 +3318,13 @@ mod tests {
             "{:?}",
             module.diagnostics
         );
+    }
+
+    #[test]
+    fn handles_unbalanced_closing_delimiters_gracefully() {
+        // Stray closing parenthesis should not panic or underflow depth
+        let source = "Public Sub Bug()\n) x = 1\na = ) (1, 2)\nEnd Sub\n";
+        let module = parse_module("M", "M.bas", source, 10_000, 100);
+        assert_eq!(module.procedures.len(), 1);
     }
 }

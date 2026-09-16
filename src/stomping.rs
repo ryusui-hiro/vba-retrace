@@ -235,6 +235,12 @@ static AUTO_EXEC_HOOKS: &[&str] = &[
     "workbook_deactivate",
     "userform_initialize",
     "userform_activate",
+    "slideshowbegin",
+    "slideshowend",
+    "slideshownextslide",
+    "slideshownextclick",
+    "app_workbookopen",
+    "app_documentopen",
 ];
 
 /// Check if a procedure name matches a known auto-execution hook.
@@ -261,7 +267,8 @@ pub fn detect_vba_stomping_with_error(
     // Analyze source text first
     let (source_lines, source_procs, source_effective_code) = match source_text {
         Some(src) => {
-            let lines: Vec<&str> = src.lines().collect();
+            let norm = src.replace("\r\n", "\n").replace('\r', "\n");
+            let lines: Vec<&str> = norm.lines().collect();
             let mut procs = Vec::new();
             let mut effective_lines = 0;
             for line in &lines {

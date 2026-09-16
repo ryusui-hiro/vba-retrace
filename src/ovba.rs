@@ -571,7 +571,8 @@ pub fn parse_project(
     if let Some(project) = project_stream
         && let Ok(t) = decode_text(project, code_page)
     {
-        for l in t.lines() {
+        let norm = t.replace("\r\n", "\n").replace('\r', "\n");
+        for l in norm.lines() {
             let l_trim = l.trim();
             if let Some(x) = l_trim.strip_prefix("Name=") {
                 p.name

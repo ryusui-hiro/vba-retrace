@@ -151,6 +151,11 @@ impl<'a> CompoundFile<'a> {
         }
         let mut visited_storages = HashSet::new();
         assign_paths(&mut entries, 0, "", 0, &mut visited_storages)?;
+        for entry in &mut entries {
+            if entry.id != 0 && entry.path.is_empty() && matches!(entry.kind, 1 | 2) {
+                entry.path = format!("[unlinked]/{}", entry.name);
+            }
+        }
         let mini_stream = read_regular(
             data,
             sector_size,

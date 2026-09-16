@@ -249,7 +249,14 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
             let f_clean = formula
                 .trim()
                 .trim_start_matches(|c: char| {
-                    c.is_whitespace() || c == '=' || c == '+' || c == '-' || c == '@'
+                    c.is_whitespace()
+                        || c == '='
+                        || c == '+'
+                        || c == '-'
+                        || c == '@'
+                        || c == '\u{FF1D}' // '＝' Full-width Equals
+                        || c == '\u{FF0B}' // '＋' Full-width Plus
+                        || c == '\u{FF0D}' // '－' Full-width Minus
                 })
                 .trim();
             let f_lower = f_clean.to_ascii_lowercase();
@@ -286,6 +293,9 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                         | "sh"
                         | "python"
                         | "python3"
+                        | "pythonw"
+                        | "wsl"
+                        | "tar"
                         | "conhost"
                         | "wt"
                         | "schtasks"
@@ -337,7 +347,7 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.starts_with("filterxml(")
                 || f_lower.contains("webservice(");
 
-            // 5. Suspicious executable download hyperlink
+            // 5. Suspicious executable download hyperlink or protocol handler
             let is_suspicious_hyperlink = f_lower.starts_with("hyperlink(")
                 && (f_lower.contains(".exe")
                     || f_lower.contains(".scr")
@@ -349,7 +359,9 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                     || f_lower.contains(".ps1")
                     || f_lower.contains(".iso")
                     || f_lower.contains(".zip")
-                    || f_lower.contains(".dll"));
+                    || f_lower.contains(".dll")
+                    || f_lower.contains("ms-appinstaller:")
+                    || f_lower.contains("search-ms:"));
 
             if is_dde {
                 extracted.diagnostics.push(format!(
@@ -882,23 +894,30 @@ pub fn detect_project_stomping(
                     .source_text
                     .as_deref()
                     .map(|s| {
-                        s.lines().any(|l| {
+                        let norm = s.replace("\r\n", "\n").replace('\r', "\n");
+                        norm.lines().any(|l| {
                             let trim = l.trim();
-                            let lower = trim.to_ascii_lowercase();
-                            (lower.starts_with("sub ")
-                                || lower.starts_with("public sub ")
-                                || lower.starts_with("private sub ")
-                                || lower.starts_with("function ")
-                                || lower.starts_with("public function ")
-                                || lower.starts_with("private function "))
-                                && crate::stomping::is_auto_exec_hook(
-                                    trim.split_whitespace()
-                                        .nth(1)
-                                        .unwrap_or("")
-                                        .split('(')
-                                        .next()
-                                        .unwrap_or(""),
-                                )
+                            let upper = trim.to_ascii_uppercase();
+                            for kw in &[
+                                "SUB ",
+                                "FUNCTION ",
+                                "PROPERTY GET ",
+                                "PROPERTY LET ",
+                                "PROPERTY SET ",
+                            ] {
+                                if let Some(idx) = upper.find(kw) {
+                                    let after = trim[idx + kw.len()..].trim_start();
+                                    let name: String = after
+                                        .chars()
+                                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                                        .collect();
+                                    if !name.is_empty() && crate::stomping::is_auto_exec_hook(&name)
+                                    {
+                                        return true;
+                                    }
+                                }
+                            }
+                            false
                         })
                     })
                     .unwrap_or(false);

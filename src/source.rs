@@ -76,18 +76,39 @@ pub fn mask_designer_preamble(name: &str, source: &str) -> String {
     if !matches!(extension.as_deref(), Some("cls" | "frm")) {
         return source.to_owned();
     }
-    let mut offset = 0usize;
     let mut preamble_end = None;
-    for line in source.split_inclusive('\n') {
+    let source_bytes = source.as_bytes();
+    let mut line_start = 0usize;
+    while line_start < source.len() {
+        let mut line_end = line_start;
+        while line_end < source.len() {
+            let b = source_bytes[line_end];
+            if b == b'\r' || b == b'\n' {
+                break;
+            }
+            line_end += 1;
+        }
+        let line = &source[line_start..line_end];
         if line
             .trim_start()
             .to_ascii_lowercase()
             .starts_with("attribute vb_name")
         {
-            preamble_end = Some(offset);
+            preamble_end = Some(line_start);
             break;
         }
-        offset += line.len();
+        if line_end < source.len() {
+            if source_bytes[line_end] == b'\r'
+                && line_end + 1 < source.len()
+                && source_bytes[line_end + 1] == b'\n'
+            {
+                line_start = line_end + 2;
+            } else {
+                line_start = line_end + 1;
+            }
+        } else {
+            break;
+        }
     }
     let Some(end) = preamble_end else {
         return source.to_owned();
@@ -304,5 +325,14 @@ mod tests {
         assert!(!masked.contains("Begin VB.Form"));
         assert!(masked.contains("Attribute VB_Name"));
         assert!(mask_designer_preamble("Module1.bas", source).contains("Begin VB.Form"));
+    }
+
+    #[test]
+    fn masks_form_designer_preamble_with_lone_cr() {
+        let source = "VERSION 5.00\rBegin VB.Form UserForm1\rEnd\rAttribute VB_Name = \"UserForm1\"\rOption Explicit\r";
+        let masked = mask_designer_preamble("UserForm1.frm", source);
+        assert_eq!(masked.len(), source.len());
+        assert!(!masked.contains("Begin VB.Form"));
+        assert!(masked.contains("Attribute VB_Name"));
     }
 }

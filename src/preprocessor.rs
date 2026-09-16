@@ -257,7 +257,7 @@ pub fn preprocess(
             span: Span {
                 start: source.len(),
                 end: source.len(),
-                line: source.lines().count() as u32,
+                line: count_lines(source),
                 column: 1,
             },
         });
@@ -273,68 +273,85 @@ pub fn preprocess(
     }
 }
 
+fn find_next_line_break(source: &str, start: usize) -> Option<(usize, usize)> {
+    let bytes = source.get(start..)?.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' {
+            let content_end = if i > 0 && bytes[i - 1] == b'\r' {
+                start + i - 1
+            } else {
+                start + i
+            };
+            return Some((content_end, start + i + 1));
+        } else if b == b'\r' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                return Some((start + i, start + i + 2));
+            } else {
+                return Some((start + i, start + i + 1));
+            }
+        }
+    }
+    None
+}
+
+fn count_lines(source: &str) -> u32 {
+    if source.is_empty() {
+        return 0;
+    }
+    let mut count = 0;
+    let mut cursor = 0;
+    while cursor < source.len() {
+        count += 1;
+        if let Some((_, next_cursor)) = find_next_line_break(source, cursor) {
+            cursor = next_cursor;
+        } else {
+            break;
+        }
+    }
+    count
+}
+
 fn logical_line_end(source: &str, start: usize, line_number: u32) -> (usize, u32) {
     let mut cursor = start;
     let mut next_line_number = line_number;
     loop {
-        let newline = source[cursor..]
-            .find('\n')
-            .map(|relative| cursor + relative);
-        let Some(newline) = newline else {
+        let Some((content_end, next_cursor)) = find_next_line_break(source, cursor) else {
             return (source.len(), next_line_number);
-        };
-        let content_end = if newline > cursor && source.as_bytes()[newline - 1] == b'\r' {
-            newline - 1
-        } else {
-            newline
         };
         let physical_line = &source[cursor..content_end];
         next_line_number += 1;
         if line_continuation_marker(physical_line).is_some() {
-            cursor = newline + 1;
+            cursor = next_cursor;
         } else {
-            return (newline + 1, next_line_number);
+            return (next_cursor, next_line_number);
         }
     }
 }
 
 fn first_physical_line(source: &str, start: usize, end: usize) -> &str {
-    let newline = source[start..end]
-        .find('\n')
-        .map(|relative| start + relative)
-        .unwrap_or(end);
-    let content_end = if newline > start && source.as_bytes()[newline - 1] == b'\r' {
-        newline - 1
+    let slice = &source[..end];
+    if let Some((content_end, _)) = find_next_line_break(slice, start) {
+        &source[start..content_end]
     } else {
-        newline
-    };
-    &source[start..content_end]
+        &source[start..end]
+    }
 }
 
 fn logical_line_text(source: &str, start: usize, end: usize) -> String {
     let mut text = String::new();
     let mut cursor = start;
     while cursor < end {
-        let newline = source[cursor..end]
-            .find('\n')
-            .map(|relative| cursor + relative);
-        let physical_end = newline.unwrap_or(end);
-        let content_end = if physical_end > cursor && source.as_bytes()[physical_end - 1] == b'\r' {
-            physical_end - 1
+        let slice = &source[..end];
+        if let Some((content_end, next_cursor)) = find_next_line_break(slice, cursor) {
+            let physical_line = &source[cursor..content_end];
+            if let Some(marker) = line_continuation_marker(physical_line) {
+                text.push_str(&physical_line[..marker]);
+            } else {
+                text.push_str(physical_line);
+            }
+            cursor = next_cursor;
         } else {
-            physical_end
-        };
-        let physical_line = &source[cursor..content_end];
-        if newline.is_some()
-            && let Some(marker) = line_continuation_marker(physical_line)
-        {
-            text.push_str(&physical_line[..marker]);
-        } else {
-            text.push_str(physical_line);
-        }
-        if let Some(newline) = newline {
-            cursor = newline + 1;
-        } else {
+            text.push_str(&source[cursor..end]);
             cursor = end;
         }
     }
@@ -2494,5 +2511,14 @@ mod tests {
         assert!(!known_target.had_unknown_condition);
         assert!(known_target.text.contains("A = 1"));
         assert!(!known_target.text.contains("A = 2"));
+    }
+
+    #[test]
+    fn handles_lone_cr_in_preprocessor_directives() {
+        let source = "#Const FOO = 1\r#If FOO = 1\rActive = 1\r#Else\rActive = 2\r#End If\r";
+        let result = preprocess("M.bas", source, &PreprocessOptions::default());
+        assert!(!result.had_unknown_condition);
+        assert!(result.text.contains("Active = 1"));
+        assert!(!result.text.contains("Active = 2"));
     }
 }
