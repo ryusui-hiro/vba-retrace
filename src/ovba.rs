@@ -29,6 +29,11 @@ pub struct OvbaProject {
     pub project_version: Option<u16>,
     pub project_performance_cache_len: usize,
     pub project_performance_cache_fingerprint: u64,
+    pub project_protection_cmg: Option<String>,
+    pub project_protection_dpb: Option<String>,
+    pub project_protection_gc: Option<String>,
+    pub project_declared_modules: Vec<String>,
+    pub hidden_gui_modules: Vec<String>,
 }
 
 /// Parsed MS-OVBA REFERENCE metadata. Identifier strings are retained verbatim
@@ -559,15 +564,39 @@ pub fn parse_project(
         ..OvbaProject::default()
     };
     let has_dir_references = !p.project_references.is_empty();
+    let mut declared_modules = Vec::new();
     if let Some(project) = project_stream
         && let Ok(t) = decode_text(project, code_page)
     {
         for l in t.lines() {
-            if let Some(x) = l.strip_prefix("Name=") {
+            let l_trim = l.trim();
+            if let Some(x) = l_trim.strip_prefix("Name=") {
                 p.name
                     .get_or_insert_with(|| x.trim().trim_matches('"').to_owned());
             }
-            if !has_dir_references && let Some(x) = l.strip_prefix("Reference=") {
+            if let Some(x) = l_trim.strip_prefix("CMG=") {
+                p.project_protection_cmg = Some(x.trim().trim_matches('"').to_owned());
+            }
+            if let Some(x) = l_trim.strip_prefix("DPB=") {
+                p.project_protection_dpb = Some(x.trim().trim_matches('"').to_owned());
+            }
+            if let Some(x) = l_trim.strip_prefix("GC=") {
+                p.project_protection_gc = Some(x.trim().trim_matches('"').to_owned());
+            }
+            if let Some(x) = l_trim.strip_prefix("Module=") {
+                declared_modules.push(x.trim().trim_matches('"').to_owned());
+            }
+            if let Some(x) = l_trim.strip_prefix("Class=") {
+                declared_modules.push(x.trim().trim_matches('"').to_owned());
+            }
+            if let Some(x) = l_trim.strip_prefix("BaseClass=") {
+                declared_modules.push(x.trim().trim_matches('"').to_owned());
+            }
+            if let Some(x) = l_trim.strip_prefix("Document=") {
+                let doc_part = x.split('/').next().unwrap_or(x).trim().trim_matches('"');
+                declared_modules.push(doc_part.to_owned());
+            }
+            if !has_dir_references && let Some(x) = l_trim.strip_prefix("Reference=") {
                 let reference_name = x.trim().to_owned();
                 p.references.push(reference_name.clone());
                 p.project_references.push(OvbaReference {
@@ -632,6 +661,17 @@ pub fn parse_project(
             performance_cache_fingerprint: cache.fingerprint_fnv1a64,
         });
     }
+    if !declared_modules.is_empty() {
+        for m in &p.modules {
+            if !declared_modules
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(&m.name))
+            {
+                p.hidden_gui_modules.push(m.name.clone());
+            }
+        }
+    }
+    p.project_declared_modules = declared_modules;
     Ok(p)
 }
 

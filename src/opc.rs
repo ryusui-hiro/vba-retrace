@@ -232,7 +232,10 @@ fn read_workbook_metadata(
     let mut remaining_tables = limits.max_workbook_tables;
     let mut sheet_code_names = Vec::new();
     for (sheet_index, sheet) in metadata.sheets.iter().enumerate() {
-        if !sheet.kind.eq_ignore_ascii_case("worksheet") {
+        if !sheet.kind.eq_ignore_ascii_case("worksheet")
+            && !sheet.kind.eq_ignore_ascii_case("macrosheet")
+            && !sheet.kind.eq_ignore_ascii_case("dialogsheet")
+        {
             continue;
         }
         let Some(part_name) = sheet.part_name.as_deref() else {
@@ -912,7 +915,12 @@ fn parse_worksheet_table_relationship_ids(
         let local = local_name(&tag.name);
         let namespace = element_namespace(&tag.name, &namespaces).unwrap_or("");
         if depth == 0 {
-            if root_seen || local != "worksheet" || !is_spreadsheet_namespace(namespace) {
+            if root_seen
+                || (!local.eq_ignore_ascii_case("worksheet")
+                    && !local.eq_ignore_ascii_case("macrosheet")
+                    && !local.eq_ignore_ascii_case("dialogsheet"))
+                || !is_spreadsheet_namespace(namespace)
+            {
                 return Err("invalid SpreadsheetML worksheet root for table parts".into());
             }
             root_seen = true;
@@ -1110,7 +1118,12 @@ fn parse_worksheet_cells_xml(
         let local = local_name(&tag.name);
         let namespace = element_namespace(&tag.name, &namespaces).unwrap_or("");
         if depth == 0 {
-            if root_seen || local != "worksheet" || !is_spreadsheet_namespace(namespace) {
+            if root_seen
+                || (!local.eq_ignore_ascii_case("worksheet")
+                    && !local.eq_ignore_ascii_case("macrosheet")
+                    && !local.eq_ignore_ascii_case("dialogsheet"))
+                || !is_spreadsheet_namespace(namespace)
+            {
                 return Err("invalid SpreadsheetML worksheet root or namespace".into());
             }
             root_seen = true;

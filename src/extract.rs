@@ -63,6 +63,11 @@ pub struct ExtractedProject {
     pub metadata: Vec<(String, String)>,
     pub diagnostics: Vec<String>,
     pub compiled_representation_status: String,
+    pub project_protection_cmg: Option<String>,
+    pub project_protection_dpb: Option<String>,
+    pub project_protection_gc: Option<String>,
+    pub is_locked_or_unviewable: bool,
+    pub hidden_gui_modules: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -228,6 +233,59 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
     extracted.workbook_cells = package.workbook_cells;
     extracted.workbook_cells_truncated = package.workbook_cells_truncated;
     extracted.diagnostics.extend(package.workbook_diagnostics);
+
+    for sheet in &extracted.workbook_sheets {
+        if sheet.kind.eq_ignore_ascii_case("macrosheet") {
+            extracted.diagnostics.push(format!(
+                "Security warning: Workbook contains Excel 4.0 (XLM) macro sheet '{}' (state: {})",
+                sheet.name,
+                sheet.state.as_deref().unwrap_or("visible")
+            ));
+        }
+    }
+
+    for cell in &extracted.workbook_cells {
+        if let Some(formula) = &cell.formula {
+            let f_clean = formula
+                .trim()
+                .trim_start_matches(['=', '+', '-', '@'])
+                .trim();
+            let f_lower = f_clean.to_ascii_lowercase();
+            let is_dde = f_lower.starts_with("cmd|")
+                || f_lower.starts_with("powershell|")
+                || f_lower.starts_with("pwsh|")
+                || f_lower.starts_with("msiexec|")
+                || f_lower.starts_with("cscript|")
+                || f_lower.starts_with("wscript|")
+                || f_lower.starts_with("rundll32|")
+                || f_lower.starts_with("regsvr32|")
+                || f_lower.starts_with("mshta|")
+                || f_lower.starts_with("certutil|")
+                || f_lower.starts_with("bitsadmin|")
+                || f_lower.contains("|'")
+                || f_lower.starts_with("dde(")
+                || f_lower.starts_with("dde.execute(");
+            let is_xlm = f_lower.starts_with("exec(")
+                || f_lower.starts_with("call(")
+                || f_lower.starts_with("register(")
+                || f_lower.starts_with("run(")
+                || f_lower.starts_with("formula(")
+                || f_lower.starts_with("alert(")
+                || f_lower.starts_with("halt(")
+                || f_lower.starts_with("register.id(");
+            if is_dde {
+                extracted.diagnostics.push(format!(
+                    "Security warning: Potential DDE execution formula in cell '{}'!{}: '{}'",
+                    cell.sheet_name, cell.cell_ref, formula
+                ));
+            } else if is_xlm {
+                extracted.diagnostics.push(format!(
+                    "Security warning: Potential Excel 4.0 (XLM) macro execution formula in cell '{}'!{}: '{}'",
+                    cell.sheet_name, cell.cell_ref, formula
+                ));
+            }
+        }
+    }
     Ok(extracted)
 }
 
@@ -449,6 +507,25 @@ fn convert(p: OvbaProject) -> ExtractedProject {
             .map(|v| format!("0x{v:04X}"))
             .unwrap_or_else(|| "unavailable".into()),
     ));
+    result.project_protection_cmg = p.project_protection_cmg.clone();
+    result.project_protection_dpb = p.project_protection_dpb.clone();
+    result.project_protection_gc = p.project_protection_gc.clone();
+    result.is_locked_or_unviewable = p.project_protection_cmg.is_some()
+        || p.project_protection_dpb.is_some()
+        || p.project_protection_gc.is_some();
+    result.hidden_gui_modules = p.hidden_gui_modules.clone();
+
+    if result.is_locked_or_unviewable {
+        result.diagnostics.push(
+            "VBA project has protection/lock attributes (CMG/DPB/GC); project may appear locked or unviewable in VBA IDE"
+                .into(),
+        );
+    }
+    for hidden in &result.hidden_gui_modules {
+        result.diagnostics.push(format!(
+            "Module '{hidden}' is present in dir stream but omitted from PROJECT stream manifest (hidden in VBA IDE)"
+        ));
+    }
     for m in p.modules {
         let diagnostic = m.source_error.clone();
         if let Some(e) = &diagnostic {
@@ -617,15 +694,78 @@ pub fn detect_project_stomping(
 ) -> Result<crate::stomping::ProjectStompingReport, String> {
     let disasms = disassemble_extracted_project(project)?;
     let mut module_reports = Vec::new();
+    let mut project_findings = Vec::new();
     let mut max_severity = crate::stomping::StompingSeverity::Clean;
+
+    if project.is_locked_or_unviewable {
+        project_findings.push(crate::stomping::StompingFinding {
+            severity: crate::stomping::StompingSeverity::Medium,
+            kind: crate::stomping::StompingFindingKind::ProjectLockedOrUnviewable,
+            description: "VBA project contains protection/lock attributes (CMG/DPB/GC); project may appear locked or unviewable in VBA IDE".to_string(),
+        });
+        if crate::stomping::StompingSeverity::Medium > max_severity {
+            max_severity = crate::stomping::StompingSeverity::Medium;
+        }
+    }
 
     for module in &project.modules {
         let matching_disasm = disasms.iter().find(|d| d.module_name == module.name);
-        let report = crate::stomping::detect_vba_stomping(
+        let mut report = crate::stomping::detect_vba_stomping(
             &module.name,
             module.source_text.as_deref(),
             matching_disasm,
         );
+
+        if project
+            .hidden_gui_modules
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(&module.name))
+        {
+            let is_auto = crate::stomping::is_auto_exec_hook(&module.name)
+                || module
+                    .source_text
+                    .as_deref()
+                    .map(|s| {
+                        s.lines().any(|l| {
+                            let trim = l.trim();
+                            let lower = trim.to_ascii_lowercase();
+                            (lower.starts_with("sub ")
+                                || lower.starts_with("public sub ")
+                                || lower.starts_with("private sub ")
+                                || lower.starts_with("function ")
+                                || lower.starts_with("public function ")
+                                || lower.starts_with("private function "))
+                                && crate::stomping::is_auto_exec_hook(
+                                    trim.split_whitespace()
+                                        .nth(1)
+                                        .unwrap_or("")
+                                        .split('(')
+                                        .next()
+                                        .unwrap_or(""),
+                                )
+                        })
+                    })
+                    .unwrap_or(false);
+            let sev = if is_auto {
+                crate::stomping::StompingSeverity::Critical
+            } else {
+                crate::stomping::StompingSeverity::High
+            };
+            report.findings.push(crate::stomping::StompingFinding {
+                severity: sev,
+                kind: crate::stomping::StompingFindingKind::HiddenGuiModule(module.name.clone()),
+                description: format!(
+                    "Module '{}' is compiled in dir stream but omitted from PROJECT stream manifest; invisible in Office VBA IDE (Evil Clippy GUI hiding)",
+                    module.name
+                ),
+            });
+            report.confidence_score = report.confidence_score.max(80);
+            if sev > report.severity {
+                report.severity = sev;
+            }
+            report.is_stomped = true;
+        }
+
         if report.severity > max_severity {
             max_severity = report.severity;
         }
@@ -637,6 +777,7 @@ pub fn detect_project_stomping(
     Ok(crate::stomping::ProjectStompingReport {
         overall_severity: max_severity,
         has_stomping,
+        project_findings,
         modules: module_reports,
     })
 }

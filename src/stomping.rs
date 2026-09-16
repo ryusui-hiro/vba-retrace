@@ -49,6 +49,12 @@ pub enum StompingFindingKind {
         source_lines: usize,
         pcode_lines: usize,
     },
+    /// Compiled P-code performance cache has been purged (text offset 0, empty cache) to evade compiled cache scanners.
+    PerformanceCachePurged { source_lines: usize },
+    /// The module exists in the dir stream but is omitted from the PROJECT manifest (Evil Clippy GUI hiding).
+    HiddenGuiModule(String),
+    /// The VBA project contains protection/lock attributes (CMG/DPB/GC) making it unviewable in the VBA IDE.
+    ProjectLockedOrUnviewable,
 }
 
 /// Detailed finding describing a specific discrepancy.
@@ -78,6 +84,7 @@ pub struct ModuleStompingReport {
 pub struct ProjectStompingReport {
     pub overall_severity: StompingSeverity,
     pub has_stomping: bool,
+    pub project_findings: Vec<StompingFinding>,
     pub modules: Vec<ModuleStompingReport>,
 }
 
@@ -208,41 +215,18 @@ static AUTO_EXEC_HOOKS: &[&str] = &[
     "userform_activate",
 ];
 
+/// Check if a procedure name matches a known auto-execution hook.
+pub fn is_auto_exec_hook(name: &str) -> bool {
+    AUTO_EXEC_HOOKS.iter().any(|h| name.eq_ignore_ascii_case(h))
+}
+
 /// Inspect a module for evidence of VBA Stomping by contrasting source text and P-code disassembly.
 pub fn detect_vba_stomping(
     module_name: &str,
     source_text: Option<&str>,
     pcode: Option<&DisassembledPCodeModule>,
 ) -> ModuleStompingReport {
-    let mut findings = Vec::new();
-    let mut score = 0u8;
-
-    let pcode_module = match pcode {
-        Some(p) => p,
-        None => {
-            return ModuleStompingReport {
-                module_name: module_name.to_string(),
-                severity: StompingSeverity::Clean,
-                confidence_score: 0,
-                is_stomped: false,
-                findings: Vec::new(),
-                source_procedure_count: 0,
-                pcode_procedure_count: 0,
-                source_line_count: source_text.map(|s| s.lines().count()).unwrap_or(0),
-                pcode_line_count: 0,
-            };
-        }
-    };
-
-    let pcode_line_count = pcode_module.lines.len();
-    let pcode_instruction_count: usize = pcode_module
-        .lines
-        .iter()
-        .map(|l| l.instructions.len())
-        .sum();
-    let pcode_proc_count = pcode_module.declared_procedures.len();
-
-    // Analyze source text
+    // Analyze source text first
     let (source_lines, source_procs, source_effective_code) = match source_text {
         Some(src) => {
             let lines: Vec<&str> = src.lines().collect();
@@ -283,7 +267,67 @@ pub fn detect_vba_stomping(
         None => (0, Vec::new(), 0),
     };
 
+    let pcode_module = match pcode {
+        Some(p) => p,
+        None => {
+            let mut findings = Vec::new();
+            let mut score = 0u8;
+            if !source_procs.is_empty() && source_effective_code > 0 {
+                findings.push(StompingFinding {
+                    severity: StompingSeverity::Medium,
+                    kind: StompingFindingKind::PerformanceCachePurged { source_lines },
+                    description: format!(
+                        "Module '{}' contains declared VBA procedures ({}) but lacks compiled P-code performance cache (VBA Purging pattern).",
+                        module_name,
+                        source_procs.join(", ")
+                    ),
+                });
+                score = 35;
+            }
+            let severity = if score >= 25 {
+                StompingSeverity::Medium
+            } else {
+                StompingSeverity::Clean
+            };
+            return ModuleStompingReport {
+                module_name: module_name.to_string(),
+                severity,
+                confidence_score: score,
+                is_stomped: false,
+                findings,
+                source_procedure_count: source_procs.len(),
+                pcode_procedure_count: 0,
+                source_line_count: source_lines,
+                pcode_line_count: 0,
+            };
+        }
+    };
+
+    let mut findings = Vec::new();
+    let mut score = 0u8;
+
+    let pcode_line_count = pcode_module.lines.len();
+    let pcode_instruction_count: usize = pcode_module
+        .lines
+        .iter()
+        .map(|l| l.instructions.len())
+        .sum();
+    let pcode_proc_count = pcode_module.declared_procedures.len();
     let normalized_source = source_text.unwrap_or("").to_ascii_lowercase();
+
+    // 1. Performance Cache Purged Check: Source has real code, but compiled P-code instructions are 0 (VBA Purging)
+    if pcode_instruction_count == 0 && !source_procs.is_empty() && source_effective_code > 0 {
+        findings.push(StompingFinding {
+            severity: StompingSeverity::Medium,
+            kind: StompingFindingKind::PerformanceCachePurged { source_lines },
+            description: format!(
+                "Module '{}' contains declared VBA procedures ({}) but has 0 compiled P-code instructions (VBA Purging pattern).",
+                module_name,
+                source_procs.join(", ")
+            ),
+        });
+        score = score.saturating_add(35);
+    }
 
     // 1. Source Purged Check: P-code exists with executable instructions, but source is empty or contains no real code
     if pcode_instruction_count > 0 && (source_lines == 0 || source_effective_code == 0) {

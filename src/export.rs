@@ -2667,11 +2667,36 @@ pub fn disasm_to_markdown(modules: &[DisassembledPCodeModule]) -> String {
 /// Export a VBA Stomping evaluation report as JSON.
 pub fn stomping_to_json(report: &ProjectStompingReport) -> String {
     let mut out = format!(
-        "{{\"schema_version\":\"0.1\",\"overall_severity\":{},\"has_stomping\":{},\"module_count\":{},\"modules\":[",
+        "{{\"schema_version\":\"0.1\",\"overall_severity\":{},\"has_stomping\":{},\"project_findings\":[",
         q(report.overall_severity.as_str()),
-        report.has_stomping,
-        report.modules.len()
+        report.has_stomping
     );
+    for (f_idx, f) in report.project_findings.iter().enumerate() {
+        if f_idx > 0 {
+            out.push(',');
+        }
+        let kind_str = match &f.kind {
+            StompingFindingKind::SourcePurged => "source_purged",
+            StompingFindingKind::ProcedureHiddenInPCode(_) => "procedure_hidden_in_pcode",
+            StompingFindingKind::ProcedureMissingInPCode(_) => "procedure_missing_in_pcode",
+            StompingFindingKind::SuspiciousLiteralInPCode(_) => "suspicious_literal_in_pcode",
+            StompingFindingKind::SensitiveCallInPCode(_) => "sensitive_call_in_pcode",
+            StompingFindingKind::LineCountDiscrepancy { .. } => "line_count_discrepancy",
+            StompingFindingKind::PerformanceCachePurged { .. } => "performance_cache_purged",
+            StompingFindingKind::HiddenGuiModule(_) => "hidden_gui_module",
+            StompingFindingKind::ProjectLockedOrUnviewable => "project_locked_or_unviewable",
+        };
+        out.push_str(&format!(
+            "{{\"severity\":{},\"kind\":{},\"description\":{}}}",
+            q(f.severity.as_str()),
+            q(kind_str),
+            q(&f.description)
+        ));
+    }
+    out.push_str(&format!(
+        "],\"module_count\":{},\"modules\":[",
+        report.modules.len()
+    ));
     for (m_idx, m) in report.modules.iter().enumerate() {
         if m_idx > 0 {
             out.push(',');
@@ -2698,6 +2723,9 @@ pub fn stomping_to_json(report: &ProjectStompingReport) -> String {
                 StompingFindingKind::SuspiciousLiteralInPCode(_) => "suspicious_literal_in_pcode",
                 StompingFindingKind::SensitiveCallInPCode(_) => "sensitive_call_in_pcode",
                 StompingFindingKind::LineCountDiscrepancy { .. } => "line_count_discrepancy",
+                StompingFindingKind::PerformanceCachePurged { .. } => "performance_cache_purged",
+                StompingFindingKind::HiddenGuiModule(_) => "hidden_gui_module",
+                StompingFindingKind::ProjectLockedOrUnviewable => "project_locked_or_unviewable",
             };
             out.push_str(&format!(
                 "{{\"severity\":{},\"kind\":{},\"description\":{}}}",
@@ -2721,6 +2749,9 @@ fn finding_to_sarif_rule(f: &StompingFinding) -> (&'static str, &'static str) {
         StompingFindingKind::SensitiveCallInPCode(_) => ("VBA-STOMP-004", "error"),
         StompingFindingKind::LineCountDiscrepancy { .. } => ("VBA-STOMP-005", "warning"),
         StompingFindingKind::ProcedureMissingInPCode(_) => ("VBA-STOMP-006", "note"),
+        StompingFindingKind::PerformanceCachePurged { .. } => ("VBA-STOMP-007", "warning"),
+        StompingFindingKind::HiddenGuiModule(_) => ("VBA-STOMP-008", "error"),
+        StompingFindingKind::ProjectLockedOrUnviewable => ("VBA-STOMP-009", "note"),
     };
     let level = match f.severity {
         StompingSeverity::Critical | StompingSeverity::High => "error",
@@ -2752,13 +2783,36 @@ pub fn stomping_to_sarif(report: &ProjectStompingReport, file_uri: &str) -> Stri
         "{\"id\":\"VBA-STOMP-005\",\"name\":\"LineCountDiscrepancy\",\"shortDescription\":{\"text\":\"Line Count Discrepancy\"},\"fullDescription\":{\"text\":\"Large divergence between source code line count and compiled P-code line count.\"},\"defaultConfiguration\":{\"level\":\"warning\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-STOMP-006\",\"name\":\"ProcedureMissingInPCode\",\"shortDescription\":{\"text\":\"Procedure Missing in P-Code\"},\"fullDescription\":{\"text\":\"A procedure declared in source text is missing from the compiled P-code stream.\"},\"defaultConfiguration\":{\"level\":\"note\"}}"
+        "{\"id\":\"VBA-STOMP-006\",\"name\":\"ProcedureMissingInPCode\",\"shortDescription\":{\"text\":\"Procedure Missing in P-Code\"},\"fullDescription\":{\"text\":\"A procedure declared in source text is missing from the compiled P-code stream.\"},\"defaultConfiguration\":{\"level\":\"note\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-STOMP-007\",\"name\":\"PerformanceCachePurged\",\"shortDescription\":{\"text\":\"VBA Performance Cache Purged\"},\"fullDescription\":{\"text\":\"Compiled P-code performance cache has been wiped or omitted while source code procedures remain, indicating potential VBA Purging evasion.\"},\"defaultConfiguration\":{\"level\":\"warning\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-STOMP-008\",\"name\":\"HiddenGuiModule\",\"shortDescription\":{\"text\":\"Module Hidden from VBA GUI\"},\"fullDescription\":{\"text\":\"Module is present in dir stream and compiled for execution but omitted from PROJECT stream manifest, making it invisible in the Office VBA GUI (Evil Clippy technique).\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-STOMP-009\",\"name\":\"ProjectLockedOrUnviewable\",\"shortDescription\":{\"text\":\"Project Locked or Unviewable\"},\"fullDescription\":{\"text\":\"VBA project contains protection/lock attributes (CMG/DPB/GC) making the macro unviewable or password-protected in the VBA IDE.\"},\"defaultConfiguration\":{\"level\":\"note\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));
     out.push_str("}}],\"results\":[");
 
     let mut first_result = true;
+    for f in &report.project_findings {
+        if !first_result {
+            out.push(',');
+        }
+        first_result = false;
+        let (rule_id, level) = finding_to_sarif_rule(f);
+        out.push_str(&format!(
+            "{{\"ruleId\":{},\"level\":{},\"message\":{{\"text\":{}}},\"locations\":[{{\"physicalLocation\":{{\"artifactLocation\":{{\"uri\":{}}}}},\"logicalLocations\":[{{\"name\":\"PROJECT\",\"kind\":\"project\"}}]}}]}}",
+            q(rule_id),
+            q(level),
+            q(&f.description),
+            q(file_uri)
+        ));
+    }
     for m in &report.modules {
         for f in &m.findings {
             if !first_result {
@@ -2800,6 +2854,25 @@ pub fn stomping_to_markdown(report: &ProjectStompingReport) -> String {
         "- **Total Modules Inspected:** {}\n\n",
         report.modules.len()
     ));
+
+    if !report.project_findings.is_empty() {
+        out.push_str("### Project-Level Indicators\n\n");
+        for f in &report.project_findings {
+            let icon = match f.severity {
+                StompingSeverity::Critical => "🔴",
+                StompingSeverity::High => "🟠",
+                StompingSeverity::Medium => "🟡",
+                _ => "ℹ️",
+            };
+            out.push_str(&format!(
+                "- {} **[{}]** {}\n",
+                icon,
+                f.severity.as_str().to_ascii_uppercase(),
+                f.description
+            ));
+        }
+        out.push('\n');
+    }
 
     out.push_str("| Module Name | Severity | Score | Source Lines | P-Code Lines | Findings |\n");
     out.push_str("| :--- | :--- | :--- | :--- | :--- | :--- |\n");
@@ -4095,34 +4168,71 @@ mod tests {
         let report = ProjectStompingReport {
             overall_severity: StompingSeverity::Critical,
             has_stomping: true,
-            modules: vec![ModuleStompingReport {
-                module_name: "EvilMod".into(),
-                severity: StompingSeverity::Critical,
-                confidence_score: 95,
-                is_stomped: true,
-                findings: vec![StompingFinding {
-                    severity: StompingSeverity::Critical,
-                    kind: StompingFindingKind::SourcePurged,
-                    description: "Source code purged".into(),
-                }],
-                source_procedure_count: 0,
-                pcode_procedure_count: 1,
-                source_line_count: 0,
-                pcode_line_count: 10,
+            project_findings: vec![StompingFinding {
+                severity: StompingSeverity::Medium,
+                kind: StompingFindingKind::ProjectLockedOrUnviewable,
+                description: "VBA project locked".into(),
             }],
+            modules: vec![
+                ModuleStompingReport {
+                    module_name: "EvilMod".into(),
+                    severity: StompingSeverity::Critical,
+                    confidence_score: 95,
+                    is_stomped: true,
+                    findings: vec![
+                        StompingFinding {
+                            severity: StompingSeverity::Critical,
+                            kind: StompingFindingKind::SourcePurged,
+                            description: "Source code purged".into(),
+                        },
+                        StompingFinding {
+                            severity: StompingSeverity::Critical,
+                            kind: StompingFindingKind::HiddenGuiModule("EvilMod".into()),
+                            description: "Module hidden from GUI".into(),
+                        },
+                    ],
+                    source_procedure_count: 0,
+                    pcode_procedure_count: 1,
+                    source_line_count: 0,
+                    pcode_line_count: 10,
+                },
+                ModuleStompingReport {
+                    module_name: "PurgedMod".into(),
+                    severity: StompingSeverity::Medium,
+                    confidence_score: 35,
+                    is_stomped: false,
+                    findings: vec![StompingFinding {
+                        severity: StompingSeverity::Medium,
+                        kind: StompingFindingKind::PerformanceCachePurged { source_lines: 5 },
+                        description: "Performance cache purged".into(),
+                    }],
+                    source_procedure_count: 1,
+                    pcode_procedure_count: 0,
+                    source_line_count: 5,
+                    pcode_line_count: 0,
+                },
+            ],
         };
 
         let s_json = stomping_to_json(&report);
         assert!(s_json.contains("\"overall_severity\":\"critical\""));
         assert!(s_json.contains("\"source_purged\""));
+        assert!(s_json.contains("\"hidden_gui_module\""));
+        assert!(s_json.contains("\"performance_cache_purged\""));
+        assert!(s_json.contains("\"project_locked_or_unviewable\""));
 
         let s_sarif = stomping_to_sarif(&report, "test.xlsm");
         assert!(s_sarif.contains("\"VBA-STOMP-001\""));
+        assert!(s_sarif.contains("\"VBA-STOMP-007\""));
+        assert!(s_sarif.contains("\"VBA-STOMP-008\""));
+        assert!(s_sarif.contains("\"VBA-STOMP-009\""));
         assert!(s_sarif.contains("\"error\""));
         assert!(s_sarif.contains("test.xlsm"));
 
         let s_md = stomping_to_markdown(&report);
         assert!(s_md.contains("CRITICAL"));
         assert!(s_md.contains("EvilMod"));
+        assert!(s_md.contains("PurgedMod"));
+        assert!(s_md.contains("Project-Level Indicators"));
     }
 }

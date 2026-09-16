@@ -109,6 +109,16 @@ fn synthesize_cfb_project(
     modules: &[(&str, &str, &[u8])],
     identifiers: &[&str],
 ) -> Vec<u8> {
+    synthesize_cfb_project_with_manifest(proj_name, modules, identifiers, None)
+}
+
+/// Synthesize a realistic CFB with optional custom PROJECT stream manifest.
+fn synthesize_cfb_project_with_manifest(
+    proj_name: &str,
+    modules: &[(&str, &str, &[u8])],
+    identifiers: &[&str],
+    manifest_override: Option<&str>,
+) -> Vec<u8> {
     assert!(
         modules.len() <= 3,
         "test synthesizer supports up to 3 modules in 2 directory sectors"
@@ -169,11 +179,15 @@ fn synthesize_cfb_project(
     }
 
     let dir_comp = comp_ovba(&dir_raw);
-    let mut project_str = format!("Name={proj_name}\r\n");
-    for &(mod_name, _, _) in modules {
-        project_str.push_str(&format!("Module={mod_name}\r\n"));
-    }
-    let project_stream = project_str.into_bytes();
+    let project_stream = if let Some(custom) = manifest_override {
+        custom.as_bytes().to_vec()
+    } else {
+        let mut project_str = format!("Name={proj_name}\r\n");
+        for &(mod_name, _, _) in modules {
+            project_str.push_str(&format!("Module={mod_name}\r\n"));
+        }
+        project_str.into_bytes()
+    };
 
     // Build _VBA_PROJECT stream with magic 0x61CC
     let mut vba_project_stream = Vec::new();
@@ -491,6 +505,78 @@ fn synthesize_xlsm(cfb_data: &[u8]) -> Vec<u8> {
         ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
         ("xl/vbaProject.bin", cfb_data),
     ])
+}
+
+/// Package CFB bytes and custom sheets into an OpenXML (.xlsm) ZIP container.
+fn synthesize_xlsm_with_sheets(
+    cfb_data: &[u8],
+    sheets: &[(&str, &str, &str)], // (sheet_name, rel_type, sheet_xml)
+) -> Vec<u8> {
+    let mut content_types = String::from(
+        "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.ms-excel.sheet.macroEnabled.main+xml\"/><Override PartName=\"/xl/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/>",
+    );
+    for (i, _) in sheets.iter().enumerate() {
+        content_types.push_str(&format!(
+            "<Override PartName=\"/xl/worksheets/sheet{}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>",
+            i + 1
+        ));
+    }
+    content_types.push_str("</Types>");
+
+    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
+
+    let mut wb = String::from(
+        "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><workbookPr codeName=\"ThisWorkbook\"/><sheets>",
+    );
+    for (i, (name, _, _)) in sheets.iter().enumerate() {
+        wb.push_str(&format!(
+            "<sheet name=\"{}\" sheetId=\"{}\" r:id=\"rId{}\"/>",
+            name,
+            i + 1,
+            i + 2
+        ));
+    }
+    wb.push_str("</sheets></workbook>");
+
+    let mut wb_rels = String::from(
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/>",
+    );
+    for (i, (_, rel_type, _)) in sheets.iter().enumerate() {
+        wb_rels.push_str(&format!(
+            "<Relationship Id=\"rId{}\" Type=\"{}\" Target=\"worksheets/sheet{}.xml\"/>",
+            i + 2,
+            rel_type,
+            i + 1
+        ));
+    }
+    wb_rels.push_str("</Relationships>");
+
+    let mut zip_entries: Vec<(String, Vec<u8>)> = vec![
+        (
+            "[Content_Types].xml".to_string(),
+            content_types.into_bytes(),
+        ),
+        ("_rels/.rels".to_string(), pkg_rels.as_bytes().to_vec()),
+        ("xl/workbook.xml".to_string(), wb.into_bytes()),
+        (
+            "xl/_rels/workbook.xml.rels".to_string(),
+            wb_rels.into_bytes(),
+        ),
+        ("xl/vbaProject.bin".to_string(), cfb_data.to_vec()),
+    ];
+
+    for (i, (_, _, sheet_xml)) in sheets.iter().enumerate() {
+        zip_entries.push((
+            format!("xl/worksheets/sheet{}.xml", i + 1),
+            sheet_xml.as_bytes().to_vec(),
+        ));
+    }
+
+    let refs: Vec<(&str, &[u8])> = zip_entries
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_slice()))
+        .collect();
+    synthesize_zip(&refs)
 }
 
 /// Package CFB bytes into a Word (.docm) macro container.
@@ -1317,4 +1403,195 @@ fn e2e_xltm_template_container_inspection() {
     );
     assert_eq!(inspection.extracted.modules.len(), 1);
     assert_eq!(inspection.extracted.modules[0].name, "TemplateModule");
+}
+
+#[test]
+fn e2e_evil_clippy_hidden_gui_module_and_locking_detection() {
+    let visible_src = "Attribute VB_Name = \"VisibleMod\"\nSub NormalHelper()\n    Dim x As Integer\n    x = 10\nEnd Sub\n";
+    let hidden_src = "Attribute VB_Name = \"EvilHiddenMod\"\nSub Auto_Open()\n    ' Auto exec evil hook hidden from VBA IDE\nEnd Sub\n";
+
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+
+    // Manifest contains CMG/DPB/GC protection locks, and ONLY declares VisibleMod.
+    // EvilHiddenMod is omitted from PROJECT (Evil Clippy technique).
+    let custom_manifest = "CMG=\"4446F0EB6CEF6CEF6CEF6C\"\r\nDPB=\"2426908F87C806C906C906\"\r\nGC=\"7E7CE2337F347F3400\"\r\nName=\"ProtectedProject\"\r\nModule=VisibleMod\r\n";
+
+    let cfb = synthesize_cfb_project_with_manifest(
+        "ProtectedProject",
+        &[
+            ("VisibleMod", visible_src, &pcode),
+            ("EvilHiddenMod", hidden_src, &pcode),
+        ],
+        &["NormalHelper", "Auto_Open"],
+        Some(custom_manifest),
+    );
+
+    let xlsm = synthesize_xlsm(&cfb);
+
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+
+    // Verify protection locks detected
+    assert!(
+        inspection.extracted.is_locked_or_unviewable,
+        "project should be flagged as locked/unviewable"
+    );
+    assert!(
+        inspection
+            .extracted
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("CMG/DPB/GC")),
+        "diagnostics should explain protection locks"
+    );
+
+    // Verify Evil Clippy hidden GUI module detected
+    assert_eq!(
+        inspection.extracted.hidden_gui_modules,
+        vec!["EvilHiddenMod".to_string()]
+    );
+    assert!(
+        inspection
+            .extracted
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("EvilHiddenMod") && d.contains("omitted from PROJECT")),
+        "diagnostics should flag hidden GUI module"
+    );
+
+    // Stomping / Tampering report validation
+    let stomping = &inspection.stomping_report;
+    assert!(
+        stomping.has_stomping,
+        "tampering should be flagged due to hidden GUI module"
+    );
+    assert_eq!(stomping.overall_severity, StompingSeverity::Critical);
+
+    // Project-level findings
+    assert!(
+        stomping
+            .project_findings
+            .iter()
+            .any(|f| matches!(f.kind, StompingFindingKind::ProjectLockedOrUnviewable)),
+        "project-level findings should include ProjectLockedOrUnviewable"
+    );
+
+    // Module findings
+    let evil_mod = stomping
+        .modules
+        .iter()
+        .find(|m| m.module_name == "EvilHiddenMod")
+        .expect("EvilHiddenMod should have a module report");
+    assert_eq!(evil_mod.severity, StompingSeverity::Critical);
+    assert!(
+        evil_mod.findings.iter().any(|f| matches!(
+            &f.kind,
+            StompingFindingKind::HiddenGuiModule(name) if name == "EvilHiddenMod"
+        )),
+        "findings should contain HiddenGuiModule"
+    );
+
+    // SARIF export verification
+    let sarif = stomping_to_sarif(stomping, "sample_protected.xlsm");
+    assert!(
+        sarif.contains("VBA-STOMP-008"),
+        "SARIF should include rule VBA-STOMP-008 (HiddenGuiModule)"
+    );
+    assert!(
+        sarif.contains("VBA-STOMP-009"),
+        "SARIF should include rule VBA-STOMP-009 (ProjectLockedOrUnviewable)"
+    );
+}
+
+#[test]
+fn e2e_vba_purging_detection() {
+    let src = "Attribute VB_Name = \"PurgedModule\"\nSub RunPurgedPayload()\n    MsgBox \"VBA Purging in Action\"\nEnd Sub\n";
+    // Empty P-code: 0 instructions
+    let empty_pcode = vec![0u8; 0];
+
+    let cfb = synthesize_cfb("PurgedProject", "PurgedModule", src, &empty_pcode);
+    let xlsm = synthesize_xlsm(&cfb);
+
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+
+    let stomping = &inspection.stomping_report;
+    let purged_mod = stomping
+        .modules
+        .iter()
+        .find(|m| m.module_name == "PurgedModule")
+        .expect("PurgedModule report should exist");
+
+    assert!(
+        purged_mod
+            .findings
+            .iter()
+            .any(|f| matches!(f.kind, StompingFindingKind::PerformanceCachePurged { .. })),
+        "should detect PerformanceCachePurged finding"
+    );
+
+    let sarif = stomping_to_sarif(stomping, "sample_purged.xlsm");
+    assert!(
+        sarif.contains("VBA-STOMP-007"),
+        "SARIF should include rule VBA-STOMP-007 (PerformanceCachePurged)"
+    );
+}
+
+#[test]
+fn e2e_xlsm_dde_and_xlm_macro_sheet_detection() {
+    let src = "Attribute VB_Name = \"DummyModule\"\nSub NormalSub()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "WorkbookTest",
+        &[("DummyModule", src, &pcode)],
+        &["NormalSub"],
+    );
+
+    let sheet_xml = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\"><c r=\"A1\"><f>=cmd|'/c calc.exe'!A1</f></c><c r=\"A2\"><f>=EXEC(\"powershell.exe\")</f></c></row></sheetData></worksheet>";
+    let xlsm = synthesize_xlsm_with_sheets(
+        &cfb,
+        &[(
+            "Sheet1",
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet",
+            sheet_xml,
+        )],
+    );
+
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+
+    assert!(
+        inspection
+            .extracted
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("Potential DDE execution formula")
+                && d.contains("=cmd|'/c calc.exe'!A1")),
+        "should flag DDE formula: {:?}",
+        inspection.extracted.diagnostics
+    );
+    assert!(
+        inspection.extracted.diagnostics.iter().any(|d| d
+            .contains("Potential Excel 4.0 (XLM) macro execution formula")
+            && d.contains("=EXEC(\"powershell.exe\")")),
+        "should flag XLM execution formula: {:?}",
+        inspection.extracted.diagnostics
+    );
 }
