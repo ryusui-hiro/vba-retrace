@@ -157,9 +157,13 @@ fn run() -> Result<(), String> {
             || Path::new(p).extension().is_some_and(|e| {
                 let s = e.to_string_lossy();
                 s.eq_ignore_ascii_case("xlsm")
+                    || s.eq_ignore_ascii_case("xltm")
+                    || s.eq_ignore_ascii_case("xlam")
                     || s.eq_ignore_ascii_case("xlsb")
                     || s.eq_ignore_ascii_case("docm")
+                    || s.eq_ignore_ascii_case("dotm")
                     || s.eq_ignore_ascii_case("pptm")
+                    || s.eq_ignore_ascii_case("ppam")
                     || s.eq_ignore_ascii_case("xls")
                     || s.eq_ignore_ascii_case("bin")
             });

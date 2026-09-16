@@ -690,6 +690,39 @@ impl Evaluator<'_> {
                     (number * factor).round() / factor,
                 )))
             }
+            "roundup" | "rounddown" | "trunc" => {
+                if !(1..=2).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let number = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let digits = if arguments.len() == 2 {
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)? as i32
+                } else {
+                    0
+                };
+                if !(-15..=15).contains(&digits) {
+                    return Err("unsupported");
+                }
+                let factor = 10f64.powi(digits);
+                let rounded = match name {
+                    "roundup" => {
+                        if number >= 0.0 {
+                            (number * factor).ceil() / factor
+                        } else {
+                            (number * factor).floor() / factor
+                        }
+                    }
+                    "rounddown" | "trunc" => {
+                        if number >= 0.0 {
+                            (number * factor).floor() / factor
+                        } else {
+                            (number * factor).ceil() / factor
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                Ok(EvalValue::Scalar(FormulaValue::Number(rounded)))
+            }
             "true" if arguments.is_empty() => Ok(EvalValue::Scalar(FormulaValue::Boolean(true))),
             "false" if arguments.is_empty() => Ok(EvalValue::Scalar(FormulaValue::Boolean(false))),
             "iferror" if arguments.len() == 2 => match self.eval_scalar(&arguments[0], depth + 1) {
@@ -777,7 +810,7 @@ impl Evaluator<'_> {
                 Ok(EvalValue::Scalar(FormulaValue::Number(n.powf(p))))
             }
             "len" | "left" | "right" | "mid" | "concatenate" | "concat" | "value" | "trim"
-            | "upper" | "lower" | "exact" | "rept" => {
+            | "upper" | "lower" | "exact" | "rept" | "substitute" | "replace" => {
                 self.evaluate_string_function(name, arguments, depth + 1)
             }
             _ => Err("unsupported"),
@@ -935,6 +968,58 @@ impl Evaluator<'_> {
                     return Err("resource_limit");
                 }
                 let value = s.repeat(times);
+                self.check_string_size(&value)?;
+                Ok(EvalValue::Scalar(FormulaValue::String(value)))
+            }
+            "substitute" if arguments.len() == 3 || arguments.len() == 4 => {
+                let text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let old_text = to_string(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let new_text = to_string(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let instance = if arguments.len() == 4 {
+                    Some(nonnegative_count(
+                        &self.eval_scalar(&arguments[3], depth + 1)?,
+                    )?)
+                } else {
+                    None
+                };
+                let value = if old_text.is_empty() {
+                    text
+                } else if let Some(target_inst) = instance {
+                    if target_inst == 0 {
+                        text
+                    } else {
+                        let mut count = 0;
+                        let mut result = String::new();
+                        let mut last_end = 0;
+                        for (idx, m) in text.match_indices(&old_text) {
+                            count += 1;
+                            if count == target_inst {
+                                result.push_str(&text[last_end..idx]);
+                                result.push_str(&new_text);
+                                last_end = idx + m.len();
+                                break;
+                            }
+                        }
+                        result.push_str(&text[last_end..]);
+                        result
+                    }
+                } else {
+                    text.replace(&old_text, &new_text)
+                };
+                self.check_string_size(&value)?;
+                Ok(EvalValue::Scalar(FormulaValue::String(value)))
+            }
+            "replace" if arguments.len() == 4 => {
+                let old_text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let start_num = nonnegative_count(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let num_chars = nonnegative_count(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let new_text = to_string(&self.eval_scalar(&arguments[3], depth + 1)?)?;
+                if start_num == 0 {
+                    return Err("unsupported");
+                }
+                let prefix: String = old_text.chars().take(start_num - 1).collect();
+                let suffix: String = old_text.chars().skip(start_num - 1 + num_chars).collect();
+                let value = format!("{prefix}{new_text}{suffix}");
                 self.check_string_size(&value)?;
                 Ok(EvalValue::Scalar(FormulaValue::String(value)))
             }
@@ -1343,6 +1428,64 @@ mod tests {
         assert_eq!(
             evaluate_formula("=REPT(\"Abc\", 3)", Some("Data"), &[], Default::default()).value,
             Some(FormulaValue::String("AbcAbcAbc".into()))
+        );
+
+        // ROUNDUP, ROUNDDOWN, TRUNC
+        assert_eq!(
+            evaluate_formula(
+                "=ROUNDUP(12.3456, 2)",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(12.35))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ROUNDDOWN(12.3456, 2)",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(12.34))
+        );
+        assert_eq!(
+            evaluate_formula("=TRUNC(3.9)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(3.0))
+        );
+
+        // SUBSTITUTE, REPLACE
+        assert_eq!(
+            evaluate_formula(
+                "=SUBSTITUTE(\"Sales Data\", \"Sales\", \"Cost\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("Cost Data".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=SUBSTITUTE(\"ababab\", \"b\", \"c\", 2)",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("abacab".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=REPLACE(\"ABCDEF\", 3, 2, \"123\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("AB123EF".into()))
         );
     }
 }
