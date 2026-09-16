@@ -286,19 +286,91 @@ pub fn extract_vba_project_with_pcode_profile(
 
 pub fn extract_vba_project(data: &[u8], limits: &Limits) -> Result<ExtractedProject, String> {
     let cfb = CompoundFile::open(data, limits)?;
-    let dir = cfb
-        .stream_by_path("VBA/dir")?
-        .ok_or_else(|| "VBA storage has no dir stream".to_string())?;
-    let project = cfb.stream_by_path("PROJECT")?;
-    let cache = cfb.stream_by_path("VBA/_VBA_PROJECT")?;
+
+    // Locate the `dir` stream and determine the VBA storage prefix.
+    // Standard path is "VBA/dir", but legacy files (e.g. .xls) or custom packages
+    // may nest it under "_VBA_PROJECT_CUR/VBA/dir", "Macros/VBA/dir", etc.
+    let (vba_prefix, dir) = match cfb.stream_by_path("VBA/dir")? {
+        Some(d) => ("VBA/".to_string(), d),
+        None => {
+            let mut found = None;
+            for e in &cfb.entries {
+                if e.kind != 2 {
+                    continue;
+                }
+                let p_lower = e.path.to_ascii_lowercase();
+                let is_dir = p_lower == "vba/dir"
+                    || p_lower.ends_with("/vba/dir")
+                    || e.name.eq_ignore_ascii_case("dir");
+                if !is_dir {
+                    continue;
+                }
+                if let Ok(bytes) = cfb.stream(e) {
+                    let prefix = if let Some(idx) = p_lower.rfind("dir") {
+                        e.path[..idx].to_string()
+                    } else {
+                        String::new()
+                    };
+                    found = Some((prefix, bytes));
+                    break;
+                }
+            }
+            match found {
+                Some((p, d)) => (p, d),
+                None => {
+                    let is_encrypted = cfb.entries.iter().any(|e| {
+                        let clean = e.name.trim_start_matches('\x06').trim_matches('\0').trim();
+                        clean.eq_ignore_ascii_case("EncryptionInfo")
+                            || clean.eq_ignore_ascii_case("EncryptedPackage")
+                    });
+                    if is_encrypted {
+                        return Err(
+                            "encrypted Office container detected (contains EncryptedPackage/EncryptionInfo); password decryption required to inspect macros"
+                                .to_string(),
+                        );
+                    }
+                    return Err("VBA storage has no dir stream".to_string());
+                }
+            }
+        }
+    };
+
+    let project_path = if vba_prefix.is_empty() || vba_prefix == "VBA/" {
+        "PROJECT".to_string()
+    } else {
+        let parent_prefix = vba_prefix
+            .strip_suffix("VBA/")
+            .or_else(|| vba_prefix.strip_suffix("vba/"))
+            .unwrap_or("");
+        format!("{parent_prefix}PROJECT")
+    };
+    let project = cfb
+        .stream_by_path(&project_path)
+        .ok()
+        .flatten()
+        .or_else(|| cfb.stream_by_path("PROJECT").ok().flatten());
+    let cache_path = format!("{vba_prefix}_VBA_PROJECT");
+    let cache = cfb
+        .stream_by_path(&cache_path)
+        .ok()
+        .flatten()
+        .or_else(|| cfb.stream_by_path("VBA/_VBA_PROJECT").ok().flatten());
+
     let mut streams = Vec::new();
     let mut srp_caches = Vec::new();
     let mut total = 0usize;
+    let vba_prefix_lower = vba_prefix.to_ascii_lowercase();
+    let dir_path_lower = format!("{vba_prefix_lower}dir");
+    let cache_path_lower = format!("{vba_prefix_lower}_vba_project");
+
     for e in &cfb.entries {
+        let p_lower = e.path.to_ascii_lowercase();
         if e.kind != 2
-            || !e.path.to_ascii_lowercase().starts_with("vba/")
-            || e.path.eq_ignore_ascii_case("VBA/dir")
-            || e.path.eq_ignore_ascii_case("VBA/_VBA_PROJECT")
+            || !p_lower.starts_with(&vba_prefix_lower)
+            || p_lower == dir_path_lower
+            || p_lower == cache_path_lower
+            || p_lower.ends_with("/dir")
+            || p_lower.ends_with("/_vba_project")
         {
             continue;
         }
@@ -309,7 +381,7 @@ pub fn extract_vba_project(data: &[u8], limits: &Limits) -> Result<ExtractedProj
         if total > limits.max_decompressed_bytes {
             return Err("total VBA streams exceed configured limit".into());
         }
-        if is_srp_stream_path(&e.path) {
+        if is_srp_stream_name(&e.name) {
             srp_caches.push(SrpCacheRecord {
                 stream_name: e.name.clone(),
                 byte_length: bytes.len(),
@@ -339,6 +411,7 @@ pub fn extract_vba_project(data: &[u8], limits: &Limits) -> Result<ExtractedProj
     Ok(extracted)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn is_srp_stream_path(path: &str) -> bool {
     let mut parts = path.split('/');
     matches!((parts.next(), parts.next(), parts.next()), (Some(storage), Some(name), None)
@@ -461,7 +534,7 @@ pub fn extract_macro_container(data: &[u8], limits: &Limits) -> Result<Extracted
                     }
                     if found_entry.is_none() {
                         for entry in &zip.entries {
-                            if entry.name.ends_with("vbaProject.bin") {
+                            if entry.name.to_ascii_lowercase().ends_with("vbaproject.bin") {
                                 found_entry = Some(entry);
                                 break;
                             }

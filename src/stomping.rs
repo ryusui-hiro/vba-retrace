@@ -87,6 +87,7 @@ static SUSPICIOUS_PATTERNS: &[&str] = &[
     "https://",
     "ftp://",
     "powershell",
+    "pwsh",
     "cmd.exe",
     "wscript",
     "cscript",
@@ -95,6 +96,24 @@ static SUSPICIOUS_PATTERNS: &[&str] = &[
     "rundll32",
     "regsvr32",
     "mshta",
+    "wmic",
+    "curl",
+    "msiexec",
+    "schtasks",
+    "invoke-expression",
+    "invoke-webrequest",
+    "downloadfile",
+    "downloadstring",
+    "createtextfile",
+    "urldownloadtofile",
+    "winexec",
+    "shellexecute",
+    "-encodedcommand",
+    "-enc ",
+    "-executionpolicy bypass",
+    "-ep bypass",
+    "-windowstyle hidden",
+    "-w hidden",
     ".exe",
     ".dll",
     ".vbs",
@@ -102,14 +121,8 @@ static SUSPICIOUS_PATTERNS: &[&str] = &[
     ".ps1",
     ".vbe",
     ".hta",
-    "wmic",
-    "invoke-expression",
-    "downloadfile",
-    "downloadstring",
-    "createtextfile",
-    "urldownloadtofile",
-    "winexec",
-    "shellexecute",
+    ".scr",
+    ".pif",
 ];
 
 /// Known sensitive APIs or procedure names.
@@ -119,23 +132,71 @@ static SENSITIVE_CALLS: &[&str] = &[
     "GetObject",
     "URLDownloadToFile",
     "URLDownloadToFileA",
+    "URLDownloadToFileW",
+    "URLDownloadToCacheFileA",
     "WinExec",
     "ShellExecute",
     "ShellExecuteA",
+    "ShellExecuteW",
+    "CreateProcess",
+    "CreateProcessA",
+    "CreateProcessW",
+    "CreateThread",
+    "OpenProcess",
+    "TerminateProcess",
     "InternetOpen",
+    "InternetOpenA",
+    "InternetOpenW",
     "InternetOpenUrl",
+    "InternetOpenUrlA",
+    "InternetOpenUrlW",
     "HttpOpenRequest",
     "HttpSendRequest",
+    "HttpSendRequestA",
+    "HttpSendRequestW",
+    "WinHttpOpen",
+    "WinHttpConnect",
+    "WinHttpSendRequest",
     "VirtualAlloc",
+    "VirtualAllocEx",
     "VirtualProtect",
+    "VirtualProtectEx",
     "RtlMoveMemory",
     "WriteProcessMemory",
+    "ReadProcessMemory",
     "CreateRemoteThread",
+    "QueueUserAPC",
+    "NtTestAlert",
+    "MapViewOfFile",
+    "CreateFileMappingA",
+    "CreateFileMappingW",
     "WScript.Shell",
+    "Shell.Application",
     "Scripting.FileSystemObject",
     "ADODB.Stream",
     "MSXML2.XMLHTTP",
+    "MSXML2.ServerXMLHTTP",
     "Microsoft.XMLHTTP",
+    "Schedule.Service",
+    "WbemScripting.SWbemLocator",
+    "System.Diagnostics.Process",
+    "ExecuteExcel4Macro",
+    "MacScript",
+];
+
+/// Common auto-execution hook procedures frequently targeted in macro attacks.
+static AUTO_EXEC_HOOKS: &[&str] = &[
+    "autoopen",
+    "autoclose",
+    "document_open",
+    "document_close",
+    "auto_open",
+    "auto_close",
+    "workbook_open",
+    "workbook_beforeclose",
+    "autoexec",
+    "autoexit",
+    "documentopen",
 ];
 
 /// Inspect a module for evidence of VBA Stomping by contrasting source text and P-code disassembly.
@@ -234,15 +295,34 @@ pub fn detect_vba_stomping(
             .iter()
             .any(|sp| sp.eq_ignore_ascii_case(pcode_proc));
         if !found {
+            let is_auto_hook = AUTO_EXEC_HOOKS
+                .iter()
+                .any(|h| pcode_proc.eq_ignore_ascii_case(h));
+            let (severity, add_score, description) = if is_auto_hook {
+                (
+                    StompingSeverity::Critical,
+                    60u8,
+                    format!(
+                        "Auto-executing procedure hook '{}' is compiled into P-code but completely hidden from readable VBA source.",
+                        pcode_proc
+                    ),
+                )
+            } else {
+                (
+                    StompingSeverity::High,
+                    40u8,
+                    format!(
+                        "Procedure '{}' is compiled into P-code but does not exist in the readable VBA source.",
+                        pcode_proc
+                    ),
+                )
+            };
             findings.push(StompingFinding {
-                severity: StompingSeverity::High,
+                severity,
                 kind: StompingFindingKind::ProcedureHiddenInPCode(pcode_proc.clone()),
-                description: format!(
-                    "Procedure '{}' is compiled into P-code but does not exist in the readable VBA source.",
-                    pcode_proc
-                ),
+                description,
             });
-            score = score.saturating_add(40);
+            score = score.saturating_add(add_score);
         }
     }
 
@@ -341,7 +421,7 @@ pub fn detect_vba_stomping(
     }
 
     let final_score = score.min(100);
-    let severity = if final_score >= 80 {
+    let score_severity = if final_score >= 80 {
         StompingSeverity::Critical
     } else if final_score >= 50 {
         StompingSeverity::High
@@ -352,6 +432,12 @@ pub fn detect_vba_stomping(
     } else {
         StompingSeverity::Clean
     };
+    let max_finding_severity = findings
+        .iter()
+        .map(|f| f.severity)
+        .max()
+        .unwrap_or(StompingSeverity::Clean);
+    let severity = score_severity.max(max_finding_severity);
 
     ModuleStompingReport {
         module_name: module_name.to_string(),
@@ -470,5 +556,21 @@ mod tests {
             &f.kind,
             StompingFindingKind::SensitiveCallInPCode(call) if call == "URLDownloadToFile"
         )));
+    }
+
+    #[test]
+    fn detects_hidden_auto_exec_procedure_in_pcode() {
+        let source = "Sub Harmless()\n    Dim x As Integer\nEnd Sub\n";
+        let pcode = make_synthetic_pcode(&["Harmless", "AutoOpen"], &[], &[], 6);
+        let report = detect_vba_stomping("Module1", Some(source), Some(&pcode));
+
+        assert!(report.is_stomped);
+        assert_eq!(report.severity, StompingSeverity::Critical);
+        assert_eq!(report.confidence_score, 60);
+        assert!(report.findings.iter().any(|f| {
+            f.severity == StompingSeverity::Critical
+                && matches!(&f.kind, StompingFindingKind::ProcedureHiddenInPCode(name) if name == "AutoOpen")
+                && f.description.contains("Auto-executing procedure hook")
+        }));
     }
 }

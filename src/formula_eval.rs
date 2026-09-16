@@ -403,15 +403,6 @@ impl Parser<'_> {
             Token::Number(value) => Ok(Expr::Value(FormulaValue::Number(value))),
             Token::String(value) => Ok(Expr::Value(FormulaValue::String(value))),
             Token::Ident(name) | Token::Sheet(name) => {
-                if name.eq_ignore_ascii_case("true") {
-                    return Ok(Expr::Value(FormulaValue::Boolean(true)));
-                }
-                if name.eq_ignore_ascii_case("false") {
-                    return Ok(Expr::Value(FormulaValue::Boolean(false)));
-                }
-                if name.starts_with('#') {
-                    return Ok(Expr::Value(FormulaValue::Error(name)));
-                }
                 if matches!(self.tokens.get(self.position), Some(Token::LParen)) {
                     self.position += 1;
                     let mut arguments = Vec::new();
@@ -432,6 +423,15 @@ impl Parser<'_> {
                         name: name.to_ascii_lowercase(),
                         arguments,
                     });
+                }
+                if name.eq_ignore_ascii_case("true") {
+                    return Ok(Expr::Value(FormulaValue::Boolean(true)));
+                }
+                if name.eq_ignore_ascii_case("false") {
+                    return Ok(Expr::Value(FormulaValue::Boolean(false)));
+                }
+                if name.starts_with('#') {
+                    return Ok(Expr::Value(FormulaValue::Error(name)));
                 }
                 let (sheet, cell_name) = if matches!(self.tokens.get(self.position), Some(Token::Operator(operator)) if operator == "!")
                 {
@@ -690,8 +690,96 @@ impl Evaluator<'_> {
                     (number * factor).round() / factor,
                 )))
             }
-            "len" | "left" | "right" | "mid" | "concatenate" | "value" | "trim" | "upper"
-            | "lower" => self.evaluate_string_function(name, arguments, depth + 1),
+            "true" if arguments.is_empty() => Ok(EvalValue::Scalar(FormulaValue::Boolean(true))),
+            "false" if arguments.is_empty() => Ok(EvalValue::Scalar(FormulaValue::Boolean(false))),
+            "iferror" if arguments.len() == 2 => match self.eval_scalar(&arguments[0], depth + 1) {
+                Ok(FormulaValue::Error(_)) => self.evaluate(&arguments[1], depth + 1),
+                Ok(scalar) => Ok(EvalValue::Scalar(scalar)),
+                Err(_) => self.evaluate(&arguments[1], depth + 1),
+            },
+            "isnumber" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                Ok(EvalValue::Scalar(FormulaValue::Boolean(matches!(
+                    val,
+                    FormulaValue::Number(_)
+                ))))
+            }
+            "isblank" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                Ok(EvalValue::Scalar(FormulaValue::Boolean(matches!(
+                    val,
+                    FormulaValue::Blank
+                ))))
+            }
+            "iserror" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                Ok(EvalValue::Scalar(FormulaValue::Boolean(matches!(
+                    val,
+                    FormulaValue::Error(_)
+                ))))
+            }
+            "isna" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                let is_na =
+                    matches!(&val, FormulaValue::Error(s) if s.eq_ignore_ascii_case("#N/A"));
+                Ok(EvalValue::Scalar(FormulaValue::Boolean(is_na)))
+            }
+            "istext" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                Ok(EvalValue::Scalar(FormulaValue::Boolean(matches!(
+                    val,
+                    FormulaValue::String(_)
+                ))))
+            }
+            "islogical" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                Ok(EvalValue::Scalar(FormulaValue::Boolean(matches!(
+                    val,
+                    FormulaValue::Boolean(_)
+                ))))
+            }
+            "int" if arguments.len() == 1 => {
+                let number = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(FormulaValue::Number(number.floor())))
+            }
+            "mod" if arguments.len() == 2 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let d = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                if d == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())))
+                } else {
+                    let r = n - d * (n / d).floor();
+                    Ok(EvalValue::Scalar(FormulaValue::Number(r)))
+                }
+            }
+            "sign" if arguments.len() == 1 => {
+                let number = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let s = if number > 0.0 {
+                    1.0
+                } else if number < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                };
+                Ok(EvalValue::Scalar(FormulaValue::Number(s)))
+            }
+            "sqrt" if arguments.len() == 1 => {
+                let number = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if number < 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(number.sqrt())))
+                }
+            }
+            "power" if arguments.len() == 2 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let p = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                Ok(EvalValue::Scalar(FormulaValue::Number(n.powf(p))))
+            }
+            "len" | "left" | "right" | "mid" | "concatenate" | "concat" | "value" | "trim"
+            | "upper" | "lower" | "exact" | "rept" => {
+                self.evaluate_string_function(name, arguments, depth + 1)
+            }
             _ => Err("unsupported"),
         }
     }
@@ -766,9 +854,13 @@ impl Evaluator<'_> {
                 let number = text.trim().parse::<f64>().map_err(|_| "unsupported")?;
                 Ok(EvalValue::Scalar(FormulaValue::Number(number)))
             }
-            "left" | "right" if arguments.len() == 2 => {
+            "left" | "right" if arguments.len() == 1 || arguments.len() == 2 => {
                 let text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
-                let count = nonnegative_count(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let count = if arguments.len() == 2 {
+                    nonnegative_count(&self.eval_scalar(&arguments[1], depth + 1)?)?
+                } else {
+                    1
+                };
                 let value = if name == "left" {
                     text.chars().take(count).collect::<String>()
                 } else {
@@ -795,7 +887,7 @@ impl Evaluator<'_> {
                 self.check_string_size(&value)?;
                 Ok(EvalValue::Scalar(FormulaValue::String(value)))
             }
-            "concatenate" if !arguments.is_empty() => {
+            "concatenate" | "concat" if !arguments.is_empty() => {
                 let mut value = String::new();
                 for argument in arguments {
                     value.push_str(&to_string(&self.eval_scalar(argument, depth + 1)?)?);
@@ -824,6 +916,25 @@ impl Evaluator<'_> {
                         value.push_str(w);
                     }
                 }
+                self.check_string_size(&value)?;
+                Ok(EvalValue::Scalar(FormulaValue::String(value)))
+            }
+            "exact" if arguments.len() == 2 => {
+                let s1 = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let s2 = to_string(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                Ok(EvalValue::Scalar(FormulaValue::Boolean(s1 == s2)))
+            }
+            "rept" if arguments.len() == 2 => {
+                let s = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let times = nonnegative_count(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                if times > 32767 {
+                    return Err("resource_limit");
+                }
+                let total_bytes = s.len().saturating_mul(times);
+                if total_bytes > self.limits.max_string_bytes {
+                    return Err("resource_limit");
+                }
+                let value = s.repeat(times);
                 self.check_string_size(&value)?;
                 Ok(EvalValue::Scalar(FormulaValue::String(value)))
             }
@@ -1102,6 +1213,136 @@ mod tests {
         assert_eq!(
             trim_res.value,
             Some(FormulaValue::String("Hello World".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_extended_math_logic_and_string_functions() {
+        let cells = [
+            cell("A1", "10", "n"),
+            cell("A2", "3", "n"),
+            cell("A3", "Excel", "str"),
+            cell("A4", "#N/A", "e"),
+        ];
+
+        // TRUE() and FALSE()
+        let t = evaluate_formula("=TRUE()", Some("Data"), &[], Default::default());
+        assert_eq!(t.value, Some(FormulaValue::Boolean(true)));
+        let f = evaluate_formula("=FALSE()", Some("Data"), &[], Default::default());
+        assert_eq!(f.value, Some(FormulaValue::Boolean(false)));
+
+        // IFERROR
+        let iferr1 = evaluate_formula(
+            "=IFERROR(1/0, \"fallback\")",
+            Some("Data"),
+            &[],
+            Default::default(),
+        );
+        assert_eq!(iferr1.value, Some(FormulaValue::String("fallback".into())));
+        let iferr2 = evaluate_formula(
+            "=IFERROR(5*2, \"fallback\")",
+            Some("Data"),
+            &[],
+            Default::default(),
+        );
+        assert_eq!(iferr2.value, Some(FormulaValue::Number(10.0)));
+
+        // Information functions
+        assert_eq!(
+            evaluate_formula("=ISNUMBER(A1)", Some("Data"), &cells, Default::default()).value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula("=ISBLANK(B10)", Some("Data"), &cells, Default::default()).value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula("=ISERROR(1/0)", Some("Data"), &cells, Default::default()).value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula("=ISNA(A4)", Some("Data"), &cells, Default::default()).value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula("=ISTEXT(A3)", Some("Data"), &cells, Default::default()).value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ISLOGICAL(TRUE())",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Boolean(true))
+        );
+
+        // Math: INT, MOD, SIGN, SQRT, POWER
+        assert_eq!(
+            evaluate_formula("=INT(7.8)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(7.0))
+        );
+        assert_eq!(
+            evaluate_formula("=MOD(10, 3)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=SIGN(-42)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(-1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=SQRT(16)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(4.0))
+        );
+        assert_eq!(
+            evaluate_formula("=POWER(2, 8)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(256.0))
+        );
+
+        // String: LEFT (1 & 2 args), RIGHT (1 & 2 args), CONCAT, EXACT, REPT
+        assert_eq!(
+            evaluate_formula("=LEFT(\"Macro\")", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("M".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=RIGHT(\"Macro\")", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("o".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=CONCAT(\"Foo\", \"Bar\", \"Baz\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("FooBarBaz".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=EXACT(\"test\", \"test\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=EXACT(\"test\", \"Test\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Boolean(false))
+        );
+        assert_eq!(
+            evaluate_formula("=REPT(\"Abc\", 3)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("AbcAbcAbc".into()))
         );
     }
 }

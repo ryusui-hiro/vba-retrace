@@ -349,7 +349,7 @@ fn synthesize_cfb_project(
     file[1536..2048].copy_from_slice(&dir_entries[512..]);
 
     // MiniFAT sector (sector 3: offset 2048..2560)
-    for (i, val) in minifat.iter().enumerate() {
+    for (i, val) in minifat[..128].iter().enumerate() {
         put32(&mut file, 2048 + i * 4, *val);
     }
 
@@ -545,6 +545,315 @@ fn synthesize_xlsb(cfb_data: &[u8]) -> Vec<u8> {
 /// Package CFB bytes into a stripped ZIP container without OPC XML metadata.
 fn synthesize_stripped_zip(cfb_data: &[u8], entry_name: &str) -> Vec<u8> {
     synthesize_zip(&[(entry_name, cfb_data)])
+}
+
+/// Package CFB bytes into an Excel Template (.xltm) macro container.
+fn synthesize_xltm(cfb_data: &[u8]) -> Vec<u8> {
+    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.ms-excel.template.macroEnabled.main+xml\"/><Override PartName=\"/xl/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/></Types>";
+    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
+    let wb = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheets><sheet name=\"TemplateSheet\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>";
+    let wb_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/></Relationships>";
+
+    synthesize_zip(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", pkg_rels.as_bytes()),
+        ("xl/workbook.xml", wb.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb_data),
+    ])
+}
+
+/// Synthesize an encrypted OLE Compound File (password-protected Office package).
+fn synthesize_encrypted_cfb() -> Vec<u8> {
+    let mut cfb = vec![0u8; 512 * 4];
+    cfb[0..8].copy_from_slice(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]);
+    put16(&mut cfb, 26, 3);
+    put16(&mut cfb, 28, 0xFFFE);
+    put16(&mut cfb, 30, 9);
+    put16(&mut cfb, 32, 6);
+    put32(&mut cfb, 44, 1);
+    put32(&mut cfb, 48, 1);
+    put32(&mut cfb, 56, 4096);
+    put32(&mut cfb, 60, 0xFFFFFFFE);
+    put32(&mut cfb, 64, 0);
+    put32(&mut cfb, 68, 0xFFFFFFFE);
+    put32(&mut cfb, 72, 0);
+    put32(&mut cfb, 76, 0);
+    for i in 1..109 {
+        put32(&mut cfb, 76 + i * 4, 0xFFFFFFFF);
+    }
+
+    let fat_off = 512;
+    put32(&mut cfb, fat_off, 0xFFFFFFFD);
+    put32(&mut cfb, fat_off + 4, 0xFFFFFFFE);
+    put32(&mut cfb, fat_off + 8, 0xFFFFFFFE);
+    for i in 3..128 {
+        put32(&mut cfb, fat_off + i * 4, 0xFFFFFFFF);
+    }
+
+    let dir_off = 1024;
+    put_cfb_entry(
+        &mut cfb[dir_off..],
+        0,
+        "Root Entry",
+        5,
+        0xFFFFFFFF,
+        0xFFFFFFFF,
+        1,
+        0xFFFFFFFE,
+        0,
+    );
+    put_cfb_entry(
+        &mut cfb[dir_off..],
+        1,
+        "EncryptionInfo",
+        2,
+        0xFFFFFFFF,
+        2,
+        0xFFFFFFFF,
+        2,
+        16,
+    );
+    put_cfb_entry(
+        &mut cfb[dir_off..],
+        2,
+        "EncryptedPackage",
+        2,
+        0xFFFFFFFF,
+        0xFFFFFFFF,
+        0xFFFFFFFF,
+        0xFFFFFFFE,
+        0,
+    );
+
+    cfb[1536..1536 + 16].copy_from_slice(b"AgileEncryption!");
+    cfb
+}
+
+/// Synthesize a legacy CFB project nested under _VBA_PROJECT_CUR/VBA
+fn synthesize_nested_cfb(
+    proj_name: &str,
+    module_name: &str,
+    source_code: &str,
+    pcode_bytes: &[u8],
+) -> Vec<u8> {
+    let mut dir_raw = Vec::new();
+    record_dir(0x0001, &1u32.to_le_bytes(), &mut dir_raw); // SYSKIND = Win32
+    record_dir(0x0002, &0x0409u32.to_le_bytes(), &mut dir_raw); // LCID
+    record_dir(0x0014, &0x0409u32.to_le_bytes(), &mut dir_raw);
+    record_dir(0x0003, &1252u16.to_le_bytes(), &mut dir_raw); // CodePage CP1252
+    record_dir(0x0004, proj_name.as_bytes(), &mut dir_raw); // ProjectName
+    dir_raw.extend_from_slice(&0x0005u16.to_le_bytes());
+    dir_raw.extend_from_slice(&0u32.to_le_bytes());
+    dir_raw.extend_from_slice(&0x0040u16.to_le_bytes());
+    dir_raw.extend_from_slice(&0u32.to_le_bytes());
+    dir_raw.extend_from_slice(&0x0006u16.to_le_bytes());
+    dir_raw.extend_from_slice(&0u32.to_le_bytes());
+    dir_raw.extend_from_slice(&0x003du16.to_le_bytes());
+    dir_raw.extend_from_slice(&0u32.to_le_bytes());
+    record_dir(0x0007, &0u32.to_le_bytes(), &mut dir_raw);
+    record_dir(0x0008, &0u32.to_le_bytes(), &mut dir_raw);
+    dir_raw.extend_from_slice(&0x0009u16.to_le_bytes());
+    dir_raw.extend_from_slice(&4u32.to_le_bytes());
+    dir_raw.extend_from_slice(&0x0097u32.to_le_bytes());
+    dir_raw.extend_from_slice(&1u16.to_le_bytes());
+
+    // PROJECTMODULES header
+    dir_raw.extend_from_slice(&0x000fu16.to_le_bytes());
+    dir_raw.extend_from_slice(&2u32.to_le_bytes());
+    dir_raw.extend_from_slice(&1u16.to_le_bytes());
+    dir_raw.extend_from_slice(&0x0013u16.to_le_bytes());
+    dir_raw.extend_from_slice(&2u32.to_le_bytes());
+    dir_raw.extend_from_slice(&0xffffu16.to_le_bytes()); // cookie
+
+    record_dir(0x0019, module_name.as_bytes(), &mut dir_raw);
+    let name16 = module_name
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    record_dir(0x0047, &name16, &mut dir_raw);
+    record_dir(0x001a, module_name.as_bytes(), &mut dir_raw);
+    dir_raw.extend_from_slice(&0x0032u16.to_le_bytes());
+    dir_raw.extend_from_slice(&(name16.len() as u32).to_le_bytes());
+    dir_raw.extend_from_slice(&name16);
+    record_dir(0x001c, b"", &mut dir_raw);
+    dir_raw.extend_from_slice(&0x0048u16.to_le_bytes());
+    dir_raw.extend_from_slice(&0u32.to_le_bytes());
+
+    // Text offset record (0x0031)
+    let text_offset = pcode_bytes.len() as u32;
+    record_dir(0x0031, &text_offset.to_le_bytes(), &mut dir_raw);
+    record_dir(0x001e, &0u32.to_le_bytes(), &mut dir_raw);
+    record_dir(0x002c, &0xffffu16.to_le_bytes(), &mut dir_raw);
+    record_dir(0x0021, &0u32.to_le_bytes(), &mut dir_raw);
+    dir_raw.extend_from_slice(&0x002bu16.to_le_bytes());
+    dir_raw.extend_from_slice(&0u32.to_le_bytes());
+
+    let dir_comp = comp_ovba(&dir_raw);
+    let project_stream = format!("Name={proj_name}\r\nModule={module_name}\r\n").into_bytes();
+
+    let mut vba_project_stream = Vec::new();
+    vba_project_stream.extend_from_slice(&0x61CCu16.to_le_bytes());
+    vba_project_stream.extend_from_slice(&0x0097u16.to_le_bytes()); // VBA7
+    vba_project_stream.extend_from_slice(&0x0000u16.to_le_bytes());
+    vba_project_stream.resize(0x1E, 0);
+    vba_project_stream.extend_from_slice(&0u16.to_le_bytes()); // numRefs
+    vba_project_stream.extend_from_slice(&0u16.to_le_bytes());
+    vba_project_stream.extend_from_slice(&0u16.to_le_bytes()); // class table
+    vba_project_stream.extend_from_slice(&0u16.to_le_bytes()); // compile pairs
+    vba_project_stream.extend_from_slice(&0u16.to_le_bytes());
+    vba_project_stream.extend_from_slice(&0u16.to_le_bytes()); // typeinfo
+    vba_project_stream.extend_from_slice(&0u16.to_le_bytes()); // desc
+    vba_project_stream.extend_from_slice(&0u16.to_le_bytes()); // help
+    vba_project_stream.resize(vba_project_stream.len() + 0x64, 0);
+    vba_project_stream.extend_from_slice(&0u16.to_le_bytes()); // numProjects = 0
+    vba_project_stream.extend_from_slice(&[0; 6]);
+    vba_project_stream.extend_from_slice(&0u32.to_le_bytes()); // table before IDs
+    vba_project_stream.extend_from_slice(&[0; 6]);
+    vba_project_stream.extend_from_slice(&0u16.to_le_bytes()); // w0
+    vba_project_stream.extend_from_slice(&0u16.to_le_bytes()); // num_total_ids
+    vba_project_stream.extend_from_slice(&0u16.to_le_bytes()); // w1
+    vba_project_stream.extend_from_slice(&[0; 4]);
+
+    let mut mini = Vec::new();
+    let mut minifat = vec![0xffff_ffffu32; 256];
+
+    let (dir_start, dir_size) = allocate_mini_stream(&dir_comp, &mut mini, &mut minifat);
+    let (proj_start, proj_size) = allocate_mini_stream(&project_stream, &mut mini, &mut minifat);
+    let (vba_start, vba_size) = allocate_mini_stream(&vba_project_stream, &mut mini, &mut minifat);
+
+    let mut mod_bytes = pcode_bytes.to_vec();
+    mod_bytes.extend_from_slice(&comp_ovba(source_code.as_bytes()));
+    let (mod_start, mod_sz) = allocate_mini_stream(&mod_bytes, &mut mini, &mut minifat);
+
+    let mini_sectors_512 = mini.len().div_ceil(512);
+    mini.resize(mini_sectors_512 * 512, 0);
+
+    let mut dir_entries = vec![0u8; 1024];
+    put_cfb_entry(
+        &mut dir_entries,
+        0,
+        "Root Entry",
+        5,
+        0xffff_ffff,
+        0xffff_ffff,
+        1,
+        4,
+        mini.len() as u64,
+    );
+    put_cfb_entry(
+        &mut dir_entries,
+        1,
+        "_VBA_PROJECT_CUR",
+        1,
+        0xffff_ffff,
+        0xffff_ffff,
+        2,
+        0xffff_ffff,
+        0,
+    );
+    put_cfb_entry(
+        &mut dir_entries,
+        2,
+        "PROJECT",
+        2,
+        0xffff_ffff,
+        3,
+        0xffff_ffff,
+        proj_start,
+        proj_size,
+    );
+    put_cfb_entry(
+        &mut dir_entries,
+        3,
+        "VBA",
+        1,
+        0xffff_ffff,
+        0xffff_ffff,
+        4,
+        0xffff_ffff,
+        0,
+    );
+    put_cfb_entry(
+        &mut dir_entries,
+        4,
+        "dir",
+        2,
+        0xffff_ffff,
+        5,
+        0xffff_ffff,
+        dir_start,
+        dir_size,
+    );
+    put_cfb_entry(
+        &mut dir_entries,
+        5,
+        "_VBA_PROJECT",
+        2,
+        0xffff_ffff,
+        6,
+        0xffff_ffff,
+        vba_start,
+        vba_size,
+    );
+    put_cfb_entry(
+        &mut dir_entries,
+        6,
+        module_name,
+        2,
+        0xffff_ffff,
+        0xffff_ffff,
+        0xffff_ffff,
+        mod_start,
+        mod_sz,
+    );
+
+    let mut file = vec![0u8; 512 * (5 + mini_sectors_512)];
+    file[0..8].copy_from_slice(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]);
+    put16(&mut file, 24, 0x003e);
+    put16(&mut file, 26, 3);
+    put16(&mut file, 28, 0xfffe);
+    put16(&mut file, 30, 9);
+    put16(&mut file, 32, 6);
+    put32(&mut file, 44, 1);
+    put32(&mut file, 48, 1);
+    put32(&mut file, 56, 4096);
+    put32(&mut file, 60, 3);
+    put32(&mut file, 64, 1);
+    put32(&mut file, 68, 0xffff_fffe);
+    put32(&mut file, 72, 0);
+    put32(&mut file, 76, 0);
+    for i in 1..109 {
+        put32(&mut file, 76 + i * 4, 0xffff_ffff);
+    }
+
+    let fat_offset = 512;
+    put32(&mut file, fat_offset, 0xffff_fffd);
+    put32(&mut file, fat_offset + 4, 2);
+    put32(&mut file, fat_offset + 8, 0xffff_fffe);
+    put32(&mut file, fat_offset + 12, 0xffff_fffe);
+
+    for i in 0..mini_sectors_512 {
+        let sec = 4 + i;
+        if i + 1 < mini_sectors_512 {
+            put32(&mut file, fat_offset + sec * 4, (sec + 1) as u32);
+        } else {
+            put32(&mut file, fat_offset + sec * 4, 0xffff_fffe);
+        }
+    }
+    for i in (4 + mini_sectors_512)..128 {
+        put32(&mut file, fat_offset + i * 4, 0xffff_ffff);
+    }
+
+    file[1024..1536].copy_from_slice(&dir_entries[..512]);
+    file[1536..2048].copy_from_slice(&dir_entries[512..]);
+
+    for (i, val) in minifat[..128].iter().enumerate() {
+        put32(&mut file, 2048 + i * 4, *val);
+    }
+
+    file[2560..2560 + mini.len()].copy_from_slice(&mini);
+    file
 }
 
 #[test]
@@ -934,4 +1243,78 @@ fn e2e_cli_binary_execution_workflow() {
 
     // Cleanup
     let _ = fs::remove_file(&file_path);
+}
+
+#[test]
+fn e2e_encrypted_container_rejection() {
+    let encrypted_cfb = synthesize_encrypted_cfb();
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Unknown,
+        ..Default::default()
+    };
+
+    let result = inspect_macro_file(&encrypted_cfb, &options);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err();
+    assert!(
+        err_msg.contains("encrypted Office container detected"),
+        "error message should indicate encryption: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("password decryption required"),
+        "error message should suggest password decryption: {err_msg}"
+    );
+}
+
+#[test]
+fn e2e_nested_storage_cfb_extraction() {
+    let src = "Attribute VB_Name = \"LegacyModule\"\nSub LegacyProc()\n    MsgBox \"Old Format\"\nEnd Sub\n";
+    let mut pcode = vec![0u8; 32];
+    pcode[0..2].copy_from_slice(&0xCAFEu16.to_le_bytes());
+
+    let nested_cfb = synthesize_nested_cfb("LegacyProject", "LegacyModule", src, &pcode);
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+
+    let inspection =
+        inspect_macro_file(&nested_cfb, &options).expect("nested CFB inspection should succeed");
+
+    assert_eq!(inspection.extracted.name.as_deref(), Some("LegacyProject"));
+    assert_eq!(inspection.extracted.modules.len(), 1);
+    assert_eq!(inspection.extracted.modules[0].name, "LegacyModule");
+    assert!(
+        inspection.extracted.modules[0]
+            .source_text
+            .as_ref()
+            .unwrap()
+            .contains("Old Format")
+    );
+}
+
+#[test]
+fn e2e_xltm_template_container_inspection() {
+    let src = "Attribute VB_Name = \"TemplateModule\"\nSub InitTemplate()\n    Dim mode As Integer\n    mode = 1\nEnd Sub\n";
+    let mut pcode = vec![0u8; 32];
+    pcode[0..2].copy_from_slice(&0xCAFEu16.to_le_bytes());
+
+    let cfb = synthesize_cfb("TemplateProject", "TemplateModule", src, &pcode);
+    let xltm = synthesize_xltm(&cfb);
+
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+
+    let inspection = inspect_macro_file(&xltm, &options).expect("XLTM inspection should succeed");
+    assert_eq!(
+        inspection.extracted.name.as_deref(),
+        Some("TemplateProject")
+    );
+    assert_eq!(inspection.extracted.modules.len(), 1);
+    assert_eq!(inspection.extracted.modules[0].name, "TemplateModule");
 }
