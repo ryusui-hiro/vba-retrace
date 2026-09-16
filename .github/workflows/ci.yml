@@ -43,9 +43,11 @@ jobs:
       - name: Check formatting
         run: cargo +1.93.0 fmt --all -- --check
       - name: Test the declared minimum Rust version
-        run: cargo +1.88.0 test --all-targets --locked
+        run: cargo +1.88.0 test --all-targets --locked && cargo +1.88.0 test --doc --locked
       - name: Test on the current toolchain
-        run: cargo +1.93.0 test --all-targets --locked
+        run: cargo +1.93.0 test --all-targets --locked && cargo +1.93.0 test --doc --locked
+      - name: Check documentation
+        run: RUSTDOCFLAGS="-D warnings" cargo +1.93.0 doc --locked --no-deps --all-features
       - name: Run Clippy
         run: cargo +1.93.0 clippy --all-targets --locked -- -D warnings
 

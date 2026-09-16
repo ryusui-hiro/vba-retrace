@@ -259,16 +259,16 @@ if !container_bytes.is_empty() {
 
 | Rule ID | Finding Kind | Severity | Description |
 |---|---|---|---|
-| `VBA-STOMP-001` | `PurgedSourceWithValidPCode` | Critical | Source code was wiped or blanked out, but executable P-code remains |
-| `VBA-STOMP-002` | `HiddenPCodeProcedure` | High | Procedures exist in P-code that do not appear in the source code |
-| `VBA-STOMP-003` | `SuspiciousStringInPCodeOnly` | High | Suspicious URLs (`http://`, `https://`), IPs, or executables (`.exe`, `.dll`, `.ps1`) in P-code only |
-| `VBA-STOMP-004` | `SensitiveCallInPCodeOnly` | Critical | Dangerous APIs (`VirtualAlloc`, `WriteProcessMemory`, `CreateRemoteThread`, `ShellExecute`, etc.) present only in P-code |
-| `VBA-STOMP-005` | `IdentifierDiscrepancy` | Medium | Identifiers found in P-code do not match identifiers declared in source text |
-| `VBA-STOMP-006` | `SignificantSizeDiscrepancy` | Low | Disproportionately large P-code cache relative to source size |
-| `VBA-STOMP-007` | `MissingSourceStreamWithPCode` | High | Module stream is missing from CFB storage while P-code stream exists |
-| `VBA-STOMP-008` | `CorruptedSourceStreamWithPCode` | Critical | Module stream exists but decompression failed, while P-code is valid |
-| `VBA-STOMP-009` | `GhostModuleStream` | High | Unreferenced module streams detected in CFB storage (hidden from `dir` stream) |
-| `VBA-STOMP-010` | `SourceCorruptedWithValidPCode` | Critical | Source text decompression corrupted or truncated, while valid P-code executes |
+| `VBA-STOMP-001` | `SourcePurged` | Critical | VBA source code has been completely stripped or purged while compiled P-code instructions remain executable |
+| `VBA-STOMP-002` | `ProcedureHiddenInPCode` | High | A procedure exists in the compiled P-code stream but does not appear in the VBA source text |
+| `VBA-STOMP-003` | `SuspiciousLiteralInPCode` | High | Suspicious string literal (URL, IP, executable name) is present in compiled P-code but absent from source code |
+| `VBA-STOMP-004` | `SensitiveCallInPCode` | Critical | Dangerous system API (process injection, shell execution) is found in compiled P-code but hidden from source text |
+| `VBA-STOMP-005` | `LineCountDiscrepancy` | Medium | Large divergence between source code line count and compiled P-code line count |
+| `VBA-STOMP-006` | `ProcedureMissingInPCode` | Low | A procedure declared in source text is missing from the compiled P-code stream |
+| `VBA-STOMP-007` | `PerformanceCachePurged` | Medium | Compiled P-code performance cache has been wiped while source procedures remain (VBA Purging evasion) |
+| `VBA-STOMP-008` | `HiddenGuiModule` | High | Module is compiled in dir stream but omitted from PROJECT manifest, hiding it in Office VBA IDE (Evil Clippy technique) |
+| `VBA-STOMP-009` | `ProjectLockedOrUnviewable` | Low | VBA project contains protection/lock attributes (CMG/DPB/GC) making it unviewable in the VBA IDE |
+| `VBA-STOMP-010` | `SourceCorruptedWithValidPCode` | Critical | Module source code container failed decompression or is malformed while executable compiled P-code remains |
 
 ## Worksheet Cell Threat Detection
 

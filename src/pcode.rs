@@ -796,6 +796,9 @@ pub fn parse_vba_project_identifiers(data: &[u8]) -> Result<Vec<String>, String>
 
     let mut offset = 0x1E;
     let num_refs = read_u16(data, offset).ok_or("cannot read numRefs")? as usize;
+    if num_refs > 1024 {
+        return Err("too many references in _VBA_PROJECT stream".into());
+    }
     offset += 4; // skip numRefs + 2
 
     for _ in 0..num_refs {
@@ -856,6 +859,9 @@ pub fn parse_vba_project_identifiers(data: &[u8]) -> Result<Vec<String>, String>
         return Err("truncated before module descriptors".into());
     }
     let num_projects = read_u16(data, offset).ok_or("cannot read numProjects")? as usize;
+    if num_projects > 4096 {
+        return Err("too many module descriptors in _VBA_PROJECT stream".into());
+    }
     offset += 2;
     for _ in 0..num_projects {
         let w_len = read_u16(data, offset).ok_or("cannot read module wLength")? as usize;
@@ -923,7 +929,7 @@ pub fn parse_vba_project_identifiers(data: &[u8]) -> Result<Vec<String>, String>
     }
 
     // Parse real variable names
-    let mut identifiers = Vec::with_capacity(num_ids as usize);
+    let mut identifiers = Vec::with_capacity((num_ids as usize).min(4096));
     for _ in 0..num_ids {
         if offset + 2 > data.len() {
             break;

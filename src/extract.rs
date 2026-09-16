@@ -816,6 +816,62 @@ pub fn detect_project_stomping(
             matching_disasm,
         );
 
+        if matching_disasm.map(|d| d.lines.is_empty()).unwrap_or(true)
+            && !module.performance_cache.is_empty()
+        {
+            let has_source = module
+                .source_text
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !has_source
+                && module.diagnostic.is_none()
+                && !report
+                    .findings
+                    .iter()
+                    .any(|f| matches!(f.kind, crate::stomping::StompingFindingKind::SourcePurged))
+            {
+                report.findings.push(crate::stomping::StompingFinding {
+                    severity: crate::stomping::StompingSeverity::Critical,
+                    kind: crate::stomping::StompingFindingKind::SourcePurged,
+                    description: format!(
+                        "Module '{}' contains {} bytes of compiled performance cache but source code is completely purged/empty (VBA Stomping pattern)",
+                        module.name,
+                        module.performance_cache.len()
+                    ),
+                });
+                report.confidence_score = report.confidence_score.max(95);
+                report.is_stomped = true;
+                if crate::stomping::StompingSeverity::Critical > report.severity {
+                    report.severity = crate::stomping::StompingSeverity::Critical;
+                }
+            } else if let Some(err) = &module.diagnostic
+                && !report.findings.iter().any(|f| {
+                    matches!(
+                        f.kind,
+                        crate::stomping::StompingFindingKind::SourceCorruptedWithValidPCode(_)
+                    )
+                })
+            {
+                report.findings.push(crate::stomping::StompingFinding {
+                    severity: crate::stomping::StompingSeverity::Critical,
+                    kind: crate::stomping::StompingFindingKind::SourceCorruptedWithValidPCode(
+                        err.clone(),
+                    ),
+                    description: format!(
+                        "Module '{}' contains {} bytes of compiled performance cache but source extraction failed: {err}",
+                        module.name,
+                        module.performance_cache.len()
+                    ),
+                });
+                report.confidence_score = report.confidence_score.max(95);
+                report.is_stomped = true;
+                if crate::stomping::StompingSeverity::Critical > report.severity {
+                    report.severity = crate::stomping::StompingSeverity::Critical;
+                }
+            }
+        }
+
         if project
             .hidden_gui_modules
             .iter()

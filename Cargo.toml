@@ -7,8 +7,8 @@ description = "Dependency-free VBA source and Office macro project analysis libr
 license = "MIT"
 repository = "https://github.com/ryusui-hiro/vba-retrace"
 readme = "README.md"
-keywords = ["vba", "excel", "xlsm", "static-analysis"]
-categories = ["development-tools", "parser-implementations"]
+keywords = ["vba", "excel", "xlsm", "static-analysis", "security"]
+categories = ["development-tools", "parser-implementations", "command-line-utilities"]
 
 [lib]
 name = "vba_insight"

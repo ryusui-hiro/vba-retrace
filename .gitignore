@@ -51,4 +51,21 @@ id_ed25519
 *.cls~
 *.frm~
 .DS_Store
+._*
+Thumbs.db
 GEMINI.md
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test and profiling artifacts
+*.profraw
+*.profdata
+*.sarif
+cov/
+coverage/
+

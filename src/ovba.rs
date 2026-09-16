@@ -301,6 +301,9 @@ fn parse_dir_directory(data: &[u8], max_modules: usize) -> Result<DirDirectory, 
         }
     }
     loop {
+        if out.project_references.len() > 1024 {
+            return Err("OVBA project references exceed configured limit".into());
+        }
         let Some(id) = r.peek_id() else {
             return Err("OVBA dir stream ended before PROJECTMODULES".into());
         };
