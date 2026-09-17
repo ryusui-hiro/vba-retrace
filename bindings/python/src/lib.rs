@@ -1,7 +1,6 @@
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
 use std::fs;
-use std::path::Path;
 
 use vba_insight::export::{
     Disclosure, inspect_to_json, inspect_to_markdown, stomping_to_sarif, to_json,
@@ -11,12 +10,13 @@ use vba_insight::{AnalysisOptions, HostProfile, SourceUnit, inspect_macro_file};
 fn read_input_bytes(input: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     if let Ok(bytes) = input.extract::<Vec<u8>>() {
         Ok(bytes)
-    } else if let Ok(s) = input.extract::<String>() {
-        let path = Path::new(&s);
-        fs::read(path).map_err(|e| PyIOError::new_err(format!("failed to read file '{s}': {e}")))
+    } else if let Ok(path) = input.extract::<std::path::PathBuf>() {
+        fs::read(&path).map_err(|e| {
+            PyIOError::new_err(format!("failed to read file '{}': {e}", path.display()))
+        })
     } else {
         Err(PyValueError::new_err(
-            "expected bytes, bytearray, or path string as input",
+            "expected bytes, bytearray, or path string/PathLike as input",
         ))
     }
 }

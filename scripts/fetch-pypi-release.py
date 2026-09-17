@@ -8,7 +8,7 @@ import subprocess
 import tarfile
 import zipfile
 
-repo = 'ryusui-hiro/vba-retrace'
+repo = os.environ.get('GITHUB_REPOSITORY', 'ryusui-hiro/vba-retrace')
 tag = os.environ['RELEASE_TAG']
 if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag):
     raise SystemExit('expected a version tag such as v0.1.0')

@@ -259,10 +259,31 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                         || c == '\u{FF0D}' // '－' Full-width Minus
                 })
                 .trim();
-            let f_lower = f_clean.to_ascii_lowercase();
+            let f_norm = f_clean.replace("_xlfn.", "").replace("_xlws.", "");
+            let f_lower = f_norm.to_ascii_lowercase();
+
+            // Helper to check for function calls with whitespace tolerance before parenthesis
+            let has_fn = |name: &str| -> bool {
+                let mut search_from = 0;
+                while let Some(idx) = f_lower[search_from..].find(name) {
+                    let abs_idx = search_from + idx;
+                    let prefix_ok = abs_idx == 0
+                        || (!f_lower.as_bytes()[abs_idx - 1].is_ascii_alphanumeric()
+                            && f_lower.as_bytes()[abs_idx - 1] != b'_'
+                            && f_lower.as_bytes()[abs_idx - 1] != b'.');
+                    if prefix_ok {
+                        let rest = f_lower[abs_idx + name.len()..].trim_start();
+                        if rest.starts_with('(') {
+                            return true;
+                        }
+                    }
+                    search_from = abs_idx + name.len();
+                }
+                false
+            };
 
             // 1. DDE binary and execution detection
-            let is_dde_func = f_lower.starts_with("dde(") || f_lower.starts_with("dde.execute(");
+            let is_dde_func = has_fn("dde") || has_fn("dde.execute");
             let is_dde_pipe = if let Some((target, _)) = f_clean.split_once('|') {
                 let target_clean = target
                     .trim()
@@ -284,6 +305,7 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                         | "rundll32"
                         | "regsvr32"
                         | "certutil"
+                        | "certreq"
                         | "bitsadmin"
                         | "msiexec"
                         | "msexcel"
@@ -302,6 +324,20 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                         | "reg"
                         | "at"
                         | "curl"
+                        | "msdt"
+                        | "control"
+                        | "explorer"
+                        | "wmic"
+                        | "msxsl"
+                        | "finger"
+                        | "nltest"
+                        | "whoami"
+                        | "systeminfo"
+                        | "tasklist"
+                        | "taskkill"
+                        | "sc"
+                        | "net"
+                        | "net1"
                 ) || f_lower.contains("|'")
             } else {
                 false
@@ -309,23 +345,23 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
             let is_dde = is_dde_func || is_dde_pipe;
 
             // 2. Excel 4.0 (XLM) macro functions
-            let is_xlm = f_lower.starts_with("exec(")
-                || f_lower.starts_with("call(")
-                || f_lower.starts_with("register(")
-                || f_lower.starts_with("run(")
-                || f_lower.starts_with("formula(")
-                || f_lower.starts_with("alert(")
-                || f_lower.starts_with("halt(")
-                || f_lower.starts_with("register.id(")
-                || f_lower.starts_with("popen(")
-                || f_lower.starts_with("fcall(")
-                || f_lower.starts_with("fopen(")
-                || f_lower.starts_with("fwrite(")
-                || f_lower.starts_with("fclose(")
-                || f_lower.starts_with("initiate(")
-                || f_lower.starts_with("terminate(")
-                || f_lower.starts_with("request(")
-                || f_lower.starts_with("poke(");
+            let is_xlm = has_fn("exec")
+                || has_fn("call")
+                || has_fn("register")
+                || has_fn("register.id")
+                || has_fn("run")
+                || has_fn("formula")
+                || has_fn("alert")
+                || has_fn("halt")
+                || has_fn("popen")
+                || has_fn("fcall")
+                || has_fn("fopen")
+                || has_fn("fwrite")
+                || has_fn("fclose")
+                || has_fn("initiate")
+                || has_fn("terminate")
+                || has_fn("request")
+                || has_fn("poke");
 
             // 3. Remote workbook link injection (UNC, HTTP, HTTPS, FTP)
             let is_remote_link = (f_lower.contains("[http://")
@@ -339,29 +375,46 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 && (f_lower.contains("]") || f_lower.contains("']"));
 
             // 4. External web service request / data exfiltration
-            let is_webservice = f_lower.starts_with("webservice(")
-                || f_lower.contains(" webservice(")
-                || f_lower.contains("+webservice(")
-                || f_lower.contains("-webservice(")
-                || f_lower.contains("&webservice(")
-                || f_lower.starts_with("filterxml(")
-                || f_lower.contains("webservice(");
+            let is_webservice = has_fn("webservice") || has_fn("filterxml");
 
             // 5. Suspicious executable download hyperlink or protocol handler
-            let is_suspicious_hyperlink = f_lower.starts_with("hyperlink(")
+            let is_suspicious_hyperlink = has_fn("hyperlink")
                 && (f_lower.contains(".exe")
                     || f_lower.contains(".scr")
                     || f_lower.contains(".vbs")
+                    || f_lower.contains(".vbe")
                     || f_lower.contains(".js")
+                    || f_lower.contains(".jse")
+                    || f_lower.contains(".wsf")
+                    || f_lower.contains(".wsh")
                     || f_lower.contains(".hta")
                     || f_lower.contains(".bat")
                     || f_lower.contains(".cmd")
                     || f_lower.contains(".ps1")
                     || f_lower.contains(".iso")
+                    || f_lower.contains(".img")
+                    || f_lower.contains(".vhd")
+                    || f_lower.contains(".vhdx")
                     || f_lower.contains(".zip")
                     || f_lower.contains(".dll")
+                    || f_lower.contains(".com")
+                    || f_lower.contains(".pif")
+                    || f_lower.contains(".cpl")
+                    || f_lower.contains(".msc")
+                    || f_lower.contains(".inf")
+                    || f_lower.contains(".reg")
+                    || f_lower.contains(".lnk")
+                    || f_lower.contains(".chm")
+                    || f_lower.contains(".jar")
                     || f_lower.contains("ms-appinstaller:")
-                    || f_lower.contains("search-ms:"));
+                    || f_lower.contains("search-ms:")
+                    || f_lower.contains("ms-officecmd:")
+                    || f_lower.contains("ms-excel:")
+                    || f_lower.contains("ms-word:")
+                    || f_lower.contains("ms-powerpoint:")
+                    || f_lower.contains("shell:")
+                    || f_lower.contains("file://")
+                    || f_lower.contains("file:\\\\"));
 
             if is_dde {
                 extracted.diagnostics.push(format!(

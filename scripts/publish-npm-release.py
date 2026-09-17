@@ -12,7 +12,7 @@ import re
 import subprocess
 import tarfile
 
-repo = 'ryusui-hiro/vba-retrace'
+repo = os.environ.get('GITHUB_REPOSITORY', 'ryusui-hiro/vba-retrace')
 kind = os.environ.get('PUBLIC_REGISTRY', 'npm')
 if kind not in ('npm', 'github'):
     raise SystemExit('unknown registry')

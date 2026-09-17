@@ -25,6 +25,10 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         run: rustup toolchain install 1.93.0 --profile minimal
+      - name: Security and secrets publication check
+        run: python3 scripts/check-publication.py
+      - name: Verify version alignment across packages
+        run: python3 scripts/release-artifacts.py check-versions
       - name: Verify the publishable crate
         run: cargo +1.93.0 package -p vba-insight --locked
 
@@ -43,13 +47,25 @@ jobs:
       - name: Check formatting
         run: cargo +1.93.0 fmt --all -- --check
       - name: Test the declared minimum Rust version
-        run: cargo +1.88.0 test --all-targets --locked && cargo +1.88.0 test --doc --locked
+        run: cargo +1.88.0 test -p vba-insight --all-targets --locked && cargo +1.88.0 test -p vba-insight --doc --locked
       - name: Test on the current toolchain
-        run: cargo +1.93.0 test --all-targets --locked && cargo +1.93.0 test --doc --locked
+        run: cargo +1.93.0 test --workspace --locked && cargo +1.93.0 test --doc --locked
       - name: Check documentation
         run: RUSTDOCFLAGS="-D warnings" cargo +1.93.0 doc --locked --no-deps --all-features
       - name: Run Clippy
-        run: cargo +1.93.0 clippy --all-targets --locked -- -D warnings
+        run: cargo +1.93.0 clippy --workspace --all-targets --locked -- -D warnings
+      - name: Node native build and test
+        working-directory: bindings/node
+        run: |
+          npm ci
+          npm run build
+          npm test
+        env:
+          RUSTUP_TOOLCHAIN: '1.93.0'
+      - name: Python tests and release artifacts verification
+        run: |
+          python3 -m pip install pytest
+          PYTHONPATH=bindings/python/python python3 -m pytest -q bindings/python/tests tests/test_release_artifacts.py
 
   windows:
     name: windows-${{ matrix.toolchain }}

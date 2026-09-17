@@ -1412,6 +1412,14 @@ pub fn disassemble_pcode_module(
                         if w_len & 1 != 0 && offset < bytes.len() {
                             offset += 1;
                         }
+                    } else {
+                        // Truncated payload: consume remaining bytes of this line to avoid misinterpreting partial payload as instructions
+                        formatted_inst.push_str(&format!(
+                            "[truncated payload {}/{} bytes] ",
+                            bytes.len().saturating_sub(offset),
+                            w_len
+                        ));
+                        offset = bytes.len();
                     }
                 }
             }

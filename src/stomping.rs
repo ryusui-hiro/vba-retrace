@@ -101,16 +101,20 @@ static SUSPICIOUS_PATTERNS: &[&str] = &[
     "wscript",
     "cscript",
     "certutil",
+    "certreq",
     "bitsadmin",
     "rundll32",
     "regsvr32",
     "mshta",
+    "msdt",
     "wmic",
     "curl",
     "msiexec",
     "schtasks",
     "invoke-expression",
     "invoke-webrequest",
+    "iex ",
+    "iwr ",
     "downloadfile",
     "downloadstring",
     "createtextfile",
@@ -123,15 +127,28 @@ static SUSPICIOUS_PATTERNS: &[&str] = &[
     "-ep bypass",
     "-windowstyle hidden",
     "-w hidden",
+    "-noprofile",
+    "-nop ",
+    "-noninteractive",
+    "-noni ",
     ".exe",
     ".dll",
     ".vbs",
-    ".bat",
-    ".ps1",
     ".vbe",
+    ".js",
+    ".jse",
+    ".wsf",
+    ".wsh",
+    ".bat",
+    ".cmd",
+    ".ps1",
     ".hta",
     ".scr",
     ".pif",
+    ".cpl",
+    ".msc",
+    ".lnk",
+    ".chm",
 ];
 
 /// Known sensitive APIs or procedure names.
@@ -142,11 +159,14 @@ static SENSITIVE_CALLS: &[&str] = &[
     "URLDownloadToFile",
     "URLDownloadToFileA",
     "URLDownloadToFileW",
+    "URLDownloadToCacheFile",
     "URLDownloadToCacheFileA",
+    "URLDownloadToCacheFileW",
     "WinExec",
     "ShellExecute",
     "ShellExecuteA",
     "ShellExecuteW",
+    "ShellExecuteEx",
     "CreateProcess",
     "CreateProcessA",
     "CreateProcessW",
@@ -193,20 +213,16 @@ static SENSITIVE_CALLS: &[&str] = &[
     "MacScript",
     "CallByName",
     "Application.Run",
-    "ShellExecuteEx",
     "NtCreateSection",
     "ZwMapViewOfSection",
     "NtMapViewOfSection",
     "SetTimer",
     "KillTimer",
-    "VirtualAllocEx",
-    "OpenProcess",
     "GetProcAddress",
     "LoadLibrary",
     "LoadLibraryA",
     "LoadLibraryW",
     "LdrLoadDll",
-    "CreateRemoteThread",
     "HeapAlloc",
     "IsDebuggerPresent",
     "CheckRemoteDebuggerPresent",
@@ -222,17 +238,33 @@ static AUTO_EXEC_HOOKS: &[&str] = &[
     "autoexit",
     "auto_open",
     "auto_close",
+    "auto_new",
+    "auto_exit",
     "auto_activate",
     "auto_deactivate",
     "document_open",
     "document_close",
     "document_new",
+    "document_beforesave",
+    "document_beforeclose",
     "documentopen",
     "documentnew",
     "workbook_open",
     "workbook_beforeclose",
+    "workbook_beforesave",
+    "workbook_beforeprint",
     "workbook_activate",
     "workbook_deactivate",
+    "workbook_sheetactivate",
+    "workbook_sheetchange",
+    "workbook_newsheet",
+    "worksheet_activate",
+    "worksheet_deactivate",
+    "worksheet_change",
+    "worksheet_calculate",
+    "worksheet_selectionchange",
+    "worksheet_beforedoubleclick",
+    "worksheet_beforerightclick",
     "userform_initialize",
     "userform_activate",
     "slideshowbegin",
@@ -273,15 +305,16 @@ pub fn detect_vba_stomping_with_error(
             let mut effective_lines = 0;
             for line in &lines {
                 let trimmed = line.trim();
-                if trimmed.is_empty()
-                    || trimmed.starts_with('\'')
-                    || trimmed.to_ascii_uppercase().starts_with("REM")
-                    || trimmed.to_ascii_uppercase().starts_with("ATTRIBUTE")
+                let code_part = trimmed.split('\'').next().unwrap_or(trimmed).trim();
+                let upper = code_part.to_ascii_uppercase();
+                if code_part.is_empty()
+                    || upper.starts_with("REM ")
+                    || upper.starts_with("ATTRIBUTE ")
+                    || upper == "REM"
                 {
                     continue;
                 }
                 effective_lines += 1;
-                let upper = trimmed.to_ascii_uppercase();
                 for kw in &[
                     "SUB ",
                     "FUNCTION ",
@@ -290,13 +323,20 @@ pub fn detect_vba_stomping_with_error(
                     "PROPERTY SET ",
                 ] {
                     if let Some(idx) = upper.find(kw) {
-                        let after = trimmed[idx + kw.len()..].trim_start();
-                        let name: String = after
-                            .chars()
-                            .take_while(|c| c.is_alphanumeric() || *c == '_')
-                            .collect();
-                        if !name.is_empty() && !procs.contains(&name) {
-                            procs.push(name);
+                        let prefix = upper[..idx].trim();
+                        let prefix_valid = prefix.is_empty()
+                            || prefix.split_whitespace().all(|w| {
+                                matches!(w, "PUBLIC" | "PRIVATE" | "FRIEND" | "STATIC" | "DEFAULT")
+                            });
+                        if prefix_valid {
+                            let after = code_part[idx + kw.len()..].trim_start();
+                            let name: String = after
+                                .chars()
+                                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                                .collect();
+                            if !name.is_empty() && !procs.contains(&name) {
+                                procs.push(name);
+                            }
                         }
                     }
                 }
@@ -675,6 +715,38 @@ mod tests {
             f.severity == StompingSeverity::Critical
                 && matches!(&f.kind, StompingFindingKind::ProcedureHiddenInPCode(name) if name == "AutoOpen")
                 && f.description.contains("Auto-executing procedure hook")
+        }));
+    }
+
+    #[test]
+    fn procedure_extraction_ignores_variables_and_inline_comments() {
+        let source = r#"
+Attribute VB_Name = "Module1"
+Dim sub As Long
+Dim function_total As Double
+x = 1 ' Sub FakeAutoOpen()
+Private Static Function RealFunction() As Long
+    RealFunction = 42
+End Function
+"#;
+        let pcode = make_synthetic_pcode(&["RealFunction"], &[], &[], 7);
+        let report = detect_vba_stomping("Module1", Some(source), Some(&pcode));
+        assert_eq!(report.severity, StompingSeverity::Clean);
+        assert_eq!(report.source_procedure_count, 1);
+        assert_eq!(report.findings.len(), 0);
+    }
+
+    #[test]
+    fn detects_hidden_worksheet_activate_auto_hook() {
+        let source = "Sub SafeSub()\nEnd Sub\n";
+        let pcode = make_synthetic_pcode(&["SafeSub", "Worksheet_Activate"], &[], &[], 4);
+        let report = detect_vba_stomping("Sheet1", Some(source), Some(&pcode));
+
+        assert!(report.is_stomped);
+        assert_eq!(report.severity, StompingSeverity::Critical);
+        assert!(report.findings.iter().any(|f| {
+            f.severity == StompingSeverity::Critical
+                && matches!(&f.kind, StompingFindingKind::ProcedureHiddenInPCode(name) if name == "Worksheet_Activate")
         }));
     }
 }

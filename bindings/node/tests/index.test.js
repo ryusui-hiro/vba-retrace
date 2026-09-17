@@ -19,8 +19,35 @@ test('analyzeSourcesJson performs static analysis', () => {
   assert.equal(parsed.modules[0].name, 'Mod1');
 });
 
-test('inspectMacroFileJson rejects invalid container buffer', () => {
+test('analyzeSourcesJson redacts source when includeSource is false', () => {
+  const sources = [
+    { name: 'ModSecret.bas', text: 'Public Sub SecretAction()\n    MsgBox "PrivatePassword"\nEnd Sub\n' }
+  ];
+  const full = vbaInsight.analyzeSourcesJson(sources, true);
+  assert.ok(full.includes('PrivatePassword'));
+
+  const redacted = vbaInsight.analyzeSourcesJson(sources, false);
+  assert.ok(!redacted.includes('PrivatePassword'));
+  const parsed = JSON.parse(redacted);
+  assert.equal(parsed.modules.length, 1);
+});
+
+test('inspectMacroFileJson rejects invalid or empty container buffer', () => {
   assert.throws(() => {
     vbaInsight.inspectMacroFileJson(Buffer.from('not a zip or cfb'));
+  }, /inspection failed/);
+
+  assert.throws(() => {
+    vbaInsight.inspectMacroFileJson(Buffer.alloc(0));
+  }, /inspection failed/);
+});
+
+test('inspectMacroFileMarkdown and inspectMacroFileSarif reject invalid buffer', () => {
+  assert.throws(() => {
+    vbaInsight.inspectMacroFileMarkdown(Buffer.from('corrupt'));
+  }, /inspection failed/);
+
+  assert.throws(() => {
+    vbaInsight.inspectMacroFileSarif(Buffer.from('corrupt'), 'test.xlsm');
   }, /inspection failed/);
 });

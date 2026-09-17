@@ -27,9 +27,26 @@ def inspect_file(
     Returns:
         dict containing 'analysis', 'stomping', and 'pcode' reports.
     """
-    arg = str(target) if isinstance(target, Path) else target
-    raw_json = _native.inspect_macro_file_json(arg, include_source)
+    raw_json = inspect_file_json(target, include_source=include_source)
     return json.loads(raw_json)
+
+
+def inspect_file_json(
+    target: InputType,
+    *,
+    include_source: bool = True,
+) -> str:
+    """Inspect an Office macro container and return the complete report as raw JSON.
+
+    Args:
+        target: File path (str or Path) or file contents (bytes/bytearray).
+        include_source: Whether to include decompressed VBA source code in the output.
+
+    Returns:
+        JSON string report.
+    """
+    arg = str(target) if isinstance(target, Path) else target
+    return _native.inspect_macro_file_json(arg, include_source)
 
 
 def inspect_file_markdown(target: InputType) -> str:
@@ -45,17 +62,23 @@ def inspect_file_markdown(target: InputType) -> str:
     return _native.inspect_macro_file_markdown(arg)
 
 
-def inspect_file_sarif(target: InputType) -> str:
+def inspect_file_sarif(
+    target: InputType,
+    *,
+    file_uri: str | None = None,
+) -> str:
     """Generate an OASIS SARIF v2.1.0 security report for VBA Stomping and container threats.
 
     Args:
         target: File path (str or Path) or file contents (bytes/bytearray).
+        file_uri: Optional artifact URI reported in SARIF findings (defaults to filename or 'macro_container').
 
     Returns:
         SARIF JSON string.
     """
     arg = str(target) if isinstance(target, Path) else target
-    return _native.inspect_macro_file_sarif(arg)
+    uri = file_uri or (str(target) if isinstance(target, (str, Path)) else "macro_container")
+    return _native.inspect_macro_file_sarif(arg, uri)
 
 
 def analyze_sources(
@@ -72,14 +95,33 @@ def analyze_sources(
     Returns:
         dict containing parsed AST, procedures, diagnostics, and call graph.
     """
-    raw_json = _native.analyze_sources_json(sources, include_source)
+    raw_json = analyze_sources_json(sources, include_source=include_source)
     return json.loads(raw_json)
+
+
+def analyze_sources_json(
+    sources: list[tuple[str, str]],
+    *,
+    include_source: bool = True,
+) -> str:
+    """Perform pure static analysis on VBA source units and return the report as raw JSON.
+
+    Args:
+        sources: List of (module_name, source_code) tuples.
+        include_source: Whether to include source text in the result.
+
+    Returns:
+        JSON string report.
+    """
+    return _native.analyze_sources_json(sources, include_source)
 
 
 __all__ = [
     "__version__",
     "analyze_sources",
+    "analyze_sources_json",
     "inspect_file",
+    "inspect_file_json",
     "inspect_file_markdown",
     "inspect_file_sarif",
 ]
