@@ -33,6 +33,10 @@ fn run() -> Result<(), String> {
         println!("{}", usage());
         return Ok(());
     }
+    if command == "--version" || command == "-V" {
+        println!("vba-insight {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if command != "analyze"
         && command != "extract"
         && command != "disasm"
