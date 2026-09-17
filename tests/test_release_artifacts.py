@@ -18,11 +18,12 @@ def test_versions_are_aligned():
     assert len(ver) > 0
 
 
-def create_fake_wheel(tmp_path, *, version="0.1.0", tag="cp310-abi3-manylinux_2_28_x86_64", extra=None):
+def create_fake_wheel(tmp_path, *, version="0.1.0", tag="cp310-abi3-manylinux_2_28_x86_64", license_line="License: MIT\n", extra=None):
     path = tmp_path / "test.whl"
+    path.parent.mkdir(parents=True, exist_ok=True)
     root = f"vba_insight-{version}.dist-info"
     with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr(f"{root}/METADATA", f"Name: vba-insight\nVersion: {version}\nLicense: MIT\n")
+        archive.writestr(f"{root}/METADATA", f"Name: vba-insight\nVersion: {version}\n{license_line}")
         archive.writestr(f"{root}/WHEEL", f"Wheel-Version: 1.0\nTag: {tag}\n")
         archive.writestr(f"{root}/licenses/LICENSE", "test license")
         archive.writestr("vba_insight/_native.abi3.so", b"dummy")
@@ -34,6 +35,9 @@ def create_fake_wheel(tmp_path, *, version="0.1.0", tag="cp310-abi3-manylinux_2_
 def test_check_wheel_accepts_valid_wheel(tmp_path):
     whl = create_fake_wheel(tmp_path, version="0.1.0")
     release.check_wheel(whl, "0.1.0")
+
+    whl_pep639 = create_fake_wheel(tmp_path / "pep639", version="0.1.0", license_line="License-Expression: MIT\n")
+    release.check_wheel(whl_pep639, "0.1.0")
 
 
 def test_check_wheel_rejects_version_mismatch(tmp_path):

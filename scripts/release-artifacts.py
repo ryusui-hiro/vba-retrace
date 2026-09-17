@@ -37,8 +37,9 @@ def check_wheel(path, expected):
         names = archive.namelist()
         metadata = archive.read(next(name for name in names if name.endswith('.dist-info/METADATA'))).decode()
         wheel = archive.read(next(name for name in names if name.endswith('.dist-info/WHEEL'))).decode()
+        has_license = ('License-Expression: MIT' in metadata or 'License: MIT' in metadata)
         if ('Name: vba-insight\n' not in metadata or f'Version: {expected}\n' not in metadata
-                or 'License: MIT' not in metadata or 'Tag: cp310-abi3-' not in wheel):
+                or not has_license or 'Tag: cp310-abi3-' not in wheel):
             raise ValueError(f'{path.name}: unexpected wheel metadata')
         for name in LICENSES:
             if not any(entry.endswith('/' + name) for entry in names):
