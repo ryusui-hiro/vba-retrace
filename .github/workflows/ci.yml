@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  publication-check:
+    name: publication-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.93.0 --profile minimal
+      - name: Security and secrets publication check
+        run: python3 scripts/check-publication.py
+      - name: Verify version alignment across packages
+        run: python3 scripts/release-artifacts.py check-versions
+      - name: Verify the publishable crate
+        run: cargo +1.93.0 package -p vba-insight --locked
+
+  quality:
+    name: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchains
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup toolchain install 1.93.0 --profile minimal --component rustfmt --component clippy
+      - name: Check formatting
+        run: cargo +1.93.0 fmt --all -- --check
+      - name: Test the declared minimum Rust version
+        run: cargo +1.88.0 test -p vba-insight --all-targets --locked && cargo +1.88.0 test -p vba-insight --doc --locked
+      - name: Test on the current toolchain
+        run: cargo +1.93.0 test --workspace --locked && cargo +1.93.0 test --doc --locked
+      - name: Check documentation
+        run: RUSTDOCFLAGS="-D warnings" cargo +1.93.0 doc --locked --no-deps --all-features
+      - name: Run Clippy
+        run: cargo +1.93.0 clippy --workspace --all-targets --locked -- -D warnings
+      - name: Node native build and test
+        working-directory: bindings/node
+        run: |
+          npm ci
+          npm run build
+          npm test
+        env:
+          RUSTUP_TOOLCHAIN: '1.93.0'
+      - name: Python tests and release artifacts verification
+        run: |
+          python3 -m pip install pytest
+          PYTHONPATH=bindings/python/python python3 -m pytest -q bindings/python/tests tests/test_release_artifacts.py
+
+  windows:
+    name: windows-${{ matrix.toolchain }}
+    runs-on: windows-2022
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [1.88.0, 1.93.0]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal
+      - name: Test native Windows code-page decoding
+        run: rustup run ${{ matrix.toolchain }} cargo test --all-targets --locked

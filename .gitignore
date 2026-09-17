@@ -1,40 +1,80 @@
+# Rust build output and packaged artifacts
+/target/
+/dist/
+/build/
 
-# Office temporary files
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# Office files can contain private workbooks, macros, or embedded data.
+# Add only sanitized fixtures explicitly with `git add -f`.
+*.xls
+*.xlsx
+*.xlsb
+*.xlsm
+*.xlt
+*.xltx
+*.xltm
+*.xla
+*.xlam
+*.doc
+*.docx
+*.docm
+*.dot
+*.dotx
+*.dotm
+*.ppt
+*.pptx
+*.pptm
+*.pot
+*.potx
+*.potm
+*.pps
+*.ppsx
+*.ppsm
+*.accdb
+*.accde
+*.laccdb
+*.mdb
+*.mde
+*.ldb
 ~$*
 
-# Access database lock files (laccdb, ldb)
-*.[lL][aA][cC][cC][dD][bB]
-*.[lL][dD][bB]
+# VBA editor backups and local operating-system metadata
+*.bas~
+*.cls~
+*.frm~
+.DS_Store
+._*
+Thumbs.db
+GEMINI.md
 
-# The following sections constitute a list of Office file extensions that support VBA.
-# If you want to exclude Office files from your repo, uncomment the corresponding file extensions.
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-# Excel (xls, xlsb, xlsm, xlt, xltm, xla, xlam)
-#*.[xX][lL][sS]
-#*.[xX][lL][sS][bB]
-#*.[xX][lL][sS][mM]
-#*.[xX][lL][tT]
-#*.[xX][lL][tT][mM]
-#*.[xX][lL][aA]
-#*.[xX][lL][aA][mM]
-
-# Word (doc, docm, dot, dotm)
-#*.[dD][oO][cC]
-#*.[dD][oO][cC][mM]
-#*.[dD][oO][tT]
-#*.[dD][oO][tT][mM]
-
-# Access (accda, accdb, accde, mdb, mde)
-#*.[aA][cC][cC][dD][aA]
-#*.[aA][cC][cC][dD][bB]
-#*.[aA][cC][cC][dD][eE]
-#*.[mM][dD][bB]
-#*.[mM][dD][eE]
-
-# PowerPoint (ppt, pptm, pot, potm, pps, ppsm)
-#*.[pP][pP][tT]
-#*.[pP][pP][tT][mM]
-#*.[pP][oO][tT]
-#*.[pP][oO][tT][mM]
-#*.[pP][pP][sS]
-#*.[pP][pP][sS][mM]
+# Test and profiling artifacts
+*.profraw
+*.profdata
+*.sarif
+# Node and Python build artifacts
+node_modules/
+*.node
+*.whl
+*.so
+*.dylib
+*.pyd
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+dist/

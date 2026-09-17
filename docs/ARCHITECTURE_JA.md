@@ -1,0 +1,152 @@
+# 解析モデルと現在の境界
+
+## データの流れ
+
+```text
+  exported source ──────────────────────────────────────┐
+                                                        v
+  .xlsm / .xlsb / .docm / .pptm (ZIP/OPC) ──┐           │
+  .xls / vbaProject.bin (CFB) ──────────────┴─→ CFB ──→ MS-OVBA ──→ source decoding
+                                                  │                     v
+                                                  │           conditional preprocessor
+                                                  │                 lexer / parser
+                                                  │                     v
+                                                  │       declaration / scope / CFG
+                                                  │                     v
+                                                  └──→ P-code disassembly (VBA6/VBA7)
+                                                                        v
+                                                       Stomping detection (source vs p-code)
+```
+
+入力ファイルの記述を実行する機能はありません。`.xlsm`処理はOPCのパッケージrelationshipからWorkbookパーツをたどり、WorkbookのVBA Project relationshipのTargetをsource URIに対する相対URIとして解決してから、ZIP内の該当パーツを読みます。固定の`xl/vbaProject.bin`パスを前提にせず、外部Target・重複関係・パッケージroot外へ抜けるTargetは拒否します。Workbookの`sheets`リストからシート名・state・sheetId・part relationshipの解決状態も保持し、ソース開示JSONにだけ名前とパスを出します。SpreadsheetMLの`definedNames`から名前・formula・hidden/built-in flag・`localSheetId`のsheet scopeも保存し、formulaと識別子はソース開示JSONにだけ出します。worksheet XMLからは上限付きでpopulated cellのA1参照、cell type、shared/inline文字列、formula、保存済み`<v>`値を抽出します。formula cacheは保存時スナップショットで、再計算しません。worksheetの`tablePart` relationshipからtable partもたどり、display name、A1範囲、列名、header/totals行数を保持します。テーブル数にも上限があり、名前・列名・範囲はsource開示JSONにだけ出します。formula中のA1 cell/range/whole-row/whole-column、defined-name、対応するstructured-table selectorの保守的な候補を抽出し、ローカルシート内のpopulated cellを別上限付きでIDリンクします。Table[Column]、#Data/#Headers/#Totals/#All、[@Column]と共有数式のcurrent-row翻訳を対応範囲にします。複数領域・未対応selectorやcolumnは未解決です。非修飾nameは現在シートのscopeをWorkbook scopeより優先します。共有数式は一意なmasterがあり、そのref範囲内にある場合に限り、相対・絶対軸を保ってA1参照候補をfollower位置へ変換し、元のformula cell IDを記録します。翻訳不能・範囲外・曖昧なグループは未解決のままです。明示的に修飾されたnameは未解決です。defined-name formula内の絶対A1参照とname operandは定義name側の独立した候補としてcell IDやname IDへ結びますが、呼出側formulaへインライン展開したり式を評価したりはしません。相対参照で安定した基準位置がない場合は未解決です。文字列literalやstructured-referenceの括弧内は参照認識から除外し、外部Workbookおよび3-D sheet参照も未解決です。formula候補とcell linkはsource開示時だけJSONに出し、式は評価しません。`INDIRECT`と`OFFSET`はdynamic reference call候補として記録し、実行時の参照先は未解決です。Excelプロファイルでは`ThisWorkbook.Worksheets("名前")`、`ThisWorkbook.Sheets("名前")`と明示的な`.Item(...)`について、文字列名または正の整数literalを保存されたシート一覧と照合した候補referenceとして関連付けます。整数indexはWorkbook上の順序を使い、`Worksheets`ではworksheetだけを数えます。さらにシートで修飾された`Range(...)`、`Cells(row, column)`、`Cells(index)`のaccess candidateにそのシート候補とliteral selectorを結び、A1の単純なcell/rectangleおよびwhole-row/whole-column rangeは一始まりの座標boundsを算出します。候補が範囲に入るpopulated cellを、source開示時だけcell IDとともに参照できます。multi-area union/intersectionやrelative receiverは未解決です。バイト位置が一致するデータアクセスpath、値フロー、predicateからもcandidate IDで参照できます。VBA中の`ListObjects`/`ListColumns`/`ListRows`のliteral selectorと`DataBodyRange`/`ListRows(index).Range`/table `Range`/header/totals範囲も、抽出済みtable metadataとpopulated cell candidateへリンクします。ListRowsはheader/totalsを除くdata row順で数え、`ListRows.Add`はappend/insert mutation candidateとして位置と引数を検査します。追加後のruntime rowやcell IDは推測しません。literal `ListRow.Delete`は影響する保存済みdata-row candidate、`ListObject.Delete`はtable範囲candidateへ結びますが、削除後のWorkbook stateやcell IDは投影しません。`ListObject.Resize`は同じ保存済みworksheetで明示修飾されたliteral A1 rangeだけをtarget candidateへ結び、別sheetやdynamic targetは未解決にしてresize後のstateを推測しません。terminal `.Value`などへのread/write pathも同じcandidate IDを参照し、dynamic selectorは未解決です。`ThisWorkbook.Names(...)`と`Range("名前")`のliteralはWorkbookのdefined-name inventoryに候補照合し、`Name.RefersToRange`はdefined-name formulaが単純なA1範囲を直接示す場合だけ、保存済みworksheet/range候補へ結びます。定義名はrangeだけでなくformula、constant、external referenceやdynamic formulaにもなり得るため、それらのtargetは未解決です。これは実行時オブジェクト、セルの値、実際の読み書き効果の解決ではなく、動的selector・非修飾collection・別Workbookは未解決です。続いてCFB/MS-OVBAを読み、モジュールソースを解析器へ渡します。
+
+`formula_eval::evaluate_formula`は抽出処理とは分離したopt-in evaluatorです。純粋な算術・比較・文字列連結、静的A1 cell/range、限定した集計・文字列・Boolean関数だけを、呼出し側が渡した非formula cell値に対して評価します。formula cellの再帰再計算、`INDIRECT`/`OFFSET`、外部・dynamic reference、locale依存関数は評価せず、statusで未解決理由を返します。
+
+式パーサーは認識後に未消費トークンが残る式を未解決にします。構文木では`.`と`!`を区別し、`!`が識別子末尾にあるSingle型サフィックスの場合も保持します。型が確定した解析対象内のクラスに明示された一意の既定プロパティを使う単純な辞書アクセスは、識別子または角括弧付きキーを使う文字列キーでGet/Let/Set候補として扱います。外部参照、late binding、複合receiver、実行時dispatchは確定しません。
+
+ループ開始文は`For`と`Each`を個別の予約語トークンとして判定するため、`For EachItem = ...`は`For Each`に誤分類されません。角括弧付き式は前置・後置のドットアクセス位置でも単純なメンバー識別子に変換せず、ホスト依存として未解決にします。
+
+`If`ブロックの`Then` / `Else`と`For`/`For Each`句の区切りも、角括弧で囲まれた式や`.` / `!`のメンバー名に含まれる同綴り語を予約語と誤認しないよう、トークン境界で判定します。これにより`Elsewhere`の代入や`object.Then`、`object.Else`、`collection.In`、`object.To`を別の句として分割しません。
+
+条件コンパイル前処理も物理行ではなく論理行単位で`#If` / `#ElseIf` / `#Const`を読むため、継続されたディレクティブを評価できます。除外ディレクティブをマスクする際は物理ソースの長さと改行を維持し、後続トークンの元位置をずらしません。行継続は空白 + `_` + 改行の形式を要求します。
+
+字句解析はVBAの区切り空白としてASCII空白・タブに加え、全角空白U+3000およびUnicodeのZs区切りを認識します。空白は識別子へ取り込まず、UTF-8バイト範囲と論理的な列位置を別々に保持します。
+
+単独の`Stop` / `End`文と`Resume`文は、予約語と完全一致する非括弧付きトークンの場合にのみ制御文として分類します。`Stopwatch`、`EndDate`、`ResumeCount`などは識別子として保持し、停止・終了・エラー再開の制御フローに誤接続しません。角括弧式はVBA識別子と決め打ちせず未解決式として扱い、Excel profileでは手続き中の角括弧式をEvaluateアクセス候補として記録します。`records![Order Form]`のように`!`直後の括弧付きキーは辞書メンバーとして保持します。Evaluateの名前・数式解釈は未解決です。`Resume`の引数は仕様に記載された再試行・次文・ラベル形式をそのまま保持します。
+
+`dir`ストリームの参照レコードは、登録済みAutomationライブラリ、外部VBAプロジェクト、ActiveXコントロールの種別と識別情報を保持します。形式が分かるLibidは種類・GUID・バージョン・LCID・パス・表示名へ、外部VBAプロジェクト識別子は埋込/単独・パス種別・パスへ分解します。外部参照の名前やパスはソース表示を許可したJSONでのみ表示します。これらのメタデータから外部TypeLibの型やメンバーは解決しません。
+
+## 意味の状態
+
+- 構文上確認できるもの: 宣言、プロシージャ、パラメーター、構造文、文字列・数値リテラル、行位置。
+- `TypeOf object Is Type`は独立したBoolean式として解析します。object側の値読み取りとType側の型参照候補を分け、既知の同一クラス型・プロジェクト内`Implements`関係はTypeFactの互換性候補にします。既知スカラーのobject式は`VBA2145`、直接`Nothing`はruntime error 91候補の`VBA2146`です。実行時インスタンス値と外部interface互換性は未解決です。
+- 通常の`Is`参照比較は、既知のscalar/UDT型がobject operandとして使われた場合に`VBA2147`で診断します。Object/Variantの実行時値と外部型は未解決で、`TypeOf ... Is ...`内のIsは専用型検査として分離します。
+- `Select Case`は値・包含範囲・`Is`比較の各選択肢をソース順の個別ノードにし、一つでも一致すれば本文へ進むCFGを作ります。先行Caseに一致した経路は後続節へ進まず、`Case Else`は残った経路を受けます。リテラル`Null`のセレクターでは通常のCase本文へ進まず、Case Else/不一致へ進みます。各範囲とソース位置、記号的な述語を保持し、JSONの式文字列はソース開示指定時だけ出力します。型強制や実行可能入力の評価は未解決です。
+- `On...GoTo`は整数化されたインデックスごとの宛先候補と、ゼロ/リスト外インデックスの次文フォールスルーをCFGに残します。負数や255超の変換・範囲エラーは、`On Error`がある場合に可能エラー辺候補へ渡します。インデックス変換、エラー実行可能性、入力経路は未証明のためCFGを未完了に保ちます。`GoSub`/`On...GoSub`は、通常経路で最大64段・10万状態のLIFO `Return`再開先を展開し、`On Error`/`Resume`経路でもエラー状態とGoSubスタックを同時に伝播します。上限超過と`On...GoSub`のインデックス/エラー状態、故障可能箇所、異なるスタック状態を併合したCFGは未完了です。 GoSubスタックを追えるCFGでactive GoSubなしのReturnへ到達し得る場合は`VBA2123` warning（runtime error 3候補）を出します。数値ラベルはコロン省略形と先行ゼロを扱い、仕様範囲外を診断します。
+- 型の推定: 組み込み型と宣言型を使った基本的な代入式の型伝播。暗黙変換、Variant、Office型は候補状態。
+- `DefType`の文字範囲をモジュール単位で保持し、明示型や型サフィックスがない変数・引数・Function/Property Get戻り値の型候補に適用します。重複範囲や宣言後のDirectiveは診断し、未解決の条件コンパイルがあるモジュールでは対応型を未解決に保ちます。構造JSONでは型対応を伏せます。
+- 完全な非循環経路上で値が確定する場合、`Len`/`LenB`の一部条件を評価します。既知文字列ではUTF-16単位/バイト数、数値サイズの`String * n`と対応する宣言済みスカラーでは宣言長/保存サイズを使い、`Null`を伝播します。実行時文字列/Variant内容、UDT配置、ANSI/DBCS変換、対象依存の保存サイズは未解決です。
+- 既知ASCII文字列の`InStr`は、呼出側の有効な`Option Compare Binary`または明示Binary指定と、正の既知start値がある場合だけ位置を評価します。`Null`は伝播し、Text/Database比較、非ASCII、動的文字列、`InStrB`のbyte位置は未解決です。
+- `InStrRev`は既知ASCII文字列のreverse searchをBinary比較で評価します。正のstart位置、`-1`の末尾開始、範囲外start、空検索文字列と`Null`を限定的に扱います。省略compareは有効な`Option Compare Binary`の場合のみ評価し、Text/Database照合、非ASCII、動的文字列、byte位置は未解決です。
+- `Left`/`Right`/`Mid`は、既知ASCII文字列と限定範囲の整数count/startがある場合のみ結果を評価します。0文字、`Mid`のlength省略、文字列末尾以降のstartを扱い、`Null`を伝播します。動的値、非ASCII、無効な境界、byte関数は未解決です。
+- `Trim`/`LTrim`/`RTrim`は既知ASCII文字列の通常空白を両端/先頭/末尾から除去し、`Null`を伝播します。動的値と非ASCII文字列は未解決です。
+- Private標準モジュールの`ByVal`仮引数は、全ての解決済み直接呼出しが同一の互換型literal/`Const`を渡す場合に限り、完全な非循環CFGの経路初期値へ引き継ぎます。呼出元の可変値、`ByRef`、Public/外部手続き、動的入口、条件コンパイル不確定は未解決です。callee内の対応代入は値を更新し、呼出や対応外の効果でseedを破棄します。
+- このseedはFunctionのcallee経路にも適用してからreturn候補との経路関係を作るため、return-path factはcallee条件とその非実行候補を保持します。caller/calleeの完全な経路積はまだ証明せず、条件は別々に開示します。
+- 3引数の`Replace`は有効なBinary比較と既知ASCII文字列の場合に評価し、結果サイズを16KiBに制限します。式の`Null`エラー、start/count/compareを含む呼出、Text比較、動的/非ASCII値は未解決です。
+- 条件コンパイル: 呼出側の定数と全ブロックの`#Const`を保持します。除外ブロック内のDirectiveも処理し、同じ定数名の重複はエラーとして条件を未解決にします。Directive末尾コメントと型サフィックスも扱います。式評価は数値の演算優先順位、指数、整数除算/Modの既知数値オペランドに対するLong banker's roundingと、左側の符号にかかわらず非負となるMS-VBAL Mod remainder規則、`D`/`E`指数表記、10進/基数の数値リテラル型サフィックス、`&`連結と既知String同士の`+`連結、ASCIIのBinary比較、ASCII/Binary限定の`Like`ワイルドカード（`*`、`?`、`#`、charlist、評価量25万セル上限）、明示的な英語月名の日付トークン、Unicode文字列の`LenB`、`CDate`の既知Date値/有効範囲内の数値シリアル変換、Date値の単項マイナス・`+`・`-`・`*`・`/`・`^`、Empty/Nothing、単純な組込み関数の安全な部分集合に対応します。LongLongリテラルは既知のWin64ターゲットでのみ評価します。Text/Database比較のlocale照合、Likeの非ASCII/locale照合、ANSI/DBCS文字列やUDTの`LenB`レイアウト、CDateのLocale依存文字列日付、既定年依存の省略日付、Dateの整数除算/Mod/論理演算、Null、未対応/型昇格依存の式は代替ブロックを残します。構造のみのJSONでは名前と値を伏せます。
+- 解決できる場合があるもの: 同一・別モジュールのプロシージャ名と標準モジュールのPublic値。Privateの可視範囲、プロパティGet/Letの別、重複する未修飾Public名を一部処理します。名前が一致しても、VBAの完全な名前解決や既定メンバー解決を意味しません。
+- シグネチャが分かる呼出: 名前付き引数を仮引数へ結び付け、必須引数の不足を診断します。イベントと外部`Declare`の仮引数も構文情報として保持します。動的呼出や参照ライブラリのシグネチャは未解決です。
+- 既知のスカラー変数を渡す単純な`ByRef`呼出では、仮引数と実引数の宣言型が厳密一致しない場合を診断します。Variant、一時式、配列、Object/クラス型、汎用のByVal強制変換は候補または未解決です。
+- `LongLong`から`LongLong`/`Variant`以外への既知の暗黙Let変換は代入と単純なByVal呼出で診断します。`LongPtr`の対象環境依存とその他のByVal強制変換表は未解決です。
+- 既知のスカラー式では、VBA仕様に基づき演算子ごとに結果型を推定します。Variant、未解決ホスト型、配列/UDT、実行時の値型は型を決め打ちしません。
+- `^`は`LongLong`の型文字として名前・整数リテラルに適用し、後続の被演算子が確認できる場合は指数演算子として保持します。
+- 同名のProperty Get/Let/Setは、setterのvalue-paramを除くindex仮引数の名前・順序・形状・ByRef/ByVal機構・解決済み型を照合し、Optional default値とparameter mechanismの明示有無の差は許容します。Property GetとLetの戻り/値型一致、SetのObject互換性、setter value-paramのOptional/ParamArray/array形状を拒否し、Property Setの値型をObject/Variant/classに制限します。setter index側のParamArrayには末尾value-paramを含めません。module variable/constant、Enum member、external declarationと同名のpropertyは`VBA2136`で拒否します。 Sub/Function名とmodule variable/constant/Enum member、external Declare名とmodule値または別external Declareの同名も`VBA2137`で拒否します。 Public procedure名がproject/module名と一致する場合、定義元以外の未修飾参照を`VBA2138`で拒否します。 Function/Property Getの仮引数が同じ関数名の暗黙result variableと衝突する場合は`VBA2140`を出します。未知の型ライブラリ型は未解決に保ちます（`VBA2077`–`VBA2079`）。
+- 標準モジュールの一意なPublic値をモジュール間で解決し、同じ未修飾名の衝突を診断します。Optional/ParamArrayの一部宣言制約に加え、Optional UDT仮引数を`VBA2059`、名前解決できる変数・手続き呼出し・`Is`演算子を含む非定数default式を`VBA2133`で診断します。既知のLongLong・非objectからobject・scalarからarrayへのdefault値変換も`VBA2086`/`VBA2129`/`VBA2130`で検査します。外部定数や未解決名は未解決のままにし、配列をByValへ渡す形も検査します。
+- 配列宣言と`ReDim`では各次元の明示境界と、暗黙の下限をモジュールの`Option Base`から保持します。無効な`Option Base`があれば、暗黙の実効下限を未解決のまま出力します。
+- 宣言済み配列の添字参照は既知の要素型に結び、宣言次元数と異なる添字数や名前付き添字を診断します。実行時に次元が決まる動的配列と次元数が不明な配列仮引数は、添字数検査を未解決に保ちます。
+- `LBound`/`UBound`は引数個数、既知スカラーを配列引数に渡すケース、宣言ランクから外れる定数次元を検査します。未知の型・配列ランク・変数次元は決め打ちせず、返却型は`Long`として扱います。
+- 宣言済み配列を回す`For Each`は制御変数の`Variant`型を検査し、`Next`に名前がある場合は同じ変数か照合します。解析対象のUDT配列は対象外として診断します。外部列挙子や実行時collectionの要素型は未解決です。
+- `For`の制御変数が既知の数値型または`Variant`かを検査し、`Next`に名前があれば同じ変数か照合します。開始値・終了値・`Step`式を個別に保持し、`Double`へ変換できないと確定する配列・UDT・`LongLong`・`Nothing`だけを診断します。文字列、`LongPtr`やホスト依存値の変換は未解決です。
+- ネストしたループの`Next inner, outer`は内側から一つずつ閉じ、対応する制御変数を照合します。過剰なNext要素や対応しないループは診断対象です。
+- Enum名はソース情報として保持しつつ、MS-VBALに従って式・引数・インターフェース比較・実効型では`Long`として扱います。
+- アクセス可能なプロジェクト内UDTは、フィールド宣言をたどってネストしたメンバーと配列要素の型を推定します。外部UDTと遅延バインドのメンバー配置は未解決です。
+- `With`内の先頭ドット参照は、ネストした`With`の基底式へ結び付けます。型が解決できるクラスメソッド呼出は引数・`ByRef`書込・直接代入された戻り値のフロー候補へ結びます。静的にスカラーと分かる`With`対象は診断し、Object/Variantは遅延バインド候補として残します。
+- 解析対象内で型が解決できる`WithEvents`は、クラス型・公開イベント・`変数名_イベント名`ハンドラの型/引数宣言を照合し、イベント起点候補を出します。位置引数の`RaiseEvent`から適合するハンドラへ引数フローと`ByRef`書込候補をつなぎますが、実行時にイベントソースが代入されているかは未証明です。名前付きイベント引数は診断します。外部型ライブラリのイベント仕様は未解決で、`RaiseEvent`の配置モジュールと同じクラス内のイベント宣言も検査します。
+- `RaiseEvent`のハンドラ候補内で未処理エラーが起きた場合は、残りのハンドラ呼出しを止める候補として記録し、RaiseEvent元の回復経路とは結び付けません。ハンドラ内のエラー処理やfault可能性は別の候補状態として保持します。
+- エクスポート元に`VB_UserMemId`属性行がある場合は、メンバーIDを保持し、ID 0の既定Property Get/Let/SetやFunctionを解析対象クラス内の添字呼出し・書込候補、型、引数/戻り値フローに結びます。0引数の既定Getによるスカラー代入式の型も推定します。既知シグネチャの引数不一致も診断します。外部型ライブラリと実行時バインドは未解決です。
+- `Attribute VB_Name`が存在する場合は、その値をファイル名より優先してモジュール識別子にします。これにより修飾呼出し・型参照・重複名検査が実際のVBAコンポーネント名を使います。
+- `VB_PredeclaredId`と`VB_GlobalNameSpace`属性を保持し、`VB_PredeclaredId=True`が明示された解析対象クラスの名前を既定インスタンスとしてメンバー解決します。名前付き既定インスタンスへの`Set`代入と、VBAソースプロジェクトで禁止される`VB_GlobalNameSpace=True`を診断します。属性がないソース断片ではインスタンスを推定せず、参照ライブラリのGlobal Namespaceは未解決です。
+- `CallByName`は、受信オブジェクトが解析対象クラス、メンバー名が文字列リテラル、`vbCallType`が既知の場合に候補メンバーへ結び、引数・直接戻り値フローを候補として出します。変数由来の名前、外部オブジェクト、実行時のメンバー存在は動的候補のままです。
+- 単純な`Set target = source`で両側の宣言型がobject互換と確認できる場合、現在の非循環経路内だけ`target`から`source`へのaliasを保持し、`IsObject`などの型predicateをsource側の既知型で評価します。Variantの実行時payload、member/array alias、再代入後のidentity、外部・動的objectは未解決です。
+- 宣言済み配列をVariantへ単純代入したaliasも、`IsArray`のbounded predicateに限ってsource配列の形状を利用します。Variantの実行時payload、member/array要素alias、再代入後のidentity、外部・動的objectは未解決です。
+- そのaliasの後にpath位置を確認できるmember callがある場合、source classの可視な同名memberを別のdispatch候補として`path_alias_dispatches`へ出します。元のCallFactは変更せず、path evidenceのないcallや動的objectは未解決です。
+- Excelホストでは`Application.Run`と識別できるWorkbook.Application呼出しを動的マクロ呼出候補として記録します。文字列リテラルまたは文字列リテラル同士の連結から、標準モジュールのPublic Sub/Functionを候補表示できますが、ブック/アクティブシートの名前解決、Range/XLL対象、実行時dispatch、変数から構成される名前は未解決です。Excelのメソッド仕様に従い名前付き引数は`VBA2141` Errorにします。
+- Excelの`Application.OnTime`は呼出候補として記録し、必須の`EarliestTime`/`Procedure`不足は`VBA2142` Errorにします。文字列名から標準モジュールにあるPublicの引数なしSub/Functionをスケジュール起点候補へ結び、`Schedule:=False`は取消候補として保持します。実際のスケジュール登録、時刻式、既存登録との取消一致、変数から作る名前は評価せず、対象手続きのhost-error状態も候補のままです。
+- `.xlsm`内のSpreadsheetML `workbookPr/@codeName`とworksheet `sheetPr/@codeName`を使い、VBAのDocument-or-ClassコンポーネントをWorkbook/Worksheet moduleに分類します。これにより変更されたcodenameのWorkbook/Worksheet event候補も識別できます。属性欠落や不整合時は推測せず、既知の`ThisWorkbook`/`Sheet*`名だけを互換fallbackとして使います。コード名のJSON表示はソース開示時だけです。
+- Excelの既知Workbook/Worksheetイベントの一部は、`Sub`種別・引数個数・宣言型を公式シグネチャと比較します。不一致は`VBA2143` Errorにしてイベント起点候補から除外します。`ByVal`/`ByRef`の一致、未収録のイベント型、Excelが実際にイベントを結び付けているかは検証しません。
+- class-level `WithEvents`がExcel `Application`型で、既知のApplication event handler名とシグネチャが一致する場合、Excel起点候補として出します。不一致は`VBA2144`にし、インスタンス代入や実行時のイベント配送は未確認のままです。
+- argument path factはcaller call indexも保持し、bounded callsiteのOptional Variantの供給・省略状態をcalleeの`IsMissing`へ限定的に注入します。省略は値を`Missing`として扱う合成印であり、既定値や実行時Variant値へ置き換えません。異なるcallsite、混在・dynamic dispatch、runtime stateは未解決です。
+- 引数・戻り値・代入のデータフロー候補とExcelデータアクセス候補を、手続き内で到達する上限制御付き構造パスへ結び、各転送点より前に成立する分岐条件を関連付けます。 `ParamArray`の位置引数には0始まりのslotをsource data-flow factと経路factの双方へ保持し、同じ文字列表現でも別スロットとして扱います。If/Select Case/loopの判定ノード内にあるExcel読み取り候補は、そのノードから辿った分岐結果にも結びます。その各パス内で単純な識別子代入から後続の読み取りへ候補をつなぎ、反対分岐で定義された値を混同しません。構文木がある代入・引数では、既知の手続き名を値入力と誤認せず、宣言された配列calleeと実引数を候補入力として保持します。標準モジュールの修飾変数は`Module.Member`で残し、修飾モジュール名自体は入力にしません。また`.`や`!`のメンバー名/辞書キーを変数入力と誤認せず、receiver側の入力候補を保持します。同じ文内で構文上結び付けられるExcel読み書きと単純な変数代入にも候補フローを出します。手続き内で直前定義が見つからない入力は未接続として示しますが、未宣言とは結論しません（引数、モジュール値、ホスト入力の可能性があります）。メンバー内容/配列要素、エイリアス、実行可能性、実際のWorkbook/Cell対象は未解決で、上限で切れた関連付け数やどのパスにも結び付かなかった候補数を別に報告します。
+- ASCII範囲と上限が確認できる`Chr`/`Asc`/`Space`/`String`、およびnonnegative integralな`Hex`/`Oct`も経路predicateへfoldします。Unicode、locale、invalid range、overflow、過大な生成結果は未解決です。
+- 固定サイズ配列の宣言boundsとdimensionがliteral/Constで解決できる場合、`LBound`/`UBound`を経路predicateへfoldします。dynamic array、Variant runtime shape、未解決dimensionは残します。nonemptyで安全なrank-one `Array(...)` literalもboundsをfoldします。`ParamArray`の`LBound`はVBAの0下限をfoldし、位置slot数が一意なcallsiteでは`UBound`もfoldします。空・名前付き・動的・未解決callはruntime依存として残します。
+- 経路評価ではASCIIで明確な`CStr`/`Val`と文字列形式の`CByte`/`CInt`/`CLng`も、整数・文字列結果が一意に決まる場合だけfoldします。locale依存、decimal、overflow、Variant実行時変換は未解決です。
+- 経路評価では、literal/Constだけからなる`IIf`/`Choose`/`Switch`もfoldします。`IIf`はVBAのeager evaluationを保つため両result operandが安全に評価できる場合だけ選択し、動的呼出しや副作用候補は未解決にします。
+- 経路評価では、明示されたDate literalと`DateSerial`/`TimeSerial`/`DateAdd`のday/time/month/quarter/year部分（Gregorian月末clamp付き）、`DateDiff`の bounded interval、`DatePart`のdate/time field、明示英語日付の`DateValue`/`TimeValue`、範囲内numeric `CDate`をDate subtypeとして保持し、Date同士の比較、Dateと日数の加減、`VarType`/`TypeName`を限定的にfoldします。locale依存文字列、二桁年、実行時Date/Variantは未解決です。
+- If/Select Case/While/Doの分岐辺、および定数の開始/終了/Stepを持つForの初回境界について、Boolean/`Null`リテラル、小さな整数演算、手続きローカルまたは同一モジュールの一意なConst初期化式から矛盾が示せる経路を`infeasible_constant_condition`としてマークします。`If`条件値が`Null`ならFalseとして扱い、Nullを含む既知の比較結果もFalse側へ進めます。Boolean/NullのNotと、Boolean/Null値のAnd/Or/Xor/Eqv/Impについて一部の結果を評価し、数値/Nullなど他の組合せは未解決です。`IsNull`/`IsEmpty`/`IsMissing`は、既知のVariant/リテラル値または形式引数情報に基づいてBoolean結果を限定的にfoldし、`IsArray`は宣言済み配列/既知スカラー形状だけをfoldし、`IsObject`はObject/class型をTrue、既知スカラーをFalse、`Nothing`をTrueとして扱います。`IsDate`はDateリテラル、Date宣言型の値・配列要素・手続き戻り値、およびshadowされていないDate/Now/Time/DateAdd/DateSerial/DateValue/TimeSerial/CVDate等のDateを返す呼出をTrueとしてfoldします。`TimeValue`はNullになり得るVariant引数を未解決にし、文字列認識やその他の実行時変換も未解決にします。Variantの実行時配列/object値とプロジェクト内でshadowされるintrinsic名は未解決です。`IsMissing`はParamArray/非Variant形式引数ならFalse、Variant形式引数は呼出元を証明できない限り未解決にします。`IsNumeric`は静的数値/Boolean型とASCII数字だけの文字列を評価し、locale依存の文字列は未解決です。既知の引数個数違反は`VBA2148`にします。動的Variantや曖昧なユーザー定義callも未解決です。数値If条件の非ゼロ判定と整数論理演算に加え、有効な`Option Compare Binary`下のASCII文字列比較・`Like`パターン、同一文字列の比較を限定的に評価します。`Like`は`?`、`#`、`*`、文字集合/範囲に限り、250,000セルを上限とします。`Option Compare Text/Database`のlocale照合、非ASCII文字列の順序/照合、重複・循環定数、他モジュールConst、ホスト型、入力制約を含むその他の条件は`not_checked`のままです。これは実行可能性の一般証明ではありません。
+- `VarType`は、構文や宣言からsubtypeを確定できるスカラー値、正常に返る`CDec(...)`、固定型配列、および`Array(...)`のVariant配列について標準コードをfoldします。配列は`vbArray`(8192)と要素型コードの和を使います。Variantの動的内容、UDT、objectの既定プロパティ、LongLong/LongPtrのbitness依存は未解決です。`vbDate`などのVarType定数は未shadowの場合だけ定数として使い、引数個数違反は`VBA2148`にします。
+- `IsMissing`は、ParamArray/非Variant形式引数/明示既定値があるOptional VariantならFalseとしてfoldします。明示既定値のないOptional Variantは、Private標準モジュール手続きについて、解析対象内の直接呼出しがすべて解決でき、呼出箇所が一貫して省略または指定している場合だけfoldします。Public entry、CallByName/Run等の動的到達候補、呼出箇所の混在、引数割当の不整合、条件コンパイル不確定がある場合は未解決です。
+- path-feasibilityは、完全で循環のない現在経路を走査し、Variantへの対応済み単純代入と、宣言型とRHS型が一致する単純スカラー代入から得た値を、代入時点のsnapshotとして後続predicateに使います。直前に確定したVariant値への単純代入はsnapshotに展開します。枝ごとの値は別々に保ち、ByRef等を含むcall、unsupported assignment、member/array writeでは影響する状態を破棄します。loopを含む/incomplete graph、後で再代入され得るvariable alias、動的式は伝播せず、未証明経路は`not_checked`のままです。
+- 同じbounded path stateで、literal/constantの`ReDim` boundsをdynamic array shapeとして保持し、`LBound`/`UBound`へ渡します。`Erase`、未解決bound、unsupported call/write、互換性を証明できない`ReDim Preserve`でshapeを破棄します。`Preserve`はlower/non-final upper boundの一致をテキスト上確認できる場合だけ更新します。shapeが残るVariant targetの`IsArray`にも伝播し、既知の値aliasは循環しない範囲で再帰展開します。実行時配列payload、object/member/element alias、動的shape、循環aliasは未解決です。
+- `TypeName`は既知のスカラーsubtype名、対応する固定型/Variant配列名（`()`付き）、`Empty`/`Null`の文字列を限定的にfoldします。`Nothing`という戻り文字列はobject変数の実行時状態に依存するため、bare keywordは未確定のままです。Variantの実行時subtype、objectの実型・既定プロパティ、UDTは未解決で、組み込み関数と同名のproject宣言はshadowとして扱います。
+- `IsError`は既知のスカラーsubtypeならFalse、正常に返る未shadowの`CVErr(...)`呼出ならTrueをfoldします。Variantの実行時Error値、object既定プロパティ、UDTは未確定のままにし、`IsError`/`CVErr`の既知の引数個数違反は`VBA2148`で報告します。
+- 同じ手続き内のConst、同じモジュールのConst、または一意な公開標準モジュールConstを、パス上の値由来候補として代入・引数・戻り値の流れへつなぎます。既知のFunction戻り候補に含まれる修飾済みモジュールConstも、一意なモジュール名とモジュールレベル定数が確認できる場合に由来候補へ結びます。このときPrivate定数は定義元関数の戻り値に含まれる由来情報であり、呼出元から直接参照可能という意味ではありません。Function戻り値はローカル変数に代入された解析対象プロジェクト内の呼出候補も経由し、各モジュールの入力順に依存しない形で候補を合成します。一意な手続きローカル変数またはConstの単純な定義連鎖は最大32段まで引数またはモジュール値へ展開します。循環や異なる代入元・呼出候補を持つローカル値は手続きスコープ付きで未解決のまま残し、分岐をまたいだ実行可能性は合成しません。ローカル宣言によるshadowingや曖昧な名前は誤って結び付けず、定数式の実行時評価や外部参照の解決は行いません。
+- 直接解決できる手続き呼出では、実引数候補と省略Optional引数の宣言既定値から、データフローで検出した呼出先仮引数の読み取りまでをcaller/callee別の構造パス関係として出します。既定値の式文字列はソース開示JSONだけに出し、既定値のないVariant引数はError 448候補として区別します。literal条件の矛盾で不可能と示せるパスは両側の関係にもラベルを継承し、その他は`not_checked`のままです。両側の条件を別々に保持し、条件式など未抽出の読み取り、全般的な実行可能性、alias、再帰的dispatchの解決とは扱いません。
+- 直接のFunction/Property Get呼出は、呼出元の戻り候補から呼出先の戻り値代入候補までcaller/callee別パスで結びます。既知の手続き呼出の実引数内にある一意なFunction/Property Get呼出も、その戻り代入候補から受け側仮引数への別の由来候補として残し、calleeモジュール/手続き名はソース開示JSONに限って出します。`IIf`では真偽どちらの結果引数も評価されるため、その両側のネスト呼出戻り候補を残し、排他的な分岐とは扱いません。wrapperごとの関係を別々に残し、複数段の呼出しを単一の実行可能な値フローへ合成しません。呼出経路同士の実行可能性は未証明です。
+- 直接のFunction/Property Get戻り関係をcaller → wrapper → leafへ合成し、従来の2段フィールドに加えてbounded 3〜4段のchain vectorsへ全procedure/path/条件/complete状態を保持します。leaf戻り式、静的に評価できる場合の`resolved_return_value`、caller側の戻り後条件、保守的なfeasibilityを`interprocedural_return_compositions`へ出します。wrapperのcaller側とcallee側が独立列挙された事実は保持し、再帰・alias・dynamic dispatchを実行可能な単一値フローへ潰しません。
+- パーサーが式木を保持したIf/ElseIf・Select Case・ループ・With式では、識別子の読み取り候補を構造パスへ結び、先行する単純なローカル定義を候補として伝播します。未解析式、暗黙のホスト値、実行時変換や経路実行可能性は評価しません。
+- `Call`キーワードがある呼出しでは、MS-VBALに従って括弧付き添字式の引数だけを受理します。後ろに続く括弧なし引数は診断し、呼出しの実引数数には含めません。
+- UDTでは`As`句がないメンバー、重複メンバー名、空の本体を構文診断として報告します。
+- UDT名とEnum・可視UDT・モジュール・プロジェクト・参照ライブラリ名の衝突を、取得できた名前と可視範囲に基づいて検査します。
+- 固定長文字列`String * n`は型として認識し、明示Constで指定したサイズでは、整数幅を保つリテラル整数演算と解決可能なConst参照の連鎖を、展開上限付きで評価します。明示された`Byte`/`Integer`/`Long`型も確認します。循環参照、曖昧または非公開の外部参照、非整数/変換依存の値は警告付きで未解決とし、値の推測はしません。
+- `.xlsm`のCompiled Cache報告には`_VBA_PROJECT`の生version tagを含めますが、Officeビルドやキャッシュ互換性の証拠とは扱いません。
+- `ReDim`で複数配列を指定した場合の対象と、`Erase`の各配列式を個別に保持します。これらの操作、`For`制御変数、ファイル読み込み先も手続き内の書込候補として記録し、`ByRef`仮引数への直接および解析対象内のネストした呼出し経由の更新を確定シグネチャ候補として追跡します。caller側でscalar snapshotが既知なら、calleeの単純な書込式をその値で評価した`interprocedural_byref_value_paths`候補も出します。`ByVal`、`ParamArray`、括弧で値渡しを強制した引数、曖昧な呼出しは伝播を止めます。caller/calleeの更新候補と一致する代入/ファイル読み込み/再確保/Erase/loop counter/ネスト更新を上限制御付き別経路で結び、各側の条件は分離して保持します。経路の実行可能性や配列要素状態を実行時のように評価するものではなく、転送事実が作られないその他の効果は呼出元候補のみになります。
+- 宣言から確定できる固定配列への`ReDim`、非Variantスカラー、`ParamArray`の対象、および禁止される`As New`句を診断します。Variantが実行時に配列値を持つかは未解決のままです。
+- 直前の連続した`ReDim`で形状を確認できる場合、`ReDim Preserve`の次元数、下限、最終次元以外の上限を比較します。診断は実行時Error 9の警告候補です。分岐、間にある他の文、式同士の同値性は解決しません。
+- `Implements`関係を保持し、解析対象にあるインターフェースの手続きプロトタイプと単純なPublic変数プロパティの実装不足・シグネチャ差を検査します。外部型ライブラリや配列/Variantプロパティは未解決です。
+- 解決済み手続き呼出しで必須仮引数に割当がない場合は`VBA2020` Errorを出します。`VBA2022`は、後続の名前付き引数で形式引数が埋まっていても、必須仮引数に対応する位置引数の省略をErrorとして報告します。Optionalの空位置とParamArray内の空スロットは許容規則を分けます。直接ByRef引数では、既知のscalar型一致と解析対象内で一意に解決できるscalar UDT identityの不一致に加えて、配列/スカラー形状と一部組み込み配列要素型の不一致を診断します。解析対象内で一意に解決できるUDT/class要素は型identityを比較します。scalar ByRefとarray ByRef要素のfixed-length Stringサイズは解決できる定数について比較します。externalまたはambiguous type、unsized配列パラメータのrank、ByVal変換、Variantのruntime配列形状や未解決のStringサイズは未解決です。
+- object parameterへ既知の非object型を渡す呼出しは`VBA2126`で診断します。異なるclass型間のByRef temporary/copy-backと、外部型・実行時型変換は未解決です。
+- scalar Let代入、whole-arrayからUDT/Variantへの代入、ByVal/一時値引数で静的に不適合なUDTのLet-coercionを`VBA2127`で診断します。解析対象内でUDT identityを確定できない外部型やVariantの実行時内容は未解決です。
+- 明示的なLet代入やパラメータ引数で`Nothing`を非object型へcoercionする場合、runtime error 91候補の`VBA2128` warningを出します。`Set ... = Nothing`とObject/class/Variant parameterのNothing値渡しは区別します。
+- `Set`代入で既知の非object target、既知のnonobject sourceからobject/class/Variant target、whole arrayからobject targetを`VBA2134`で診断します。Variant/外部型のruntime内容、外部class identity、object sourceと特定class targetの実行時互換性は未解決です。
+- 明示`Null`のLet-coercionと、呼出し時に省略されたOptional引数の`Null`既定値は、宛先に応じて`VBA2131` warningを出します。Resizable array/UDTはruntime error 13、Variant/fixed arrayを除く他の既知destinationはruntime error 94候補です。未解決型は未警告です。
+- `VBA2135`は、既知のnumeric/Boolean targetに渡す直接のASCII文字列リテラルが数字を含まない場合にruntime error 13のwarning候補を出します。assignment、既知のByVal argument、省略Optional default、および`Double`に変換される`For` boundsを対象にします。数字を含むregional currency/number表記、句読点、非ASCII文字、Date parse、overflowは未解決です。
+- `VBA1041`は列挙子がないEnum、`VBA1042`は重複列挙子、`VBA1044`はmodule-level変数/定数との名前衝突を診断します。`VBA1045`は自身、同じEnum内の後続列挙子、後続Enum宣言の列挙子を初期化式が参照する場合にエラーを出します。先行する同一モジュールEnumの一意な列挙子値と、project内で一意なPublic Enum列挙子値（class moduleで宣言された公開Enumを含む）は定数式で利用できます。後者は上限付き反復（最大128 pass、各pass 100,000 member visits）で解決し、Privateな別module列挙子、曖昧名、循環は未解決です。`VBA1048`はEnum初期化式内のprocedure callを拒否します。`VBA1049`は既知のmodule variable参照を拒否します。`Global Enum`は標準モジュールではPublic互換の可視性を維持し、class-like moduleでは`VBA1050`で拒否します。`VBA1051`はPublic Enum型名のproject-wide重複、Private Enumの同一module内衝突、project/library/module名との衝突を診断し、Public Enum/Public UDTの衝突は既存の`VBA1034`で扱います。対応する整数定数式、一意に解決したmodule `Const`参照と先行する同一モジュールEnum列挙子参照、直接Single/Double/Currencyリテラルと対応する数値リテラル/演算を含む一意なSingle/Double/Currency Const連鎖（上限付き）、暗黙の連番値を`enum_value`として保持し、浮動小数/固定小数値はbanker's roundingでLong化します。暗黙のLong overflowは`VBA1043`、Long範囲外の整数初期値は`VBA1046`、範囲外の浮動小数/Currency初期値は`VBA1047`で診断します。明らかなLongLong sourceは`VBA2086`で拒否します。Enum初期化式の型が確定する`+`/`-`/`*`/`/`/`^`に加え、有効なLong変換が確定する部分集合の`\`/`Mod`も評価します。整数除算は0方向へ切り捨て、`Mod`は絶対剰余規則に従います。Integer幅となる型の組合せ、0除算、範囲外値は未解決です。Single/Doubleの丸め境界付近は未解決とし、Const初期化式内も型・範囲を限定した浮動小数/Currency演算を評価し、Long丸め境界付近、精度が曖昧なCurrency量子化、循環参照、文字列、曖昧・未対応の定数値とprocedure-local名前衝突は未解決です。
+- `VBA2132`は、一意に解決された解析対象内class値のLet-coercionについて、引数なしで呼べるPublicな`VB_UserMemId = 0`のFunction/Property Getが存在するか、その戻り型からscalar代入先またはnon-Object/non-Variant ByVal scalar仮引数への暗黙変換が静的に禁じられるかを検査します。Variant/外部型の戻り型、曖昧なgetter、再帰した既定メンバー、実行時値による変換失敗は未解決です。Object/class/Variant仮引数へのByValは引数binding規則として別扱いにします。
+- 既知の非object値をLet形式でObject/class targetに代入する静的不適合を`VBA2129`で診断します。VariantやObject型sourceはruntime valueが動的なため未解決です。
+- `VBA2130`はMS-VBALの配列Let-coercion表から、既知のnonobject scalarからnon-Byte resizable array、numeric/Boolean/Dateから`Byte()`、non-Byte arrayからnon-Variant scalar、fixed-size array destination、および解決可能な異要素配列を診断します。Byte array coercion、Variant runtime形状、固定bounds同値性、配列を返すclass default memberは未解決です。
+- 候補: Excelオブジェクトモデルの読み書き、Shell・COM・ファイル関連操作、外部/ホスト呼出。
+- ホスト依存知識はVBAコアから分離し、`.xlsm`入力ではExcel、エクスポート済みコードでは既定でホスト不明として扱う。
+- 未解決: ライブラリ参照、暗黙のVariant、遅延バインド、Officeホストの型や既定プロパティ、コンパイル条件。
+- 未検証: 入力値で実行可能な経路かどうか、Excelが実際に行う効果、p-codeとソースの一致。
+
+解析に未対応の構文を確認したときは、黙って完全扱いせず、診断または未解決状態を残します。ただし診断網羅性もまだ完全ではないため、診断がないことは正しさの証明ではありません。
+
+## 次の精度向上
+
+1. MS-VBAL全体を対象にした構文適合性と静的意味規則の拡張。
+2. 宣言スコープ、型、定数、引数、既定メンバーを含む完全な名前・型解決。
+3. 条件コンパイル式の全構文とOfficeホスト定数の対応。
+4. 現在のByRef更新候補と戻り値要約を、条件の実行可能性、オブジェクト別名、セルの由来・更新先まで追う経路依存データフローへ拡張すること。
+5. 現在CFGへ加える可能エラー辺をfaultableな文ごとに精密化し、Resume先・handler active状態・ホスト終了/呼出元伝播を経路ごとに検証すること。
+6. 手元で利用許諾を確認したOfficeバージョン別データを使う抽出・相互運用試験。
+7. caller-suppliedなopcode/operand schemaを使うword-stream decoderは、語境界・固定幅operand・長さ付きbyte payloadを構造化して未知opcode、未知operation type、切詰まりを未完了として保持します。同じopcodeに対するoperation-type別のoperand layoutを指定でき、完全一致する定義をopcodeだけのfallbackより優先します。schemaのbit maskは連続した非重複fieldに限定し、汎用encodingとしてbyte、signed/unsigned 16/32-bit、raw 64-bit integer、IEEE-754 binary64 raw bits、16-bit長付きbyte列を扱います。別のcaller-supplied semantic schemaは、decoded instructionへstack actionを適用し、既知literalとlocal slotのload/store、callerがencodingを選んだUTF-8/UTF-16LE文字列operand、有限なIEEE-754 float operandの算術/比較、callerが与えたknown-return summary、明示Null/Empty/Error/Object(identity)/Array(values)値のNull伝播・Empty数値coercion・Error code比較・`IsObject`/`IsArray` predicate（Object/Arrayはschema明示時だけ有効）、整数算術/比較、stack underflowとunknown値/命令の件数集計、条件/無条件分岐・Call・Return候補、未知値を抽象状態として記録します。別APIはcaller-suppliedな相対branch値がdecoded instruction addressに一致するときだけ、上限制御付きpathへ分岐し、条件分岐は既知Boolean/整数なら片側を、未知ならfall-through/target双方を保持します。loop/step limitと未知targetも保持します。これはcaller-suppliedな値表現・意味表であり、VBA opcodeのbuilt-in割当ではありません。Officeビルド別の命令表、識別子テーブルとの結合や意味解釈は未検証です。実データに対するp-code適合性も未検証です。
+抽出済みモジュールについては`extract::analyze_extracted_module_pcode`で、選択済みline mapのdecodeとsemantic path探索を一つの呼出しにまとめられます。line mapがない場合は`None`を返し、キャッシュ形式を推測しません。
+
+`On Error`のあるCFGには、状態遷移に沿った保守的な可能エラー辺を加えています。静的に解決できる手続き呼出しは、呼出先から呼出元へ伝播し得る未処理エラー経路を、双方の条件を分けた候補として記録し、列挙された呼出元経路がhandler/`Resume Next`辺を選んだか、または呼出元がDefault方針かを記録します。Default方針の応答は呼出元が直接host起動か通常のVBA呼出かで変わるため未解決のまま残し、認識済みhost-entry候補は、直接host呼出のTerminate状態と通常のVBA呼出のDefault状態を両方CFGへ加えます。このため該当グラフは未完了扱いです。通常のDefault方針ではfault可能と分類した文、明示ハンドラ方針ではCFGに現れた未処理エラー辺を使います。どの文が実際にfaultするか、呼出元が回復するか、両側の条件が同時に成立するかは証明しないため、その経路は未完了扱いです。 Resumeへ到達したモデル状態にactive errorがない場合は`VBA2122` warning（runtime error 20候補）を出しますが、構造経路のfeasibilityは証明しません。
+
+現時点では`compiled::inspect_vba7_line_map`が、利用者が選択した観測プロファイルに対して`CA FE`シグネチャ、行数、12バイト行ディレクトリ、各行の生バイト範囲を検証します。意味が確認できないプロファイルヘッダーと行レコードのフィールドも不透明な生値として保持し、`--include-source`時だけJSONへ開示します。命令語やオペランドの意味は解釈しません。
+
+抽出時にはVBAストレージ直下にある仕様形の`__SRP_`ストリームも一覧化し、名前・長さ・指紋だけを記録します。これらもバージョン依存キャッシュとして不透明なまま扱い、モジュールソースとして解析したり意味を解釈したりしません。ストリーム名はソース開示設定に従います。
+
+組み込み標準スキーマ（VBA6/VBA7、32-bit/64-bit）により全264個のVBA opcodeの逆アセンブルおよび`_VBA_PROJECT`識別子テーブルの解決に対応しています。外部定義スキーマを渡すことなく標準P-code命令のフォーマット・プロシージャ宣言・文字列リテラル・呼出先を逆アセンブル可能です。また、抽出されたソーステキストとP-code命令群を自動照合し、ソースコード削除（Purged Source）、P-codeのみに存在する隠しプロシージャ、不審な文字列・URL・実行ファイル、危険なWindows API呼出の乖離をVBA Stomping改竄として自動診断します。未知・未同定のopcodeについては安全にUnknownとして保持します。
+- 完全な非循環caller経路で単純変数へ既知literal/Constを代入してから呼出す場合、callee仮引数へ渡る値のpath snapshot factを出力します。caller条件、仮引数、解決値を保持し、alias、member/index、loop、未完全CFG、未対応効果は未解決です。
