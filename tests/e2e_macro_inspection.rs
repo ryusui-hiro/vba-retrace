@@ -1358,7 +1358,10 @@ fn e2e_cli_binary_execution_workflow() {
         .expect("CLI --version execution failed");
     assert!(output_ver.status.success());
     let stdout_ver = String::from_utf8_lossy(&output_ver.stdout);
-    assert_eq!(stdout_ver.trim(), format!("vba-insight {}", env!("CARGO_PKG_VERSION")));
+    assert_eq!(
+        stdout_ver.trim(),
+        format!("vba-insight {}", env!("CARGO_PKG_VERSION"))
+    );
 
     let output_v_short = Command::new(bin_path)
         .arg("-V")
@@ -1366,7 +1369,10 @@ fn e2e_cli_binary_execution_workflow() {
         .expect("CLI -V execution failed");
     assert!(output_v_short.status.success());
     let stdout_v_short = String::from_utf8_lossy(&output_v_short.stdout);
-    assert_eq!(stdout_v_short.trim(), format!("vba-insight {}", env!("CARGO_PKG_VERSION")));
+    assert_eq!(
+        stdout_v_short.trim(),
+        format!("vba-insight {}", env!("CARGO_PKG_VERSION"))
+    );
 
     // Cleanup
     let _ = fs::remove_file(&file_path);
