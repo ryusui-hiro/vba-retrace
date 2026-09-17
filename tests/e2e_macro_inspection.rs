@@ -2081,3 +2081,76 @@ fn e2e_cfb_unlinked_orphan_directory_entry_detection() {
         .expect("StealthPayload entry must be discovered");
     assert_eq!(unlinked_entry.path, "[unlinked]/StealthPayload");
 }
+
+#[test]
+fn e2e_defined_name_and_very_hidden_sheet_threat_detection() {
+    let src = "Sub Auto_Open()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "ThreatProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["Auto_Open"],
+    );
+
+    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.ms-excel.sheet.macroEnabled.main+xml\"/><Override PartName=\"/xl/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/><Override PartName=\"/xl/worksheets/sheet2.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>";
+    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
+    let wb = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><workbookPr codeName=\"ThisWorkbook\"/><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId2\"/><sheet name=\"HiddenEvil\" sheetId=\"2\" state=\"veryHidden\" r:id=\"rId3\"/></sheets><definedNames><definedName name=\"Auto_Open\">Sheet1!$A$1</definedName><definedName name=\"CmdPayload\">=cmd|'/c calc'!A1</definedName><definedName name=\"XlmPayload\">=EXEC(\"calc.exe\")</definedName></definedNames></workbook>";
+    let wb_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/><Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet2.xml\"/></Relationships>";
+
+    // sheet1 has full-width characters in formula
+    let sheet1 = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\"><c r=\"A1\"><f>＝ＥＸＥＣ（＂ｃａｌｃ＂）</f></c><c r=\"A2\"><f>＝ｃｍｄ｜＇／ｃ　ｃａｌｃ＇！Ａ１</f></c></row></sheetData></worksheet>";
+    let sheet2 = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData/></worksheet>";
+
+    let xlsm = synthesize_zip(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", pkg_rels.as_bytes()),
+        ("xl/workbook.xml", wb.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/vbaProject.bin", &cfb),
+        ("xl/worksheets/sheet1.xml", sheet1.as_bytes()),
+        ("xl/worksheets/sheet2.xml", sheet2.as_bytes()),
+    ]);
+
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+    let diags = &inspection.extracted.diagnostics;
+
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Worksheet 'HiddenEvil' is set to 'veryHidden'")),
+        "should detect veryHidden sheet: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("defined name 'Auto_Open' triggers auto-execution")),
+        "should detect Auto_Open defined name: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Potential DDE execution formula in defined name 'CmdPayload'")),
+        "should detect DDE in defined name: {diags:?}"
+    );
+    assert!(
+        diags.iter().any(|d| d.contains(
+            "Potential Excel 4.0 (XLM) macro execution formula in defined name 'XlmPayload'"
+        )),
+        "should detect XLM in defined name: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d
+                .contains("Potential Excel 4.0 (XLM) macro execution formula in cell 'Sheet1'!A1")),
+        "should detect normalized fullwidth EXEC formula: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("Potential DDE execution formula in cell 'Sheet1'!A2")),
+        "should detect normalized fullwidth DDE formula: {diags:?}"
+    );
+}

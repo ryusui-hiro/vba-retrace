@@ -234,29 +234,128 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
     extracted.workbook_cells_truncated = package.workbook_cells_truncated;
     extracted.diagnostics.extend(package.workbook_diagnostics);
 
+    fn normalize_formula_chars(formula: &str) -> String {
+        formula
+            .chars()
+            .map(|c| match c {
+                '\u{3000}' => ' ',
+                '\u{FF01}'..='\u{FF5E}' => char::from_u32((c as u32) - 0xFEE0).unwrap_or(c),
+                _ => c,
+            })
+            .collect()
+    }
+
     for sheet in &extracted.workbook_sheets {
-        if sheet.kind.eq_ignore_ascii_case("macrosheet") {
+        let is_macrosheet = sheet.kind.eq_ignore_ascii_case("macrosheet");
+        let is_very_hidden = sheet
+            .state
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case("veryHidden"));
+
+        if is_macrosheet {
             extracted.diagnostics.push(format!(
                 "Security warning: Workbook contains Excel 4.0 (XLM) macro sheet '{}' (state: {})",
                 sheet.name,
                 sheet.state.as_deref().unwrap_or("visible")
+            ));
+        } else if is_very_hidden {
+            extracted.diagnostics.push(format!(
+                "Security warning: Worksheet '{}' is set to 'veryHidden' (hidden from standard Excel UI)",
+                sheet.name
+            ));
+        }
+    }
+
+    for defined_name in &extracted.workbook_defined_names {
+        let name_lower = defined_name.name.to_ascii_lowercase();
+        let is_auto_exec_name = matches!(
+            name_lower.as_str(),
+            "auto_open"
+                | "_xlnm.auto_open"
+                | "auto_close"
+                | "_xlnm.auto_close"
+                | "auto_activate"
+                | "_xlnm.auto_activate"
+                | "auto_deactivate"
+                | "_xlnm.auto_deactivate"
+        );
+        if is_auto_exec_name {
+            extracted.diagnostics.push(format!(
+                "Security warning: Workbook defined name '{}' triggers auto-execution on open/close (target: '{}', hidden: {})",
+                defined_name.name,
+                defined_name.formula,
+                defined_name.hidden.unwrap_or(false)
+            ));
+        }
+
+        let norm_fn = normalize_formula_chars(&defined_name.formula);
+        let f_clean = norm_fn
+            .trim()
+            .trim_start_matches(|c: char| {
+                c.is_whitespace() || c == '=' || c == '+' || c == '-' || c == '@'
+            })
+            .trim();
+        let f_norm = f_clean.replace("_xlfn.", "").replace("_xlws.", "");
+        let f_lower = f_norm.to_ascii_lowercase();
+
+        let is_dde_name = if let Some((target, _)) = f_clean.split_once('|') {
+            let target_clean = target
+                .trim()
+                .trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+            let target_lower = target_clean.to_ascii_lowercase();
+            let file_name = target_lower
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&target_lower);
+            let base = file_name.strip_suffix(".exe").unwrap_or(file_name);
+            matches!(
+                base,
+                "cmd"
+                    | "powershell"
+                    | "pwsh"
+                    | "mshta"
+                    | "cscript"
+                    | "wscript"
+                    | "rundll32"
+                    | "regsvr32"
+                    | "certutil"
+                    | "bitsadmin"
+                    | "msiexec"
+                    | "msdt"
+                    | "control"
+                    | "explorer"
+                    | "wmic"
+                    | "msxsl"
+            ) || f_lower.contains("|'")
+        } else {
+            false
+        };
+
+        let is_xlm_name = f_lower.contains("exec(")
+            || f_lower.contains("call(")
+            || f_lower.contains("register(")
+            || f_lower.contains("run(");
+
+        if is_dde_name {
+            extracted.diagnostics.push(format!(
+                "Security warning: Potential DDE execution formula in defined name '{}': '{}'",
+                defined_name.name, defined_name.formula
+            ));
+        } else if is_xlm_name {
+            extracted.diagnostics.push(format!(
+                "Security warning: Potential Excel 4.0 (XLM) macro execution formula in defined name '{}': '{}'",
+                defined_name.name, defined_name.formula
             ));
         }
     }
 
     for cell in &extracted.workbook_cells {
         if let Some(formula) = &cell.formula {
-            let f_clean = formula
+            let norm_formula = normalize_formula_chars(formula);
+            let f_clean = norm_formula
                 .trim()
                 .trim_start_matches(|c: char| {
-                    c.is_whitespace()
-                        || c == '='
-                        || c == '+'
-                        || c == '-'
-                        || c == '@'
-                        || c == '\u{FF1D}' // '＝' Full-width Equals
-                        || c == '\u{FF0B}' // '＋' Full-width Plus
-                        || c == '\u{FF0D}' // '－' Full-width Minus
+                    c.is_whitespace() || c == '=' || c == '+' || c == '-' || c == '@'
                 })
                 .trim();
             let f_norm = f_clean.replace("_xlfn.", "").replace("_xlws.", "");

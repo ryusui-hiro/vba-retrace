@@ -148,16 +148,18 @@ def assemble(artifacts, output, commit):
     # GitHub Packages mirror
     mirrors = output / 'github-packages'
     mirrors.mkdir()
+    repo = os.environ.get('GITHUB_REPOSITORY', 'ryusui-hiro/vba-retrace')
+    scope = '@' + repo.split('/')[0]
     for source in sorted(packages.iterdir()):
         mirror = mirrors / source.name
         shutil.copytree(source, mirror)
         config = json.loads((mirror / 'package.json').read_text())
-        config['name'] = '@ryusui-hiro/' + config['name']
+        config['name'] = f'{scope}/' + config['name']
         config['publishConfig'] = {'access': 'public', 'registry': 'https://npm.pkg.github.com'}
         if 'optionalDependencies' in config:
-            config['optionalDependencies'] = {'@ryusui-hiro/' + name: value for name, value in config['optionalDependencies'].items()}
+            config['optionalDependencies'] = {f'{scope}/' + name: value for name, value in config['optionalDependencies'].items()}
             index = (mirror / 'index.js').read_text()
-            index = re.sub(r"require\((['\"])(vba-insight-[^'\"]+)(['\"])\)", r"require(\1@ryusui-hiro/\2\3)", index)
+            index = re.sub(r"require\((['\"])(vba-insight-[^'\"]+)(['\"])\)", rf"require(\1{scope}/\2\3)", index)
             (mirror / 'index.js').write_text(index)
         (mirror / 'package.json').write_text(json.dumps(config, indent=2) + '\n')
         subprocess.run(['npm', 'pack', '--ignore-scripts', '--pack-destination', str(output.resolve())], cwd=mirror, check=True)
