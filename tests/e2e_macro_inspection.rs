@@ -1351,6 +1351,29 @@ fn e2e_cli_binary_execution_workflow() {
     let stdout_disasm = String::from_utf8_lossy(&output_disasm.stdout);
     assert!(stdout_disasm.contains("VBA P-Code Disassembly Report"));
 
+    // 4. Test '--version' and '-V'
+    let output_ver = Command::new(bin_path)
+        .arg("--version")
+        .output()
+        .expect("CLI --version execution failed");
+    assert!(output_ver.status.success());
+    let stdout_ver = String::from_utf8_lossy(&output_ver.stdout);
+    assert_eq!(
+        stdout_ver.trim(),
+        format!("vba-insight {}", env!("CARGO_PKG_VERSION"))
+    );
+
+    let output_v_short = Command::new(bin_path)
+        .arg("-V")
+        .output()
+        .expect("CLI -V execution failed");
+    assert!(output_v_short.status.success());
+    let stdout_v_short = String::from_utf8_lossy(&output_v_short.stdout);
+    assert_eq!(
+        stdout_v_short.trim(),
+        format!("vba-insight {}", env!("CARGO_PKG_VERSION"))
+    );
+
     // Cleanup
     let _ = fs::remove_file(&file_path);
 }
