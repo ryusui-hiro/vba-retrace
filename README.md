@@ -1,376 +1,328 @@
 # vba-insight
 
-Dependency-free Rust library and CLI for complete VBA semantic inspection, direct macro extraction from Office containers (`.xlsm`, `.xlsb`, `.docm`, `.pptm`, legacy `.xls`, `vbaProject.bin`), built-in P-code disassembly, and automated VBA Stomping / tampering detection. It does not execute macros or make network requests.
+[English](README.md) | [日本語](README.ja.md) | [简体中文](README.zh.md)
 
-> **Development status:** High-performance, dependency-free static-analysis, P-code disassembly, and stomping detection engine in pure Rust.
+[![crates.io](https://img.shields.io/crates/v/vba-insight.svg)](https://crates.io/crates/vba-insight)
+[![PyPI](https://img.shields.io/pypi/v/vba-insight.svg)](https://pypi.org/project/vba-insight/)
+[![npm](https://img.shields.io/npm/v/vba-insight.svg)](https://www.npmjs.com/package/vba-insight)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](Cargo.toml)
 
-## Highlights
+High-performance, **zero-dependency** static analysis, P-code disassembly, and automated **VBA Stomping / tampering detection** engine for Office macros (`.xlsm`, `.xlsb`, `.docm`, `.pptm`, legacy `.xls`, `vbaProject.bin`) in pure Rust.
 
-- **Complete VBA Semantic Analyzer**: Rigorous AST parsing, MS-VBAL type checking, scoping, acyclic control-flow analysis (CFG), reaching definitions, constant folding, and error propagation modeling.
-- **Direct Macro Extraction**: Pure Rust, dependency-free extraction from `.xlsm`, `.xlsb`, `.docm`, `.pptm`, legacy `.xls`, and raw `vbaProject.bin` with OPC package resolution, CFB compound parsing, and MS-OVBA decompression.
-- **Built-in Standard P-Code Disassembler**: Full coverage of 264 VBA opcodes (VBA6/VBA7, 32-bit and 64-bit) and `_VBA_PROJECT` identifier resolution without requiring external opcode tables.
-- **VBA Stomping & Tampering Detection**: Automated discrepancy detection between source text and compiled P-code (purged source, hidden procedures, suspicious URLs/executables, and dangerous API calls).
-- **Fast & Zero Dependencies**: Implemented entirely with Rust's standard library (`std`), enabling maximum memory safety, deterministic execution, and ultra-high analysis throughput.
-- **Multi-Language Support**: First-class bindings for Rust (`crates.io`), Python (`PyPI` via PyO3 / ABI3), and Node.js (`npm` via N-API).
+It executes purely in memory without invoking Office, running script interpreters, or making network requests.
+
+---
+
+## Key Highlights
+
+- **Fast & Zero Third-Party Dependencies**: Core crate is written entirely using the Rust Standard Library (`std`). No external C libraries, no OpenSSL, no regex crates—guaranteeing deterministic compilation, minimal binary footprints, and high throughput.
+- **Direct Macro Extraction**: Directly unpacks macro streams from OOXML containers (`.xlsm`, `.docm`, `.pptm`), Compound File Binary (`.xls`, `vbaProject.bin`), and handles MS-OVBA decompression and OPC package resolution natively.
+- **Full Standard P-Code Disassembler**: Built-in disassembler for 264 standard VBA opcodes covering VBA6 and VBA7 (32-bit & 64-bit architectures), resolving identifiers and literals directly from `_VBA_PROJECT` metadata without external tables.
+- **Automated VBA Stomping & Tampering Detection**: Automatically flags discrepancies between decompressed VBA source code and compiled P-code (purged source code, procedures hidden only in bytecode, dangerous Win32 API calls, suspicious URLs/IPs, and ghost GUI modules).
+- **Worksheet Cell Threat Scanner**: Scans workbook formulas for Dynamic Data Exchange (DDE) execution (`=cmd|...`), legacy XLM 4.0 macros (`=EXEC(...)`, `=CALL(...)`), remote UNC/HTTP injection, `=WEBSERVICE(...)` data exfiltration, suspicious executable hyperlinks, full-width evasion normalization, and auto-executing defined names (`Auto_Open`).
+- **SARIF v2.1.0 Security Reports**: Native output to OASIS SARIF v2.1.0 for seamless integration with GitHub Advanced Security code scanning, GitLab CI, and enterprise SIEM pipelines.
+- **First-Class Multi-Language Bindings**: Full native bindings for **Rust**, **Python** (via PyO3 / ABI3 wheels), and **Node.js** (via N-API native addons with TypeScript declarations).
+
+---
 
 ## Installation
 
-| Language / Platform | Package | Install Command | Notes |
+| Platform / Language | Package Name | Install Command | Description |
 |---|---|---|---|
-| **Rust** | `vba-insight` | `cargo add vba-insight` | Zero-dependency static library |
-| **Python** (3.10+) | `vba-insight` | `pip install vba-insight` | Pre-built ABI3 wheels, PEP 561 typed |
-| **Node.js** (18+) | `vba-insight` | `npm install vba-insight` | Native N-API addon with TypeScript types |
-| **CLI** | `vba-insight` | `cargo install vba-insight` | Or pre-built binaries from GitHub Releases |
+| **Rust Library** | `vba-insight` | `cargo add vba-insight` | Zero-dependency static analysis library |
+| **Python (3.10+)** | `vba-insight` | `pip install vba-insight` | Pre-built universal ABI3 wheels with type hints |
+| **Node.js (18+)** | `vba-insight` | `npm install vba-insight` | High-performance N-API addon with TypeScript definitions |
+| **CLI Binary** | `vba-insight` | `cargo install vba-insight` | Or download pre-built binaries from [Releases](https://github.com/ryusui-hiro/vba-retrace/releases) |
 
+---
 
-## What it does today
+## CLI Usage
 
-- Tokenizes VBA text while retaining UTF-8 byte spans and line/column locations.
-- Treats documented VBA whitespace separators, including full-width Japanese space, as separators rather than identifier characters while preserving UTF-8 byte offsets.
-- Applies VBA line-continuation rules before conditional-compilation evaluation, so continued `#If` and `#Const` directives are read as logical lines while excluded text masking preserves physical source offsets.
-- Parses common module declarations, `Sub`/`Function`/`Property` headers, arguments, variable declarations, `Type` and `Enum` blocks, and structured statements (`If`, `Select Case`, loops, `With`, labels, `GoTo`, computed `On...GoTo`/`On...GoSub`, and exits). `Stop`, `End`, and `Resume` are recognized from exact unbracketed keyword tokens; names such as `Stopwatch` and `ResumeCount` remain identifiers, while square-bracket expressions stay host-dependent.
-- Recognizes block `If` clauses and `For` delimiters only at unbracketed keyword-token boundaries, so names such as `Elsewhere` and member accesses such as `object.Then`, `collection.In`, and `object.To` do not split statement conditions or loop headers.
-- Requires expression parsing to consume the complete token sequence; trailing or unbalanced syntax stays unresolved. Distinguishes dot member access, bang dictionary access (including bracketed keys) through a statically resolved in-project default member, and the `!` Single type suffix.
-- When an assignment or call argument has a parsed expression tree, gathers value-input candidates structurally: known procedure names are call targets; public procedures whose name matches a project or module must be qualified outside their defining module (`VBA2138`), declared array callees and actual arguments remain value inputs, qualified standard-module values retain their module path, and dot/bang member names are not treated as variables. Member contents and runtime aliases remain unresolved.
-- Parses `TypeOf expression Is type` as a Boolean node, links only the object expression into value-read candidates, and retains the tested type separately. Type facts identify matching declared class types and in-project `Implements` relationships as compatibility candidates; known scalar operands receive `VBA2145`, while direct `Nothing` tests warn about possible runtime error 91 (`VBA2146`). Runtime object values and external interface compatibility remain unresolved.
-- Checks ordinary object-reference `Is` comparisons and reports `VBA2147` when a declared scalar or UDT operand is known. Object/Variant runtime identity and unknown types remain unresolved; the `Is` within `TypeOf ... Is ...` uses its dedicated type-test semantics.
-- Uses an exported module's `Attribute VB_Name` as its canonical project name when present, so qualified references follow component metadata even when the input filename differs.
-- Retains explicit and implicit bounds for array declarations and `ReDim` operations, reports each `Erase` target, and carries the module `Option Base` used by implicit dimensions into the output and direct `ByRef` mutation candidates.
-- Checks a bounded MS-VBAL array Let-coercion subset (`VBA2130`): known non-object scalar-to-non-Byte resizable arrays, numeric/Boolean/Date values to `Byte()`, non-Byte arrays to non-Variant scalars, fixed-size-array destinations, and mismatched built-in/UDT/class element identities. Other Byte-array conversions, runtime Variant shapes, default members, and fixed-array bounds remain unresolved.
-- Resolves indexed local, parameter, and module arrays to their declared element type, preserves whole-array references as array types, and diagnoses named or wrong-rank subscripts when the declared rank is known. Dynamic and unranked parameter arrays remain uncertain.
-- Checks `LBound` and `UBound` argument counts, flags statically known scalar arguments and out-of-rank constant dimensions, and keeps dynamic ranks and variable dimension expressions unresolved. Both functions retain their documented `Long` result type.
-- Recognizes `For Each` only when `For` and `Each` are separate keyword tokens, so a counter such as `EachItem` remains a normal `For` loop. Checks that `For Each` over a declared array uses a `Variant` control variable, that an explicit `Next` name matches, and that arrays of in-project UDT elements are not enumerated. Runtime collection enumeration remains host dependent.
-- Checks `For` counters against known numeric/`Variant` rules, rejects known array/UDT/`LongLong`/`Nothing` start/end/`Step` values that cannot convert to `Double`, and compares explicit `Next` names. `VBA2135` warns for direct ASCII string literals in bounds with no ASCII digits; general string expressions, digit-bearing locale-dependent formats, `LongPtr`, and host-dependent conversions remain unresolved.
-- Supports nested `Next inner, outer` terminators by binding one counter to each enclosing loop in source order.
-- Diagnoses statically known `ReDim`/`Erase` misuse with fixed arrays, scalar declarations, and `ParamArray`; `Variant` array state remains a runtime-dependent candidate.
-- Checks `ReDim Preserve` dimension count and non-final bounds when an immediately preceding straight-line `ReDim` establishes the shape; branches, intervening statements, and nonconstant expressions remain uncertain.
-- Evaluates a conservative subset of `#Const`/`#If`/`#ElseIf`/`#Else` when callers supply compile-time constants, including numeric precedence, exponentiation, integer division and `Mod`. Supported numeric `\`/`Mod` operands are banker-rounded to Long; `\` truncates the quotient toward zero and signed `Mod` uses the MS-VBAL absolute-remainder rule. Out-of-range or explicitly converted numeric operands remain unresolved. It also handles decimal/radix numeric literals with supported type suffixes and `D`/`E` exponents, literal `&` concatenation and `+` concatenation when both values are known strings, a bounded ASCII/Binary `Like` subset (`*`, `?`, `#`, and character lists), explicit English month-name date tokens, `Empty`/`Nothing`, and simple intrinsic calls. LongLong literal suffixes require a known `Win64=True` target; unsupported ranges stay unresolved. Binary string ordering is evaluated only for ASCII strings; non-identical comparisons under Text/Database collation remain unresolved. `Like` uses a fixed 250,000-cell matching budget; non-ASCII or locale-dependent matching stays unresolved. `LenB` evaluates known Unicode strings using UTF-16 byte counts; ANSI/DBCS conversions and user-defined-type layouts remain unresolved. `CDate` handles Date values and numeric serials within VBA's Date range; locale-sensitive string dates and ambiguous numeric or omitted-year date tokens remain unresolved. For known Date and numeric values, unary negation and `+`, `-`, `*`, `/`, `^` are evaluated within supported ranges; Date integer division, `Mod`, and mixed-type string/Boolean coercions remain unresolved. `#Const` directives are processed even in excluded blocks, typed suffixes are ignored, duplicate names are diagnosed, and inline comments are stripped without changing source offsets. Unsupported, type-sensitive, locale-dependent, or `Null`-valued conditions keep alternatives visible and make affected flow graphs incomplete.
-- Applies valid module-local `DefType` letter ranges to untyped variables, procedure parameters, and function/property return type candidates; overlaps, invalid placement, and rules affected by unknown conditional-compilation branches are diagnosed or left unresolved.
-- Recognizes fixed-length `String * n` types, folds bounded integer arithmetic and accessible constant-reference chains while preserving `Byte`/`Integer`/`Long` ranges, and checks explicit constant types before accepting a size. It rejects known values outside VBA's 1–65,526 range; cycles, ambiguous or inaccessible references, unsupported type coercions, functions and oversized expressions remain unresolved with a warning.
-- Builds structural control-flow graphs and reports call candidates, unresolved names, Excel object-model access candidates under the Excel host profile, and selected host-operation candidates.
-- Marks a bounded subset of control-flow paths infeasible when `If`/loop conditions fold from Boolean literals, `Null`, small integral operations, or uniquely resolved procedure-local and same-module `Const` declarations. `If Null` and known Null comparison results are treated as False for branch selection; selected Boolean/Null `Not`, `And`, `Or`, `Xor`, `Eqv`, and `Imp` cases use VBA's Null rules, while numeric/Null combinations remain unresolved. `IsNull`, `IsEmpty`, and `IsError` calls fold to Boolean only for statically known subtypes and unshadowed intrinsics; `IsError(CVErr(...))` is true, while known non-error values are false. `IsArray` folds only for declared array shapes and known scalar declarations, leaving `Variant`/Object runtime payloads unresolved. `IsObject` folds class/Object declarations true and known scalar declarations false; `Nothing` is true, while Variant/object payloads remain unknown. `IsMissing` folds known non-missing cases such as `ParamArray` or non-Variant formals, while Variant formals stay unknown without callsite proof. `IsNumeric` folds statically numeric/Boolean values, successful `CDec` calls, and ASCII-digit-only strings; locale-formatted strings remain unknown. `IsDate` folds Date literals, Date-typed declarations/expressions, and selected unshadowed date/time intrinsics when their calls return a Date value; string recognition, Variant results such as `TimeValue(Null)`, and other runtime coercions stay unknown. `VarType` returns standard subtype codes for known scalar values, `CDec`'s Decimal subtype, and declared arrays, including `vbArray` plus the element code; Variant runtime payloads, user-defined types, and object default properties stay unresolved. `TypeName` folds the names of known scalar subtypes, supported arrays with `()` suffixes, and Empty/Null; runtime Variant and object types stay unresolved. `VBA2148` reports known wrong argument counts. ASCII string comparisons and `Like` patterns fold only when `Option Compare Binary` is known and valid; text/database collation and non-ASCII matching/order stay unresolved, while identical literal strings remain comparable. The `Like` matcher supports a bounded subset of `?`, `#`, `*`, and character lists/ranges with a fixed 250,000-cell budget. Local parameters/declarations shadow module constants; duplicate names, cycles, external constants, unsupported expressions, and the remaining feasibility questions stay `not_checked`.
-- Evaluates supported values reaching a predicate from the current complete acyclic CFG path, including branch-specific Variant assignments and exact-type scalar assignments. It invalidates these facts across calls or unsupported writes and does not carry them through loops, member/array aliases, incomplete CFGs, or runtime-dependent expressions.
-- For a private standard-module procedure, seeds a `ByVal` formal with a value only when every resolved direct project callsite supplies the same statically evaluable literal or `Const` of a compatible type. Public/external procedures, `ByRef`, mutable caller variables, dynamic entrypoints, optional omissions, and uncertain conditional compilation remain unresolved; supported callee assignments replace the value, while calls and unsupported effects clear it.
-- The same bounded seed is carried into a function's callee paths before its return candidates are associated with the caller. Return-path facts therefore retain separate caller/callee conditions and can mark a return branch infeasible when the callee's static input proves it impossible; caller and callee execution paths are still not merged into a general proof.
-- Folds `Len` and `LenB` path predicates for known string values, numeric `String * n` declarations, and supported declared scalar storage sizes. The bounded evaluator counts UTF-16 units for `Len` and UTF-16 bytes for `LenB`; `Null` propagates. Unknown dynamic strings and Variant payloads, UDT layouts, ANSI/DBCS conversions, and target-dependent storage types remain unresolved.
-- Folds `InStr` results for known ASCII strings and positive known start positions when binary comparison is explicit or follows a valid `Option Compare Binary`. `Null` propagates; text/database collation, non-ASCII searches, dynamic strings, invalid starts, and `InStrB` byte positions remain unresolved. Known calls with fewer than two or more than four arguments receive `VBA2148`.
-- Folds `InStrRev` for known ASCII strings with binary comparison, including bounded reverse-search positions and explicit positive starts. Empty-search results and `Null` are retained; Text/Database collation, non-ASCII/runtime values, invalid starts, and byte-oriented variants remain unresolved. Omitted compare is folded only under a valid `Option Compare Binary`.
-- Folds `Left`, `Right`, and `Mid` for known ASCII strings and bounded integer positions/counts, including zero counts, omitted `Mid` length, and start positions beyond the string. `Null` propagates; dynamic values, non-ASCII slicing, invalid bounds, and byte-oriented variants remain unresolved. Known bad arities receive `VBA2148`.
-- Folds `Trim`, `LTrim`, and `RTrim` for known ASCII strings, removing ordinary spaces at the documented ends. `Null` propagates; dynamic values and non-ASCII strings remain unresolved. Known calls with an argument count other than one receive `VBA2148`.
-- Folds bounded integer `Abs`, `Fix`, `Int`, `Sgn`, `CByte`, `CInt`, and `CLng` calls in path predicates when the intrinsic is unshadowed and the integer result fits the target operation; locale-sensitive and runtime Variant conversions remain unresolved.
-- Folds ASCII-safe `CStr`, `Val`, and string forms of `CByte`/`CInt`/`CLng` when the conversion is integral and unambiguous; locale-sensitive, decimal, overflow, and runtime Variant conversions remain unresolved.
-- Folds `LBound`/`UBound` for fixed-size declared arrays with literal/Const bounds and dimensions; dynamic arrays, Variant runtime shapes, and unresolved dimensions remain unresolved.
-- Folds rank-one `Array(...)` literal bounds when its elements are statically safe and nonempty.
-- Folds `LBound(ParamArray)` to VBA's zero lower bound and folds `UBound(ParamArray)` when positional caller slots provide an exact bounded length; empty, named, dynamic, and unresolved calls remain runtime dependent.
-- Folds ASCII/bounded `Chr`, `Asc`, `Space`, and `String` intrinsic results in path predicates; Unicode, locale, invalid ranges, and oversized generated strings remain unresolved.
-- Folds nonnegative integral `Hex` and `Oct` formatting in path predicates; negative, overflow, and Variant/locale-dependent conversions remain unresolved.
-- Folds `Sqr` only for exact non-negative integer squares; non-square floating results remain unresolved.
-- Folds `Round` only for known integer values with omitted or zero digits; general floating/precision-sensitive rounding remains unresolved.
-- Folds bounded Date literals, `DateSerial`, `TimeSerial`, `DateAdd` day/time/month/quarter/year intervals with Gregorian month-end clamping, `DateDiff` day/`ww` week/time/month/quarter/year intervals, `DatePart` date/time fields, `DateValue`/`TimeValue` explicit English text, `CDate` numeric serials, and Date `+`/`-` comparisons in path predicates. Locale-dependent dates, weekday (`w`) semantics, optional first-day/first-week arguments, two-digit years, and runtime date values remain unresolved.
-- Folds pure literal/constant `IIf`, `Choose`, and `Switch` values in path predicates. `IIf` requires both result operands to be statically safe, preserving VBA's eager evaluation; dynamic or side-effecting operands remain unresolved.
-- Folds the three-required-argument `Replace` form for known ASCII strings under `Option Compare Binary`, including empty find/replacement strings and bounded output growth. It leaves `Null` errors, optional start/count/compare forms, text collation, and runtime/non-ASCII values unresolved.
-- Treats square-bracket expressions as unresolved host expressions in the VBA core. Under the Excel profile, bracket expressions in procedures become host-dependent Evaluate access candidates; bracketed keys after `!` remain dictionary/member keys. Excel's runtime meaning and formula/name resolution are not inferred.
-- Builds `Select Case` as ordered per-alternative tests: value, inclusive `To` range, and `Is` comparison alternatives retain their own source spans and symbolic predicates; a match exits the selection, and `Case Else` receives the remaining path. A literal `Null` selector only reaches `Case Else` or the no-match continuation. The JSON preserves range structure while redacting expression text by default; type coercion and input feasibility are not solved.
-- Resolves all procedure-local labels in computed `On...GoTo`/`On...GoSub` destination lists, adds one conditional edge per destination, and models zero/out-of-list fallthrough. `GoSub`/`On...GoSub` LIFO `Return` resumptions use a 64-frame and 100,000-state cap; the error-policy state pass also carries the GoSub stack through handler transfers and Resume. Index coercion, invalid-index errors, fault-site feasibility, and edge merging remain unresolved, so affected graphs stay incomplete. Numeric line labels allow the specified optional colon, canonicalize leading zeroes, and are checked against VBA's 0–2,147,483,647 range.
-- Resolves visible project procedures, explicit standard-module qualifiers, property `Get` reads, and unique public values in standard modules while preserving ambiguous and unresolved results.
-- Tracks simple path-local `Set target = source` object aliases and declared-array-to-Variant aliases, allowing bounded `IsObject`/`IsArray` type-predicate folding through the alias. Variant runtime payloads, Nothing state, reassignment effects, member aliases, and dynamic objects remain unresolved.
-- When a later member call is path-associated, connects that simple alias to a separate typed-member dispatch candidate if the source class has one visible matching member; the original call fact remains unchanged and calls without path evidence remain unresolved.
-- Follows MS-VBAL `Call` argument rules: arguments with the explicit `Call` keyword must be parenthesized; trailing unparenthesized arguments are diagnosed and excluded from call arity.
-- Resolves declared class-object method calls and property setter candidates, and carries basic assignment type facts through class property reads.
-- Resolves nested in-project UDT field reads and array fields to their declared types when their owner type is accessible; external or late-bound member layouts remain unresolved.
-- Binds leading-dot member expressions to nested `With` block bases for type inference, typed method-call candidates, and direct argument/return-flow candidates; statically known scalar `With` targets are rejected while Object/Variant targets remain late-bound.
-- Validates in-project `WithEvents` class targets and handler signatures, links positional `RaiseEvent` calls to possible sinks, and carries event argument and `ByRef` write candidates into handler parameters. Error paths from event handlers are marked as stopping remaining dispatch rather than being reported as caller recovery; runtime object assignment remains unproven and external event interfaces remain unresolved.
-- Retains explicit `VB_UserMemId` member IDs from exported attribute lines, infers indexed in-project default-member read/write types and zero-argument default-value coercion inside scalar assignment expressions, emits call and argument-flow candidates for matching accessors, and diagnoses known argument-list mismatches; external typelib defaults and runtime no-name dispatch remain unresolved.
-- Reads `VB_PredeclaredId` and `VB_GlobalNameSpace` class attributes, resolves explicitly predeclared in-project class instances as typed member receivers, rejects `Set` assignment to a named predeclared instance and `VB_GlobalNameSpace=True` in VBA source projects; referenced-library global namespaces remain unmodeled.
-- Narrows `CallByName` calls when the receiver is an in-project class, the member name is a string literal, and the `vbCallType` is known; dynamic names, external objects, and runtime member availability remain candidates.
-- Under the Excel host profile, records `Application.Run` and recognized workbook-application calls as dynamic macro-invocation candidates. A literal macro name, including a concatenation of string literals, can identify public `Sub`/`Function` candidates in standard modules; workbook/active-sheet resolution, `Range`/XLL targets, runtime dispatch, and variable-built names remain unresolved. Named arguments are rejected with `VBA2141` per the Excel method contract.
-- Records Excel `Application.OnTime` calls and possible scheduled entry points. Missing required `EarliestTime` or `Procedure` arguments are errors (`VBA2142`). Literal procedure names can candidate-match public zero-argument `Sub`/`Function` declarations in standard modules; `Schedule:=False` is retained as a cancellation candidate. Runtime scheduling, time expressions, exact cancellation matches, and variable-built names remain unresolved. Scheduled entry candidates use the same conservative host-error context as other possible Excel entry points.
-- Validates UDT member type clauses, member uniqueness, non-empty bodies, and scoped public/private type-name collisions against MS-VBAL rules.
-- Validates that each Enum declares at least one member (`VBA1041`), that its member names are unique case-insensitively (`VBA1042`), and that a member does not collide with a module-level variable or constant (`VBA1044`). `VBA1045` rejects initializer references to the member itself, later members in that Enum, or members in a later Enum declaration; uniquely resolved earlier same-module Enum members and public project Enum members, including those declared in class modules, can be folded into constant expressions using bounded passes (up to 128 passes and 100,000 member visits per pass); ambiguous, private cross-module, and cyclic references remain unresolved; `VBA1048` rejects procedure calls and `VBA1049` rejects resolved module-variable references. `Global Enum` is retained as a public-compatible declaration in standard modules; `VBA1050` rejects it in class-like modules. `VBA1051` checks public Enum type-name collisions across the project, private Enum conflicts within one module, and project/library/module names; public Enum/public UDT conflicts use `VBA1034`. Supported integral expressions, uniquely resolved module `Const` references, uniquely resolved public project Enum-member references, implicit sequences, direct floating/Currency literals, and bounded Single/Double/Currency Const chains with supported numeric literals or arithmetic populate `enum_value`. Enum initializers also evaluate typed numeric `+`, `-`, `*`, `/`, `^`, and a bounded `\`/`Mod` subset when the effective operands are known to coerce to Long; integer division truncates toward zero and `Mod` uses the absolute-remainder rule. Integer-left/floating-right cases whose effective width is Integer, zero divisors, and out-of-range operands remain unresolved. Single/Double results near a Long rounding boundary remain unresolved. Implicit Long overflow is `VBA1043`, direct integral decimal values outside Long are `VBA1046`, floating/Currency values outside Long are `VBA1047`, and LongLong sources are `VBA2086`. Cyclic/ambiguous constants, floating/Currency Const arithmetic whose result is near a Long rounding boundary or has ambiguous Currency quantization, string conversions, and procedure-local names remain unresolved.
-- Retains `Implements` declarations and validates procedure prototypes plus scalar public-variable property accessors against in-project interface modules; referenced type-library interfaces and array/`Variant` property contracts remain unresolved. Checks local `Property Get`/`Let`/`Set` contracts: index parameter names, order, shape, passing mode and known types must match (setter value parameters are excluded, and Optional defaults may differ); `Property Get` and `Let` value types must match; Property setter value parameters cannot be Optional, ParamArray, or arrays; `Property Set` also requires an Object, Variant, or class value. For setter signatures with an index `ParamArray`, trailing index values remain elements of that array while the final value parameter is bound separately. Property names that collide with module variables, constants, Enum members, or external declarations are `VBA2136`; external or unresolved types remain unknown (`VBA2077`–`VBA2079`). Sub/Function and external Declare names colliding with module variables, constants, or Enum members are `VBA2137`. Function and Property Get parameters whose name matches the function-result name are rejected with `VBA2140`.
-- Carries in-project implementation names as interface-dispatch candidates without claiming which runtime class instance is active.
-- Retains event and external `Declare` signatures, including DLL and alias boundaries, binds named arguments when a local signature is known, checks argument-list restrictions, missing required arguments (`VBA2020` error), required positional placeholders that are omitted despite later named arguments (`VBA2022` error), known scalar `ByRef` type mismatches (including uniquely resolved in-project UDT identity), and a bounded array `ByRef` compatibility subset (array-versus-scalar shape and built-in element types). Resolved constant lengths are compared for direct scalar and array-element fixed-length String `ByRef`; `ByVal` coercion and unresolved length constants remain open. Array rank, Variant runtime shape, and broader coercions remain unresolved; uniquely resolved in-project UDT/class element types are compared, while external or ambiguous type identities remain unresolved. Known non-object arguments to class/`Object` parameters are rejected with `VBA2126`; copy-back behavior between different object types is unresolved. Direct writes through `ByRef` parameters are also traced.
-- Rejects `Set` assignments with a known non-object target or value (`VBA2134`), implicit `LongLong` Let-coercion and statically invalid in-project UDT Let-coercions in scalar assignments, whole-array-to-UDT/Variant assignments, and calls (`VBA2127`), and known non-object Let assignments to Object/class targets (`VBA2129`). It warns for explicit `Nothing` coercion (runtime error 91, `VBA2128`) and `Null` coercion in Let assignments, calls, or omitted Optional defaults with destination-dependent runtime errors 13/94 (`VBA2131`). For a uniquely resolved in-project class value, `VBA2132` checks whether its accessible zero-argument default getter exists and whether its declared result can be Let-coerced to an assignment or non-Object/non-Variant scalar `ByVal` target; external class metadata, Variant contents, ambiguous getters, and runtime conversion failures remain unresolved. The broader `ByVal` coercion matrix remains open-world.
-- Warns with `VBA2135` when a direct ASCII string literal has no digits and is Let-coerced to a known numeric/Boolean assignment target, `ByVal` parameter, omitted Optional default, or `For` bound converted to `Double`; digit-bearing currency/number formats, punctuation, non-ASCII text, Date parsing, and overflow remain unresolved.
-- Recognizes `^` as the `LongLong` type character on names and literals while preserving exponentiation expressions.
-- Adds caller-argument input-flow candidates for known procedures, events, and external declarations, plus function-return candidates; transfer facts remain candidates rather than execution proofs.
-- Resolves unique public values declared in standard modules, flags conflicting unqualified public names, validates `Optional`/`ParamArray` declaration rules, rejects `Optional` UDT parameters (`VBA2059`), and rejects syntactically resolved variable, procedure-call, or `Is`-operator defaults that are not constant expressions (`VBA2133`). Known `LongLong`, non-object-to-object, and scalar-to-array default coercion errors reuse `VBA2086`, `VBA2129`, and `VBA2130`; omitted Optional `Null` defaults retain their runtime-error 13/94 warning (`VBA2131`). Unknown names and external constants remain unresolved. It also checks `PtrSafe` when a Win64 compile target is selected.
-- Warns when a whole array is passed directly to a `ByVal` parameter.
-- Marks common VBA file I/O and filesystem statements as operation candidates and links file-number reads/writes to listed variables; these facts do not establish the concrete path or runtime effect.
-- Enumerates bounded structural paths and projects them into decision rows. If/Select Case/While/Do paths with a literal-only Boolean or small-integer predicate, and For initial bounds with small literal start/end/step values, are marked `infeasible_constant_condition` when they contradict the traversed edge; other paths remain `not_checked`, and no path is presented as a feasible-input proof.
-- Links data-transfer and Excel data-access candidates to bounded paths and includes only the branch conditions encountered before each operation. These remain structural candidates, not proofs of feasible inputs; separate counters report truncated path associations and unlinked facts.
-- Records identifier reads found in parsed `If`/`ElseIf`, `Select Case`, loop, and `With` expressions, then links preceding simple local definitions to those read nodes. Unsupported expressions, implicit host values, and runtime coercions remain unresolved.
-- On those paths, follows simple identifier assignments to later reads as definition-use candidates, keeping values from opposite branches separate. Inputs without a preceding local definition remain explicitly unlinked; this does not imply they are undeclared because they may be parameters, module values, or host inputs. Association and scan counts are resource-capped. Member/index expressions, aliases, runtime coercions, and feasible-input solving remain unresolved.
-- Adds uniquely visible local, same-module, and public standard-module `Const` initializers as path-value source candidates; it also follows a uniquely qualified module-level constant retained in a known function-return summary. Procedure locals shadow module constants, while ambiguous names stay unlinked. A private constant in this position is source provenance inside the defining function's result, not a claim that callers can access it directly.
-- Expands function-return candidates through in-project calls assigned to local variables and through unique local-variable or local-`Const` definition chains (bounded to 32 levels/passes), independent of module source order. Cycles and distinct local or call-result definitions stay procedure-qualified and unresolved; summaries remain candidates and do not combine branch feasibility across callers and callees.
-- Statically known direct `ByRef` mutation and function-return candidates also participate in these path-local links; the analysis does not yet compose arbitrary call chains or prove a runtime value.
-- Connects direct resolved procedure argument candidates and omitted Optional defaults to formal-parameter reads captured in assignments, calls, and parsed control expressions on bounded callee paths, retaining caller and callee conditions separately. A path contradicted by a literal condition carries the `infeasible_constant_condition` label across the relation; other relations remain unverified. Default expressions are shown only with `--include-source`; a missing Optional Variant argument is labeled as the Error 448 candidate. These interprocedural relations are candidates; they do not prove runtime execution or model aliases and dynamic dispatch.
-- Links direct function-return candidates to callee return assignments on bounded caller/callee paths, allowing wrapper edges to be inspected separately. Two-hop caller → wrapper → leaf relations retain all three path identities and expose a bounded literal `resolved_return_value` when the leaf return expression is statically evaluable, including a wrapper parameter snapshot carried into a leaf call; the value is also re-applied to caller post-return predicates for bounded feasibility labeling. This does not prove that independently enumerated paths execute together or resolve dynamic/user-function returns.
-- For a statically resolved nested `Function` or `Property Get` used as a call argument, adds a separate return-source candidate to the receiving formal parameter. Both nested result candidates are retained inside VBA `IIf` because it evaluates both result arguments; they are not presented as mutually exclusive paths. Unresolved or ambiguous nested calls remain lexical input candidates only. JSON shows the callee module/procedure only with `--include-source`.
-- Links same-statement Excel read/write candidates to simple assignment values when the source or sink is syntactically visible. This does not resolve a concrete workbook or cell object at runtime.
-- Links Excel reads inside `If`, `Select Case`, and loop decision nodes to enumerated outcome edges, while keeping the condition text redacted by default; the read does not prove why the host chose an outcome.
-- Marks Excel workbook/worksheet event handlers and legacy `Auto_Open`/`Auto_Close` macros as entry-point candidates. For a documented subset of Workbook/Worksheet events it checks `Sub` kind, parameter count, and declared parameter types (`VBA2143`); known mismatches are errors and are excluded from event-entry candidates. Parameter passing modes, unlisted host events, and the host's actual event bindings remain unverified.
-- Recognizes a documented subset of Excel `Application` events on class-level `WithEvents ... As Application` variables. It checks the known handler signatures (`VBA2144`) and adds valid handlers as host-entry candidates; whether the variable receives an Application instance remains unresolved.
-- Reads SpreadsheetML workbook and worksheet `codeName` values to distinguish renamed VBA document modules from ordinary classes and to recognize their event entry-point candidates. When code names are absent or cannot be matched, object-module identity remains unresolved or uses the documented legacy-name fallback.
-- Propagates primitive and declared types through assignment expressions, while keeping implicit conversions and host-provided types explicitly uncertain.
-- Applies VBA operator-specific result types for known scalar arithmetic, logical and comparison expressions; Variant-dependent and host-dependent results remain unresolved.
-- Preserves source Enum names while using their specified `Long` declared type in resolved expressions and effective declaration metadata.
-- Follows direct and nested in-project `ByRef` writes back through statically resolved `ByRef` arguments. When a caller path has a known scalar snapshot, a matching callee write expression such as `value + 1` is evaluated as a bounded write-value candidate and retained with both path conditions; nested forwarding calls can carry that candidate up to a bounded depth. It does not prove the final caller variable after arbitrary effects. `ByVal`, `ParamArray`, ambiguous signatures, and parenthesized call arguments (which force value passing) stop propagation; separate caller/callee paths are not merged into a feasibility proof, and member/array or dynamic object aliases remain unresolved.
-- Links those caller-side `ByRef` write candidates to matching assignment, file-read, `ReDim`, `Erase`, loop-counter, or nested-write facts on bounded callee paths, with caller and callee conditions kept separate and feasibility marked unproven. Other effects without a matching transfer fact remain represented only by the caller-side candidate.
-- Resolves `On Error GoTo` labels, adds state-dependent possible-fault/`Resume` CFG edges, warns when modeled control flow can reach `Resume` without an active error (`VBA2122`, runtime error 20), and warns when `Return` may execute without a matching `GoSub` (`VBA2123`, runtime error 3). Faultability and path feasibility remain unknown, so affected paths stay incomplete.
-- For recognized host-entry candidates, retains both possible direct-host termination and VBA-caller propagation defaults in the CFG, marking the graph incomplete because entry identity does not prove how that invocation began.
-- Links statically resolved in-project calls to callee paths that may propagate an unhandled error under the default policy or an explicit active-handler failure, and records whether the enumerated caller path takes a possible handler/`Resume Next` edge or has a default policy. The response for any default-policy caller remains invocation-context dependent; recognized host-entry procedures are flagged because direct host calls use termination policy. Caller and callee conditions stay separate, and recovery is not proven.
-- Links resolved in-project call sites to callee paths that may propagate an unhandled runtime error, using default-policy fault sites or explicit handler-fallthrough edges. Caller and callee conditions remain separate; the relation does not prove an error occurs or that caller recovery executes.
-- Reads ordinary ZIP/Deflate OOXML packages, resolves the workbook and VBA Project part through OPC relationships, inventories workbook sheet names/states/part targets, then reads CFB storages/streams and MS-OVBA compressed source with bounded resource use. It parses the ordered `dir` project/reference/module records and extracts module streams, code-page/system-kind metadata, project compile constants, references, and source text from `.xlsm`; sheet names and paths follow the source-disclosure setting and do not resolve runtime cell references.
-- Under the Excel host profile, links literal string and positive integer lookups through `ThisWorkbook.Worksheets(...)`, `ThisWorkbook.Sheets(...)`, and their explicit `.Item(...)` forms to workbook sheet candidate facts. Indexes use the saved workbook order, with `Worksheets` counting worksheet parts only. These are matches against saved workbook metadata, not proof of the live runtime object; dynamic selectors, unqualified collections, and other workbooks remain unresolved.
-- Links worksheet-qualified `Range(...)`, `Cells(row, column)`, and `Cells(index)` access candidates to those saved-sheet candidates and retains literal member selectors. For a simple in-grid A1 cell/rectangle or whole-row/whole-column range, and for literal `Cells(row, column)`, IncludeSource JSON may include one-based coordinate bounds and matching populated-cell candidate IDs. Multi-area unions, intersections, relative receivers, and runtime objects remain unresolved. Data-access path, value-flow, and predicate facts point back to the matching worksheet access candidate by ID when their token spans match. Chart-sheet range use and dynamic worksheet selectors remain unresolved; the candidate does not prove the live cell, range value, or a runtime read/write effect. Selectors and sheet names follow the source-disclosure setting in `excel_worksheet_access_candidates`.
-- Extracts workbook defined-name formulas, hidden/built-in flags, and worksheet scope into `workbook_structure`. Literal `ThisWorkbook.Names(...)` and `Names.Item(...)` lookups become candidates, and matching `Range("Name")` selectors identify defined-name candidates. For `Name.RefersToRange`, only a simple static A1 target is linked to a saved worksheet candidate; a name may instead denote a formula, constant, external reference, or a dynamic expression. Names and formulas are hidden unless source inclusion is enabled.
-- Extracts a bounded inventory of populated worksheet cells, inline/shared strings, formulas, and stored/cached values. A static in-grid `Range`/`Cells` candidate links to matching populated cell records; formula cached values are snapshots and are never recalculated. Cell addresses, formulas, and values are included only with `--include-source`; the inventory has a configured cell-count limit and reports truncation.
-- Exposes an opt-in `formula_eval::evaluate_formula` API for a separate bounded formula subset. It evaluates pure arithmetic/comparison/concatenation, static A1 cells/ranges, and selected `SUM`/`AVERAGE`/`MIN`/`MAX`/`COUNT`/`COUNTA`/`IF`/Boolean/string functions against supplied non-formula cell values. It never recalculates formula cells or writes cached values; unsupported, dynamic/external, locale-sensitive, and resource-limited cases return explicit status strings.
-- Extracts worksheet table definitions through `tablePart` relationships, including display names, A1 extent, header/totals row counts, and column names. Table identifiers, ranges, and headers are included only with `--include-source`; table inventory is bounded and reports truncation.
-- Recognizes common structured-table reference candidates such as `Orders[Amount]`, `Orders[[#Totals],[Amount]]`, and `[@Amount]`. It resolves the supported data/header/totals/all/current-row sections to populated-cell IDs, including relative row adjustment in shared formulas; multi-area, unsupported specifier, missing-table, and invalid-column cases remain explicit unresolved candidates.
-- Under the Excel host profile, links literal `ThisWorkbook.Worksheets(...).ListObjects(...).ListColumns(...).DataBodyRange` and table `Range`/header/totals range access candidates to the extracted table and matching populated cells. Literal `ListRows(index).Range` selects a data row, excluding headers and totals. `ListRows.Add`, `ListRow.Delete`, `ListObject.Delete`, and `ListObject.Resize` are marked as table mutation candidates; literal row deletions link to the affected saved row, dynamic rows remain unresolved, and deleted runtime identities are not projected forward. A resize target is linked only for a literal A1 range explicitly qualified to the table worksheet; other targets remain unresolved and no post-resize state is inferred. Names and positive indexes are resolved only against the selected worksheet's table/column/row order; dynamic selectors and unavailable runtime tables remain unresolved. Exact-token read/write paths connect through terminal `.Value`/formula members where present.
-- Scans stored worksheet formulas for a conservative subset of A1 cell, rectangle, whole-row, whole-column, workbook-defined-name, and structured-table operands. It skips string literals and bracketed structured references from this general scanner, resolves same-sheet and literal local worksheet qualifiers as candidates, applies local-name-over-workbook-name precedence for unqualified names, and links matching populated-cell records under separate reference/link caps. Explicitly qualified names remain unresolved. Relative and absolute A1 operands in a shared-formula follower are translated from a unique in-range master; invalid/out-of-grid translations and external or 3-D targets remain unresolved. A name candidate points to its definition record, whose own directly stated references are scanned separately; the definition is never inlined or evaluated. `INDIRECT` and `OFFSET` calls are flagged as dynamic-reference candidates, while their final target remains unresolved.
-- Preserves structured MS-OVBA reference records: registered type-library Libids, referenced-project absolute/relative identifiers and version fields, and ActiveX control original/extended identifiers. Valid Libid values are split into path kind, GUID, version, LCID, path, and display name; valid project identifiers are split into embedded/standalone path kinds and paths. Machine-specific paths and names are omitted from structure-only JSON and shown only with source disclosure enabled. This metadata does not resolve external type libraries.
-- Records module/project performance-cache boundaries, lengths, fingerprints, grammar-matched `__SRP_` cache streams, and the raw project-version tag. The tag does not identify an exact Office build. No opcode table is bundled; `compiled::decode_pcode_lines_with_schema` uses a caller-supplied experimental schema. Generic operand encodings include bytes, signed/unsigned 16- and 32-bit values, raw 64-bit integers/IEEE-754 bits, and 16-bit-length-prefixed byte payloads; these encodings do not assign meanings to VBA opcodes. `compiled::analyze_pcode_semantics` can then apply a separate caller-supplied, version-specific stack-action schema for explicit `Null`/`Empty`/`Error` values, literal propagation, local-slot load/store, explicitly selected UTF-8/UTF-16LE string operands, bounded byte/string concatenation, finite IEEE-754 arithmetic/comparison, Boolean and integer `And`/`Or`/`Xor`/`Eqv`/`Imp`, schema-known call return summaries, stack underflow, conditional/unconditional branch, call/return candidates, and unknown values. UnknownValue steps make semantic reports incomplete while preserving their abstract stack state. `compiled::analyze_pcode_semantic_paths` additionally selects known conditional branches and splits unknown conditions into bounded fall-through/target paths, while recording loop/step limits without resolving Office-specific control-flow encodings. Unknown and truncated instructions remain incomplete, and the semantic reports remain explicitly unverified. `export::pcode_decode_to_json`, `export::pcode_semantics_to_json`, and `export::pcode_semantic_paths_to_json` apply source disclosure to decoded values.
-- The p-code semantic and path reports also expose bounded counts for unknown values, unknown instructions, and stack underflow so consumers can audit incompleteness without scanning every step.
-- `PCodeSemanticSchema::validate` checks semantic schema shape, action bounds, and duplicate definitions before a line map is required.
-- `PCodeInstructionSchema::validate` performs the corresponding opcode/operand schema checks without requiring cache bytes.
-- `PCodeLineMap::validate` checks line counts, raw lengths, word metadata, monotonic cache offsets, and total bytes before decoding caller-provided maps.
-- Observed line records marked with `relative_code_offset_raw == 0xFFFFFFFF` are retained as explicit no-code lines during validation rather than being mistaken for malformed raw data.
-- `extract::analyze_extracted_module_pcode` provides a single convenience call from an extracted module's observed line map through caller-supplied instruction decoding and bounded semantic path exploration; a module without a selected line map returns no semantic report rather than guessing a cache layout. `export::pcode_project_semantics_to_json` packages the per-module decoded and semantic reports with source disclosure.
-- `analyze_xlsm_with_pcode_profile` combines direct `.xlsm` extraction, VBA semantic analysis, and selected line-map metadata in one library call; opcode semantics remain a separate caller-supplied step.
-- `analyze_xlsm_with_pcode_semantics` is the end-to-end variant: it returns the VBA report, extracted workbook/project metadata, and bounded semantic p-code reports for selected modules.
-- `analyze_vba_project_with_pcode_semantics` provides the same end-to-end result for a raw VBA project CFB payload without the surrounding `.xlsm` package.
-- `extract::PCodeAnalysisOptions` and the `*_with_pcode_options` helpers package profile and resource limits into one reusable bounded configuration.
-- `extract::analyze_extracted_module_pcode_with_options` and `analyze_extracted_project_pcode_with_options` reuse the same configuration after line maps have already been selected.
-- `extract_vba_project_with_pcode_profile` offers the same line-map profile application when a raw VBA project binary is already available without an OOXML container.
-- Offers an explicit `vba7-observed` p-code line-map profile that validates `CA FE` framing and extracts raw per-source-line byte ranges without assigning opcode meanings. It retains the two profile-header bytes and unknown line-record fields as opaque values; raw bytes follow the source-disclosure setting.
-- Produces JSON or Graphviz DOT without third-party Cargo dependencies.
-
-## Build and use
+The `vba-insight` CLI provides four dedicated modes:
 
 ```sh
-cargo test --all-targets
-cargo build --release
+# 1. Comprehensive all-in-one macro container inspection (VBA AST + P-Code + Stomping + Cell Threats)
+vba-insight inspect sample.xlsm --format markdown
+vba-insight inspect suspicious.docm --format sarif > results.sarif
 
-# Parse exported source; identifiers, expressions, names, and source paths are redacted by default.
-cargo run -- analyze examples/approval.bas --host excel
+# 2. Automated VBA Stomping & Tampering Detection
+vba-insight stomping malicious.xlsm --format sarif
+vba-insight stomping malicious.xlsb --format markdown
 
-# Include original source expressions and text in local output.
-cargo run -- analyze examples/approval.bas --include-source
+# 3. Compiled P-Code Bytecode Disassembly
+vba-insight disasm sample.xlsm --format markdown
+vba-insight disasm vbaProject.bin --format json
 
-# Extract and analyze the VBA project in a macro-enabled workbook.
-cargo run -- analyze workbook.xlsm
-
-# Extract raw VBA7-observed p-code line ranges, without opcode interpretation.
-cargo run -- analyze workbook.xlsm --pcode-profile vba7-observed
-
-# Resolve conditional compilation for a particular build environment.
-cargo run -- analyze examples/conditional.bas --define VBA7=True
-
-# Read a legacy exported .bas file in Japanese Windows code page.
-cargo run -- analyze Module1.bas --code-page 932
-
-# Emit CFGs as Graphviz DOT.
-cargo run -- analyze examples/approval.bas --format dot
-
-# Disassemble compiled P-code from an Office container (.xlsm, .xlsb, .docm, .pptm, .xls, or vbaProject.bin)
-cargo run -- disasm workbook.xlsm --format markdown
-
-# Automatically detect VBA Stomping and tampering between source and P-code (outputs json, sarif, markdown, or text)
-cargo run -- stomping malicious.xlsm --format sarif
-
-# Run full comprehensive inspection (VBA static analysis, P-code disassembly, and stomping detection)
-cargo run -- inspect workbook.xlsm --format markdown
+# 4. Pure VBA Source Code Semantic Analysis
+vba-insight analyze examples/approval.bas --host excel
+vba-insight analyze examples/approval.bas --include-source
+vba-insight analyze examples/approval.bas --format dot > cfg.dot
 ```
 
-## Library API Usage
+---
 
-`vba-insight` is designed as a standalone, zero-dependency library (`vba_insight`) with full crate root re-exports.
+## Code Examples
 
-### 1. Analyzing VBA Source Code
+### 1. Rust Library API
 
-```rust
-use vba_insight::{analyze_sources, AnalysisOptions, SourceUnit};
-
-let sources = vec![SourceUnit {
-    name: "Module1.bas".into(),
-    text: "Public Sub Start()\n    MsgBox \"Hello\"\nEnd Sub\n".into(),
-}];
-
-let analysis = analyze_sources(&sources)?;
-assert!(!analysis.project.code_executed);
-assert_eq!(analysis.project.modules.len(), 1);
-# Ok::<(), String>(())
-```
-
-### 2. Comprehensive Macro File Inspection
-
-Extracts macro streams from any container (`.xlsm`, `.xlsb`, `.docm`, `.pptm`, legacy `.xls`, `vbaProject.bin`), disassembles P-code, detects VBA Stomping, and runs complete semantic analysis:
+#### Complete Macro Container Inspection & SARIF Export
 
 ```rust
-use vba_insight::{inspect_macro_file, inspect_to_markdown, AnalysisOptions};
+use vba_insight::{
+    inspect_macro_file, inspect_to_markdown, stomping_to_sarif, AnalysisOptions,
+};
 
-let container_bytes = std::fs::read("workbook.xlsm").unwrap_or_default();
-if !container_bytes.is_empty() {
-    let inspection = inspect_macro_file(&container_bytes, &AnalysisOptions::default())?;
-    println!("Modules extracted: {}", inspection.extracted.modules.len());
-    println!("Stomping findings: {}", inspection.stomping_report.findings.len());
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let container_bytes = std::fs::read("suspicious.xlsm")?;
+    let options = AnalysisOptions::default();
+
+    // Inspect container: unpacks streams, parses AST, disassembles P-code, detects stomping
+    let inspection = inspect_macro_file(&container_bytes, &options)?;
+
+    println!("Extracted Modules: {}", inspection.extracted.modules.len());
+    println!("Stomped: {}", inspection.stomping_report.is_stomped);
+
+    // Export SARIF v2.1.0 for GitHub Code Scanning
+    let sarif = stomping_to_sarif(&inspection.stomping_report, "suspicious.xlsm");
+    std::fs::write("audit.sarif", sarif)?;
 
     // Generate Markdown report
     let md = inspect_to_markdown(&inspection);
     println!("{md}");
+
+    Ok(())
 }
-# Ok::<(), String>(())
 ```
 
-### 3. Automated VBA Stomping Detection & SARIF Reporting
-
-Detect discrepancies between compressed source text and compiled P-code, exporting directly to SARIF v2.1.0 for GitHub Advanced Security / CI integration:
+#### Dedicated VBA Stomping & Tampering Detection
 
 ```rust
 use vba_insight::{
-    extract_macro_container, detect_project_stomping, stomping_to_sarif, Limits
+    detect_project_stomping, extract_macro_container, stomping_to_sarif, Limits,
 };
 
-let container_bytes = std::fs::read("malicious.docm").unwrap_or_default();
-if !container_bytes.is_empty() {
-    let extracted = extract_macro_container(&container_bytes, &Limits::bounded())?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read("target.docm")?;
+    let extracted = extract_macro_container(&bytes, &Limits::bounded())?;
     let report = detect_project_stomping(&extracted)?;
 
     if report.is_stomped {
-        let sarif = stomping_to_sarif(&report, "malicious.docm");
-        std::fs::write("stomping_results.sarif", sarif).ok();
+        eprintln!("ALERT: Stomping detected! Findings: {}", report.findings.len());
+        for finding in &report.findings {
+            eprintln!(" - [{:?}] {}: {}", finding.severity, finding.rule_id, finding.description);
+        }
     }
+
+    Ok(())
 }
-# Ok::<(), String>(())
 ```
 
-### 4. Built-in Standard P-Code Disassembly
-
-Disassemble standard VBA6 / VBA7 P-code without requiring external opcode tables:
+#### Disassembling Compiled P-Code Bytecode
 
 ```rust
-use vba_insight::{extract_macro_container, disassemble_extracted_project, disasm_to_markdown, Limits};
+use vba_insight::{
+    disassemble_extracted_project, disasm_to_markdown, extract_macro_container, Limits,
+};
 
-let container_bytes = std::fs::read("sample.xlsm").unwrap_or_default();
-if !container_bytes.is_empty() {
-    let extracted = extract_macro_container(&container_bytes, &Limits::bounded())?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read("sample.xlsm")?;
+    let extracted = extract_macro_container(&bytes, &Limits::bounded())?;
     let disassembly = disassemble_extracted_project(&extracted)?;
-    let markdown = disasm_to_markdown(&disassembly);
-    println!("{markdown}");
+
+    let md = disasm_to_markdown(&disassembly);
+    println!("{md}");
+
+    Ok(())
 }
-# Ok::<(), String>(())
 ```
 
-### 5. Python API Usage (`pip install vba-insight`)
+#### Pure VBA Source Code Static Analysis
+
+```rust
+use vba_insight::{analyze_sources, AnalysisOptions, SourceUnit};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let sources = vec![SourceUnit {
+        name: "Module1.bas".to_string(),
+        text: r#"
+            Public Sub ExecuteAction()
+                Dim cmd As String
+                cmd = "calc.exe"
+                Call Shell(cmd, vbNormalFocus)
+            End Sub
+        "#.to_string(),
+    }];
+
+    let report = analyze_sources(&sources)?;
+    assert!(!report.project.code_executed);
+    println!("Procedures analyzed: {}", report.project.modules[0].procedures.len());
+
+    Ok(())
+}
+```
+
+---
+
+### 2. Python API (`pip install vba-insight`)
+
+Pre-compiled universal ABI3 binary wheels are available for Python 3.10 and later on Linux, macOS, and Windows.
 
 ```python
+import json
 import vba_insight
 
-# Inspect any Office macro container (.xlsm, .xlsb, .docm, .pptm, .xls, vbaProject.bin)
+# 1. Inspect an Office macro container (.xlsm, .xlsb, .docm, .pptm, .xls, or raw vbaProject.bin)
 report = vba_insight.inspect_file("suspicious.xlsm")
 
-# Check for VBA Stomping / tampering
-if report["stomping"]["has_stomping"]:
-    print(f"Stomping Severity: {report['stomping']['overall_severity']}")
-    for finding in report["stomping"]["project_findings"]:
-        print(f" - [{finding['rule_id']}] {finding['description']}")
+print(f"Project Name: {report.get('project_name')}")
+stomping = report.get("stomping", {})
 
-# Export SARIF v2.1.0 for GitHub Security / Code Scanning
-sarif = vba_insight.inspect_file_sarif("suspicious.xlsm")
+if stomping.get("has_stomping"):
+    print(f"[!] VBA Stomping Detected! Severity: {stomping.get('overall_severity')}")
+    for finding in stomping.get("project_findings", []):
+        print(f"  - [{finding['rule_id']}] {finding['description']}")
 
-# Export Markdown summary
-md = vba_insight.inspect_file_markdown("suspicious.xlsm")
-print(md)
+# 2. Check for dangerous worksheet cell threats (DDE, XLM, WEBSERVICE)
+analysis = report.get("analysis", {})
+workbook = analysis.get("workbook_structure", {})
+cell_threats = workbook.get("cell_threats", [])
+if cell_threats:
+    print(f"[!] Found {len(cell_threats)} dangerous cell formulas:")
+    for threat in cell_threats:
+        print(f"  - {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
+
+# 3. Export OASIS SARIF v2.1.0 report for GitHub Advanced Security / CI integration
+sarif_json = vba_insight.inspect_file_sarif("suspicious.xlsm")
+with open("security_report.sarif", "w", encoding="utf-8") as f:
+    f.write(sarif_json)
+
+# 4. Export a formatted Markdown inspection summary
+markdown_summary = vba_insight.inspect_file_markdown("suspicious.xlsm")
+print(markdown_summary)
+
+# 5. Pure static analysis of VBA source units
+vba_sources = [
+    ("Module1.bas", "Public Sub Test()\n    MsgBox \"Hello\"\nEnd Sub\n")
+]
+ast_report = vba_insight.analyze_sources(vba_sources)
+print("Modules parsed:", len(ast_report["project"]["modules"]))
 ```
 
-### 6. Node.js & TypeScript API Usage (`npm install vba-insight`)
+---
 
-```javascript
-const fs = require('node:fs');
-const vbaInsight = require('vba-insight');
+### 3. Node.js & TypeScript API (`npm install vba-insight`)
 
-// Read macro container into a Buffer
-const buffer = fs.readFileSync('suspicious.xlsm');
+High-performance native N-API addon with bundled TypeScript type definitions.
 
-// Inspect container and get complete JSON analysis
-const rawJson = vbaInsight.inspectMacroFileJson(buffer);
+```typescript
+import * as fs from 'node:fs';
+import {
+  inspectMacroFileJson,
+  inspectMacroFileSarif,
+  inspectMacroFileMarkdown,
+  analyzeSourcesJson,
+} from 'vba-insight';
+
+// 1. Read macro container into a Buffer
+const fileBuffer = fs.readFileSync('suspicious.xlsm');
+
+// 2. Perform complete macro file inspection (returns JSON string)
+const rawJson = inspectMacroFileJson(fileBuffer, true);
 const report = JSON.parse(rawJson);
 
 console.log('Project Name:', report.project_name);
-console.log('Has Stomping:', report.stomping.has_stomping);
+if (report.stomping?.has_stomping) {
+  console.error(`[!] Stomping Detected! Severity: ${report.stomping.overall_severity}`);
+  for (const finding of report.stomping.project_findings) {
+    console.error(`  - [${finding.rule_id}] ${finding.description}`);
+  }
+}
 
-// Export SARIF for GitHub Code Scanning
-const sarif = vbaInsight.inspectMacroFileSarif(buffer, 'suspicious.xlsm');
-fs.writeFileSync('report.sarif', sarif);
+// 3. Export SARIF v2.1.0 report for CI code scanning
+const sarifReport = inspectMacroFileSarif(fileBuffer, 'suspicious.xlsm');
+fs.writeFileSync('macro-scan.sarif', sarifReport);
 
-// Export Markdown summary
-const md = vbaInsight.inspectMacroFileMarkdown(buffer);
-console.log(md);
+// 4. Generate GitHub-flavored Markdown inspection report
+const markdownReport = inspectMacroFileMarkdown(fileBuffer);
+console.log(markdownReport);
+
+// 5. Static analysis of raw VBA source text
+const sourceUnits = [
+  {
+    name: 'Module1.bas',
+    text: 'Sub Auto_Open()\n    Shell "powershell -enc ...", 0\nEnd Sub',
+  },
+];
+const analysisJson = analyzeSourcesJson(sourceUnits, true);
+const parsedAnalysis = JSON.parse(analysisJson);
+console.log('Analysis completed. Code executed:', parsedAnalysis.project.code_executed); // always false
 ```
 
-## VBA Stomping & Tampering Rules
+---
 
-`vba-insight` implements 10 specialized detection rules covering advanced evasion techniques:
+## Threat Detection Engines
 
-| Rule ID | Finding Kind | Severity | Description |
-|---|---|---|---|
-| `VBA-STOMP-001` | `SourcePurged` | Critical | VBA source code has been completely stripped or purged while compiled P-code instructions remain executable |
-| `VBA-STOMP-002` | `ProcedureHiddenInPCode` | High | A procedure exists in the compiled P-code stream but does not appear in the VBA source text |
-| `VBA-STOMP-003` | `SuspiciousLiteralInPCode` | High | Suspicious string literal (URL, IP, executable name) is present in compiled P-code but absent from source code |
-| `VBA-STOMP-004` | `SensitiveCallInPCode` | Critical | Dangerous system API (process injection, shell execution) is found in compiled P-code but hidden from source text |
-| `VBA-STOMP-005` | `LineCountDiscrepancy` | Medium | Large divergence between source code line count and compiled P-code line count |
-| `VBA-STOMP-006` | `ProcedureMissingInPCode` | Low | A procedure declared in source text is missing from the compiled P-code stream |
-| `VBA-STOMP-007` | `PerformanceCachePurged` | Medium | Compiled P-code performance cache has been wiped while source procedures remain (VBA Purging evasion) |
-| `VBA-STOMP-008` | `HiddenGuiModule` | High | Module is compiled in dir stream but omitted from PROJECT manifest, hiding it in Office VBA IDE (Evil Clippy technique) |
-| `VBA-STOMP-009` | `ProjectLockedOrUnviewable` | Low | VBA project contains protection/lock attributes (CMG/DPB/GC) making it unviewable in the VBA IDE |
-| `VBA-STOMP-010` | `SourceCorruptedWithValidPCode` | Critical | Module source code container failed decompression or is malformed while executable compiled P-code remains |
+### 1. VBA Stomping & Tampering Detection Rules
 
-## Worksheet Cell Threat Detection
+`vba-insight` implements 10 specialized rules covering discrepancy analysis between source text and compiled P-code bytecode:
 
-In addition to VBA code, the engine scans worksheet cells in OOXML workbooks for dangerous formulas:
-- **DDE Execution**: Detects dynamic data exchange formulas (e.g. `=cmd|'/c calc'!A0`, `="cmd.exe"|...`).
-- **Remote Injection**: Flags UNC paths (`\\evil-server\share`) and remote URLs (`http://`, `ftp://`).
-- **Data Exfiltration**: Identifies `=WEBSERVICE(...)` formulas that can exfiltrate sensitive cell data.
-- **Suspicious Hyperlinks**: Catches `=HYPERLINK(...)` formulas pointing to executable or script targets (`.exe`, `.scr`, `.bat`, `.ps1`, `.vbs`, `.js`).
-- **Legacy XLM 4.0 Macros**: Flags `=CALL(...)`, `=EXEC(...)`, and `=REGISTER(...)` macro calls.
+| Rule ID | Finding Kind | Severity | Description & Detection Logic |
+|---|---|:---:|---|
+| `VBA-STOMP-001` | `SourcePurged` | **Critical** | VBA source code has been completely stripped or purged while compiled P-code bytecode remains present and executable. |
+| `VBA-STOMP-002` | `ProcedureHiddenInPCode` | **High** | A procedure exists in the compiled P-code stream but does not appear anywhere in the decompressed VBA source text. |
+| `VBA-STOMP-003` | `SuspiciousLiteralInPCode` | **High** | Suspicious string literal (URL, IPv4 address, script command, or executable) exists in compiled P-code but is absent from source code. |
+| `VBA-STOMP-004` | `SensitiveCallInPCode` | **Critical** | Dangerous system API or process injection hook (e.g., `VirtualAlloc`, `WriteProcessMemory`, `CreateRemoteThread`, `InternetOpen`) is invoked in P-code but omitted from source text. |
+| `VBA-STOMP-005` | `LineCountDiscrepancy` | **Medium** | Significant discrepancy between source code physical line count and compiled P-code line count. |
+| `VBA-STOMP-006` | `ProcedureMissingInPCode` | **Low** | A procedure declared in source text is missing from the compiled P-code stream. |
+| `VBA-STOMP-007` | `PerformanceCachePurged` | **Medium** | Compiled P-code performance cache has been deliberately wiped while source procedures remain (VBA Purging evasion). |
+| `VBA-STOMP-008` | `HiddenGuiModule` | **High** | Module is declared in the `dir` stream but omitted from the `PROJECT` manifest, hiding it from the VBA IDE viewer (Evil Clippy technique). |
+| `VBA-STOMP-009` | `ProjectLockedOrUnviewable` | **Low** | VBA project has protection/lock attributes (`CMG`, `DPB`, `GC`) rendering it unviewable in the standard Office VBA IDE. |
+| `VBA-STOMP-010` | `SourceCorruptedWithValidPCode` | **Critical** | Source code container fails MS-OVBA decompression or is corrupted while valid compiled P-code remains executable. |
 
-For an in-memory `.xlsm`, `analyze_xlsm(&bytes, &AnalysisOptions::default())` returns both the semantic report and extracted project/cache metadata. This convenience entry point selects the Excel host profile; use `analyze_extracted_project` when you need to choose the host profile explicitly.
+### 2. Worksheet Cell & Workbook Threat Scanner
 
-Conditional compilation can be resolved for a supplied target by passing constants such as `VBA7`, `Win64`, or project-specific `#Const` values through `AnalysisOptions::conditional_constants`. Pass externally visible project/type-library names with `AnalysisOptions::project_references` when analyzing exported source; `analyze_extracted_project` merges names read from the workbook automatically. Unknown conditions retain alternatives, produce diagnostics, and mark affected CFGs incomplete.
+Scans workbook cell formulas, defined names, and worksheet metadata:
 
-The report keeps caller-selected constants and each module's effective `#Const` values as evidence. Structure-only JSON redacts their names and values; `--include-source` reveals them.
+- **Dynamic Data Exchange (DDE) Injection**: Detects DDE execution vectors such as `=cmd|'/c calc'!A0` or `="cmd.exe"|...`.
+- **Legacy XLM 4.0 Macros**: Flags execution via Excel 4.0 macro formulas including `=EXEC(...)`, `=CALL(...)`, and `=REGISTER(...)`.
+- **Data Exfiltration**: Detects `=WEBSERVICE(...)` formulas capable of silently transmitting sensitive cell values to remote servers.
+- **Remote Injection**: Flags UNC remote paths (`\\attacker\share`) and remote URLs (`http://`, `ftp://`).
+- **Suspicious Hyperlinks**: Identifies `=HYPERLINK(...)` formulas targeting executable files or scripts (`.exe`, `.scr`, `.bat`, `.ps1`, `.vbs`, `.js`).
+- **Full-Width Character Evasion Defense**: Automatically normalizes full-width Unicode characters (`U+FF01`–`U+FF5E`, `U+3000`) to standard ASCII prior to formula inspection, neutralizing obfuscation tricks.
+- **Workbook Auto-Exec Triggers**: Scans workbook defined names for `Auto_Open`, `_xlnm.Auto_Open`, and `Auto_Close` execution triggers.
+- **VeryHidden Worksheet Detection**: Detects hidden sheets marked as `state="veryHidden"`, commonly used to conceal malicious macro payloads.
 
-Module output also records `Option Explicit`, `Option Compare` and its `compare_valid` state, `Option Base`, and `Option Private Module`; the latter affects cross-project exposure while preserving access within the analyzed project. Array dimensions inherit their module's base only when that option is valid; otherwise the effective lower bound stays unresolved.
+---
 
-The CLI selects the Excel host profile automatically for `.xlsm`; exported source defaults to an unknown host unless `--host excel` is specified. Host-specific reads and writes remain candidates, never confirmed workbook/cell effects.
+## Core Semantic Engine Details
 
-## Important boundaries
+- Tokenizes VBA text while retaining exact UTF-8 byte spans and line/column locations.
+- Treats documented VBA whitespace separators, including full-width Japanese ideographic space (`U+3000`), as separators rather than identifier characters.
+- Applies VBA line-continuation rules before conditional-compilation evaluation (`#If`, `#Const`), keeping logical lines coherent while masking inactive branches.
+- Parses module declarations, procedure headers (`Sub`, `Function`, `Property`), arguments, variables, `Type` and `Enum` blocks, and structured statements (`If`, `Select Case`, loops, `With`, labels, `GoTo`, computed `On...GoTo`/`On...GoSub`).
+- Resolves expression precedence, dot member access, bang dictionary access, and type suffixes (`!`, `#`, `$`, `%`, `&`, `@`, `^`).
+- Constructs structural Control-Flow Graphs (CFG), reaching definitions, acyclic constant folding, and error propagation graphs.
+- Direct MS-OVBA decompression, Compound File Binary (CFB) stream parsing, and OPC Open Packaging Conventions resolving from standard `.xlsm`, `.xlsb`, `.docm`, `.pptm`, legacy `.xls`, and raw `vbaProject.bin`.
 
-- `semantic_analysis_complete` remains `false`. VBA syntax and semantics are broad, and host libraries, references, unsupported compile-time expressions, late binding, runtime state, and error handling can change meaning.
-- CFG edges describe structural paths, not proven feasible inputs. `On Error` interactions with GoSub, dynamic dispatch, and some loop/exit forms are not fully represented; affected results are marked incomplete or diagnosed.
-- Call and data-access results are candidates. A name match does not establish a binding, and an Excel member name does not prove which workbook or cell is affected.
-- The MS-OVBA specification says project, module, and `__SRP_` performance caches are implementation- and version-dependent and must be ignored on interoperable reads. This crate records boundaries and fingerprints and inventories SRP streams without interpreting their contents or treating them as verified p-code.
-- The caller-supplied p-code semantic layer can explicitly model bounded `Object(identity)` and `Array(values)` states and apply `IsObject`/`IsArray` predicates. It never infers those meanings from raw operands or mnemonics; unmodeled runtime payloads remain `Unknown`.
-- The same explicit array state supports `ArrayLength`; dynamic runtime bounds remain `Unknown`.
-- `ArrayIndex` can read an explicitly modeled zero-based element; out-of-range and runtime-dependent indexing remains `Unknown`.
-- `--pcode-profile vba7-observed` parses only an observed CAFE/line-directory layout. It preserves the profile header and unknown line-record bytes without interpreting them. This CLI profile does not decode opcodes, resolve operands, identify the Office build, or prove that the cache matches the source. The separate library decoder applies only a caller-supplied schema, including operation-type-specific operand layouts with exact definitions taking precedence over a generic opcode definition; known opcodes with unmatched operation types remain explicitly unknown. A separate semantic API applies only caller-supplied action definitions and does not infer meanings from mnemonics or raw bytes. Neither layer verifies the schema against Office. A malformed or mismatched version may yield no line map. With `--include-source`, JSON includes these opaque framing bytes and the raw p-code bytes for each extracted line.
-- `.xlsm` package input supports non-encrypted ZIP entries using Store or Deflate and classic ZIP32. ZIP64 and encrypted entries are not supported. The CFB reader supports sector and mini-sector chains with cycle and size guards.
-- Source decoding accepts UTF-8, UTF-8 BOM, UTF-16LE/BE BOM, and Windows-1252. On macOS/Linux, other declared legacy code pages use the system `iconv`; Windows uses its native code-page conversion with invalid-sequence checks. Unsupported encodings are explicit errors, and no lossy fallback is used for module source.
-- A `.frm`/`.cls` serialized designer preamble is masked with byte/line offsets preserved; its `.frx`, control layout, and control properties are not interpreted.
-- Default JSON/DOT suppresses identifiers, expressions, source paths, and diagnostic text while retaining structure, counts, line numbers, and resolution states. `--include-source` reveals names and source expressions as well as source text. Neither mode is a secret scrubber, and structure/line counts can still disclose information.
+---
 
-The default resource limits are defined in `Limits::bounded()`. Applications handling untrusted workbooks should keep finite limits and should surface extraction errors instead of retrying with unlimited sizes.
+## Security Boundaries & Safety Guarantees
 
-## Project status and contributions
+- **No Code Execution**: The engine never invokes host scripting interpreters, Office automation, or JIT runtimes.
+- **No Network Access**: The crate has no network socket capabilities and never initiates remote requests.
+- **Bounded Resource Limits**: Implements strict recursion depth, buffer allocation caps, and iteration limits (`Limits::bounded()`) to defend against ZIP bombs, decompression loops, and CFB mini-stream cycle attacks.
+- **Static Approximation Boundary**: Control-flow paths represent structural candidates rather than concrete execution proofs. Late-bound object references, dynamic host evaluation (`Evaluate`), and unmodeled external type libraries remain explicitly unresolved.
 
-The implementation is a small independently written parser and container reader, without imported grammar files or third-party Rust crates. See [format references and provenance](docs/PROVENANCE.md), [analysis model and known gaps](docs/ARCHITECTURE_JA.md), [post-publication roadmap](docs/ROADMAP_JA.md), [publishing guide and multi-target release pipeline](docs/PUBLISHING.md), and [contribution and release checks](CONTRIBUTING.md). Before publishing a release, confirm that the copyright notice in `LICENSE` names the intended holder and run the release checks against representative Office files that you are authorized to use. The source repository is [ryusui-hiro/vba-retrace](https://github.com/ryusui-hiro/vba-retrace).
-- Emits path-specific argument snapshot facts for simple mutable caller variables when a complete acyclic path assigns a supported literal or constant before the call. The fact records caller conditions, the callee parameter, and the resolved value; aliases, member/index writes, loops, incomplete graphs, and unsupported effects remain unresolved.
-- For `ParamArray` calls with positional values, records one path-specific argument snapshot per slot with `argument_slot_index` on both the source data-flow fact and interprocedural path facts. Equal textual values remain distinct slots, and bounded caller/callee composition is retained even when the callee array contents cannot be folded; named/omitted/dynamic slots remain unresolved.
-- Path-composed calls retain the caller call index, allowing supplied or omitted Optional Variant parameters to feed `IsMissing` only for that exact bounded callsite. Omission is carried as an explicit missing marker and is never replaced with a default/runtime value; mixed or dynamic callsites remain unresolved.
-- Path feasibility keeps literal/constant `ReDim` bounds for dynamic arrays and folds `LBound`/`UBound` until `Erase`, an unsupported mutation, an unknown bound, or an unproven `ReDim Preserve` clears the shape. Element aliases, Variant array payloads, and runtime shape changes remain unresolved.
-- The same bounded path state follows acyclic value aliases up to a fixed depth and uses a proven `ReDim` shape to fold `IsArray` on a Variant target. Cycles, member/element aliases, and unsupported effects remain unresolved.
-- Composes two adjacent function-return relations (caller → wrapper → leaf callee) while retaining each caller, wrapper, and leaf path, conditions, return expression, post-return caller conditions, completion flags, and conservative feasibility. Longer chains, recursive cycles, aliases, and dynamic dispatch remain separate candidates rather than being collapsed into a false execution proof.
-- Extends return composition to bounded three- and four-hop chains. The legacy two-hop fields remain populated, and chain vectors expose every wrapper procedure/path/condition plus the leaf return value; recursive cycles and dynamic dispatch remain uncollapsed candidates.
+---
+
+## Documentation & References
+
+- [Architecture & Analysis Model (JA)](docs/ARCHITECTURE_JA.md)
+- [Specifications & Format Provenance](docs/PROVENANCE.md)
+- [Post-Publication Roadmap (JA)](docs/ROADMAP_JA.md)
+- [Publishing & Release Pipeline Guide](docs/PUBLISHING.md)
+- [Contribution Guidelines](CONTRIBUTING.md)
+- [License (MIT)](LICENSE)
+
+Source repository: [ryusui-hiro/vba-retrace](https://github.com/ryusui-hiro/vba-retrace)
