@@ -64,8 +64,9 @@ jobs:
           RUSTUP_TOOLCHAIN: '1.93.0'
       - name: Python tests and release artifacts verification
         run: |
-          python3 -m pip install pytest
-          PYTHONPATH=bindings/python/python python3 -m pytest -q bindings/python/tests tests/test_release_artifacts.py
+          python3 -m pip install pytest maturin
+          python3 -m pip install ./bindings/python
+          pytest -q bindings/python/tests tests/test_release_artifacts.py
 
   windows:
     name: windows-${{ matrix.toolchain }}
