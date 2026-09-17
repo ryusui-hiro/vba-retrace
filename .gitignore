@@ -66,6 +66,15 @@ GEMINI.md
 *.profraw
 *.profdata
 *.sarif
-cov/
-coverage/
-
+# Node and Python build artifacts
+node_modules/
+*.node
+*.whl
+*.so
+*.dylib
+*.pyd
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+dist/

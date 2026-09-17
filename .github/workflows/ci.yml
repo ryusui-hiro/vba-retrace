@@ -26,7 +26,7 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install 1.93.0 --profile minimal
       - name: Verify the publishable crate
-        run: cargo +1.93.0 package --locked
+        run: cargo +1.93.0 package -p vba-insight --locked
 
   quality:
     name: quality

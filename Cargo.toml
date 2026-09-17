@@ -9,6 +9,11 @@ repository = "https://github.com/ryusui-hiro/vba-retrace"
 readme = "README.md"
 keywords = ["vba", "excel", "xlsm", "static-analysis", "security"]
 categories = ["development-tools", "parser-implementations", "command-line-utilities"]
+publish = ["crates-io"]
+
+[workspace]
+members = ["bindings/node", "bindings/python"]
+resolver = "3"
 
 [lib]
 name = "vba_insight"

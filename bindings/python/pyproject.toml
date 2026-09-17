@@ -1,0 +1,59 @@
+[build-system]
+requires = ["maturin>=1.14,<2"]
+build-backend = "maturin"
+
+[project]
+name = "vba-insight"
+version = "0.1.0"
+description = "Pure Rust static analysis, P-code disassembly, and stomping detection for VBA & Office macros"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+keywords = [
+  "vba",
+  "excel",
+  "macro",
+  "security",
+  "stomping",
+  "static-analysis",
+  "pcode",
+  "xlsm",
+  "xlsb",
+  "docm",
+  "pptm",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Rust",
+  "Topic :: Security",
+  "Topic :: Software Development :: Interpreters",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/ryusui-hiro/vba-retrace"
+Repository = "https://github.com/ryusui-hiro/vba-retrace"
+Issues = "https://github.com/ryusui-hiro/vba-retrace/issues"
+"Node.js package" = "https://www.npmjs.com/package/vba-insight"
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[tool.maturin]
+bindings = "pyo3"
+manifest-path = "Cargo.toml"
+module-name = "vba_insight._native"
+python-source = "python"
+strip = true

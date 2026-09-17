@@ -1,0 +1,56 @@
+{
+  "name": "vba-insight",
+  "version": "0.1.0",
+  "description": "Pure Rust static analysis, P-code disassembly, and stomping detection for VBA & Office macros",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "binaryName": "vba-insight",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "aarch64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl"
+    ]
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "vba-insight.*.node",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node --test tests/*.test.js"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.8.6"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "keywords": [
+    "vba",
+    "excel",
+    "macro",
+    "security",
+    "stomping",
+    "static-analysis",
+    "pcode",
+    "xlsm",
+    "docm",
+    "office"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ryusui-hiro/vba-retrace.git",
+    "directory": "bindings/node"
+  }
+}

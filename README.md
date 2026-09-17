@@ -11,6 +11,17 @@ Dependency-free Rust library and CLI for complete VBA semantic inspection, direc
 - **Built-in Standard P-Code Disassembler**: Full coverage of 264 VBA opcodes (VBA6/VBA7, 32-bit and 64-bit) and `_VBA_PROJECT` identifier resolution without requiring external opcode tables.
 - **VBA Stomping & Tampering Detection**: Automated discrepancy detection between source text and compiled P-code (purged source, hidden procedures, suspicious URLs/executables, and dangerous API calls).
 - **Fast & Zero Dependencies**: Implemented entirely with Rust's standard library (`std`), enabling maximum memory safety, deterministic execution, and ultra-high analysis throughput.
+- **Multi-Language Support**: First-class bindings for Rust (`crates.io`), Python (`PyPI` via PyO3 / ABI3), and Node.js (`npm` via N-API).
+
+## Installation
+
+| Language / Platform | Package | Install Command | Notes |
+|---|---|---|---|
+| **Rust** | `vba-insight` | `cargo add vba-insight` | Zero-dependency static library |
+| **Python** (3.10+) | `vba-insight` | `pip install vba-insight` | Pre-built ABI3 wheels, PEP 561 typed |
+| **Node.js** (18+) | `vba-insight` | `npm install vba-insight` | Native N-API addon with TypeScript types |
+| **CLI** | `vba-insight` | `cargo install vba-insight` | Or pre-built binaries from GitHub Releases |
+
 
 ## What it does today
 
@@ -253,6 +264,53 @@ if !container_bytes.is_empty() {
 # Ok::<(), String>(())
 ```
 
+### 5. Python API Usage (`pip install vba-insight`)
+
+```python
+import vba_insight
+
+# Inspect any Office macro container (.xlsm, .xlsb, .docm, .pptm, .xls, vbaProject.bin)
+report = vba_insight.inspect_file("suspicious.xlsm")
+
+# Check for VBA Stomping / tampering
+if report["stomping"]["has_stomping"]:
+    print(f"Stomping Severity: {report['stomping']['overall_severity']}")
+    for finding in report["stomping"]["project_findings"]:
+        print(f" - [{finding['rule_id']}] {finding['description']}")
+
+# Export SARIF v2.1.0 for GitHub Security / Code Scanning
+sarif = vba_insight.inspect_file_sarif("suspicious.xlsm")
+
+# Export Markdown summary
+md = vba_insight.inspect_file_markdown("suspicious.xlsm")
+print(md)
+```
+
+### 6. Node.js & TypeScript API Usage (`npm install vba-insight`)
+
+```javascript
+const fs = require('node:fs');
+const vbaInsight = require('vba-insight');
+
+// Read macro container into a Buffer
+const buffer = fs.readFileSync('suspicious.xlsm');
+
+// Inspect container and get complete JSON analysis
+const rawJson = vbaInsight.inspectMacroFileJson(buffer);
+const report = JSON.parse(rawJson);
+
+console.log('Project Name:', report.project_name);
+console.log('Has Stomping:', report.stomping.has_stomping);
+
+// Export SARIF for GitHub Code Scanning
+const sarif = vbaInsight.inspectMacroFileSarif(buffer, 'suspicious.xlsm');
+fs.writeFileSync('report.sarif', sarif);
+
+// Export Markdown summary
+const md = vbaInsight.inspectMacroFileMarkdown(buffer);
+console.log(md);
+```
+
 ## VBA Stomping & Tampering Rules
 
 `vba-insight` implements 10 specialized detection rules covering advanced evasion techniques:
@@ -308,7 +366,7 @@ The default resource limits are defined in `Limits::bounded()`. Applications han
 
 ## Project status and contributions
 
-The implementation is a small independently written parser and container reader, without imported grammar files or third-party Rust crates. See [format references and provenance](docs/PROVENANCE.md), [analysis model and known gaps](docs/ARCHITECTURE_JA.md), [post-publication roadmap](docs/ROADMAP_JA.md), and [contribution and release checks](CONTRIBUTING.md). Before publishing a release, confirm that the copyright notice in `LICENSE` names the intended holder and run the release checks against representative Office files that you are authorized to use. The source repository is [ryusui-hiro/vba-retrace](https://github.com/ryusui-hiro/vba-retrace).
+The implementation is a small independently written parser and container reader, without imported grammar files or third-party Rust crates. See [format references and provenance](docs/PROVENANCE.md), [analysis model and known gaps](docs/ARCHITECTURE_JA.md), [post-publication roadmap](docs/ROADMAP_JA.md), [publishing guide and multi-target release pipeline](docs/PUBLISHING.md), and [contribution and release checks](CONTRIBUTING.md). Before publishing a release, confirm that the copyright notice in `LICENSE` names the intended holder and run the release checks against representative Office files that you are authorized to use. The source repository is [ryusui-hiro/vba-retrace](https://github.com/ryusui-hiro/vba-retrace).
 - Emits path-specific argument snapshot facts for simple mutable caller variables when a complete acyclic path assigns a supported literal or constant before the call. The fact records caller conditions, the callee parameter, and the resolved value; aliases, member/index writes, loops, incomplete graphs, and unsupported effects remain unresolved.
 - For `ParamArray` calls with positional values, records one path-specific argument snapshot per slot with `argument_slot_index` on both the source data-flow fact and interprocedural path facts. Equal textual values remain distinct slots, and bounded caller/callee composition is retained even when the callee array contents cannot be folded; named/omitted/dynamic slots remain unresolved.
 - Path-composed calls retain the caller call index, allowing supplied or omitted Optional Variant parameters to feed `IsMissing` only for that exact bounded callsite. Omission is carried as an explicit missing marker and is never replaced with a default/runtime value; mixed or dynamic callsites remain unresolved.

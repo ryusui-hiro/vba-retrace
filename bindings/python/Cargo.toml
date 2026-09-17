@@ -1,0 +1,26 @@
+[package]
+name = "vba-insight-python"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Python bindings for vba-insight"
+license = "MIT"
+publish = false
+
+[lib]
+name = "vba_insight_python"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[dependencies]
+vba-insight = { path = "../.." }
+pyo3 = { version = "0.24", features = ["abi3-py310", "extension-module"] }
+serde_json = "1.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
