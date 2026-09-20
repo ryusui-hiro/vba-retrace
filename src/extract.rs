@@ -39,6 +39,18 @@ pub struct ExtractedModule {
     pub text_offset: u32,
     pub diagnostic: Option<String>,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CellThreat {
+    pub sheet_name: String,
+    pub cell_ref: String,
+    pub coordinate: String,
+    pub threat_kind: String,
+    pub severity: String,
+    pub formula: String,
+    pub description: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ExtractedProject {
     pub name: Option<String>,
@@ -68,6 +80,7 @@ pub struct ExtractedProject {
     pub project_protection_gc: Option<String>,
     pub is_locked_or_unviewable: bool,
     pub hidden_gui_modules: Vec<String>,
+    pub cell_threats: Vec<CellThreat>,
 }
 
 #[derive(Clone, Debug)]
@@ -258,11 +271,36 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 sheet.name,
                 sheet.state.as_deref().unwrap_or("visible")
             ));
+            extracted.cell_threats.push(CellThreat {
+                sheet_name: sheet.name.clone(),
+                cell_ref: "Sheet".into(),
+                coordinate: format!("sheet:{}", sheet.name),
+                threat_kind: "XlmMacroSheet".into(),
+                severity: "Critical".into(),
+                formula: String::new(),
+                description: format!(
+                    "Workbook contains Excel 4.0 (XLM) macro sheet '{}' (state: {})",
+                    sheet.name,
+                    sheet.state.as_deref().unwrap_or("visible")
+                ),
+            });
         } else if is_very_hidden {
             extracted.diagnostics.push(format!(
                 "Security warning: Worksheet '{}' is set to 'veryHidden' (hidden from standard Excel UI)",
                 sheet.name
             ));
+            extracted.cell_threats.push(CellThreat {
+                sheet_name: sheet.name.clone(),
+                cell_ref: "Sheet".into(),
+                coordinate: format!("sheet:{}", sheet.name),
+                threat_kind: "VeryHiddenSheet".into(),
+                severity: "Low".into(),
+                formula: String::new(),
+                description: format!(
+                    "Worksheet '{}' is set to 'veryHidden' (hidden from standard Excel UI)",
+                    sheet.name
+                ),
+            });
         }
     }
 
@@ -286,6 +324,23 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 defined_name.formula,
                 defined_name.hidden.unwrap_or(false)
             ));
+            extracted.cell_threats.push(CellThreat {
+                sheet_name: defined_name
+                    .local_sheet_name
+                    .clone()
+                    .unwrap_or_else(|| "Workbook".into()),
+                cell_ref: defined_name.name.clone(),
+                coordinate: format!("definedName:{}", defined_name.name),
+                threat_kind: "AutoExecDefinedName".into(),
+                severity: "High".into(),
+                formula: defined_name.formula.clone(),
+                description: format!(
+                    "Workbook defined name '{}' triggers auto-execution on open/close (target: '{}', hidden: {})",
+                    defined_name.name,
+                    defined_name.formula,
+                    defined_name.hidden.unwrap_or(false)
+                ),
+            });
         }
 
         let norm_fn = normalize_formula_chars(&defined_name.formula);
@@ -341,11 +396,41 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 "Security warning: Potential DDE execution formula in defined name '{}': '{}'",
                 defined_name.name, defined_name.formula
             ));
+            extracted.cell_threats.push(CellThreat {
+                sheet_name: defined_name
+                    .local_sheet_name
+                    .clone()
+                    .unwrap_or_else(|| "Workbook".into()),
+                cell_ref: defined_name.name.clone(),
+                coordinate: format!("definedName:{}", defined_name.name),
+                threat_kind: "DDE".into(),
+                severity: "Critical".into(),
+                formula: defined_name.formula.clone(),
+                description: format!(
+                    "Potential DDE execution formula in defined name '{}': '{}'",
+                    defined_name.name, defined_name.formula
+                ),
+            });
         } else if is_xlm_name {
             extracted.diagnostics.push(format!(
                 "Security warning: Potential Excel 4.0 (XLM) macro execution formula in defined name '{}': '{}'",
                 defined_name.name, defined_name.formula
             ));
+            extracted.cell_threats.push(CellThreat {
+                sheet_name: defined_name
+                    .local_sheet_name
+                    .clone()
+                    .unwrap_or_else(|| "Workbook".into()),
+                cell_ref: defined_name.name.clone(),
+                coordinate: format!("definedName:{}", defined_name.name),
+                threat_kind: "XLM".into(),
+                severity: "Critical".into(),
+                formula: defined_name.formula.clone(),
+                description: format!(
+                    "Potential Excel 4.0 (XLM) macro execution formula in defined name '{}': '{}'",
+                    defined_name.name, defined_name.formula
+                ),
+            });
         }
     }
 
@@ -516,30 +601,80 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                     || f_lower.contains("file:\\\\"));
 
             if is_dde {
-                extracted.diagnostics.push(format!(
-                    "Security warning: Potential DDE execution formula in cell '{}'!{}: '{}'",
+                let desc = format!(
+                    "Potential DDE execution formula in cell '{}'!{}: '{}'",
                     cell.sheet_name, cell.cell_ref, formula
-                ));
+                );
+                extracted.diagnostics.push(format!("Security warning: {}", desc));
+                extracted.cell_threats.push(CellThreat {
+                    sheet_name: cell.sheet_name.clone(),
+                    cell_ref: cell.cell_ref.clone(),
+                    coordinate: format!("'{}'!{}", cell.sheet_name, cell.cell_ref),
+                    threat_kind: "DDE".into(),
+                    severity: "Critical".into(),
+                    formula: formula.clone(),
+                    description: desc,
+                });
             } else if is_xlm {
-                extracted.diagnostics.push(format!(
-                    "Security warning: Potential Excel 4.0 (XLM) macro execution formula in cell '{}'!{}: '{}'",
+                let desc = format!(
+                    "Potential Excel 4.0 (XLM) macro execution formula in cell '{}'!{}: '{}'",
                     cell.sheet_name, cell.cell_ref, formula
-                ));
+                );
+                extracted.diagnostics.push(format!("Security warning: {}", desc));
+                extracted.cell_threats.push(CellThreat {
+                    sheet_name: cell.sheet_name.clone(),
+                    cell_ref: cell.cell_ref.clone(),
+                    coordinate: format!("'{}'!{}", cell.sheet_name, cell.cell_ref),
+                    threat_kind: "XLM".into(),
+                    severity: "Critical".into(),
+                    formula: formula.clone(),
+                    description: desc,
+                });
             } else if is_remote_link {
-                extracted.diagnostics.push(format!(
-                    "Security warning: Potential remote workbook link injection in cell '{}'!{}: '{}'",
+                let desc = format!(
+                    "Potential remote workbook link injection in cell '{}'!{}: '{}'",
                     cell.sheet_name, cell.cell_ref, formula
-                ));
+                );
+                extracted.diagnostics.push(format!("Security warning: {}", desc));
+                extracted.cell_threats.push(CellThreat {
+                    sheet_name: cell.sheet_name.clone(),
+                    cell_ref: cell.cell_ref.clone(),
+                    coordinate: format!("'{}'!{}", cell.sheet_name, cell.cell_ref),
+                    threat_kind: "RemoteLink".into(),
+                    severity: "High".into(),
+                    formula: formula.clone(),
+                    description: desc,
+                });
             } else if is_webservice {
-                extracted.diagnostics.push(format!(
-                    "Security warning: Potential external data request / exfiltration formula in cell '{}'!{}: '{}'",
+                let desc = format!(
+                    "Potential external data request / exfiltration formula in cell '{}'!{}: '{}'",
                     cell.sheet_name, cell.cell_ref, formula
-                ));
+                );
+                extracted.diagnostics.push(format!("Security warning: {}", desc));
+                extracted.cell_threats.push(CellThreat {
+                    sheet_name: cell.sheet_name.clone(),
+                    cell_ref: cell.cell_ref.clone(),
+                    coordinate: format!("'{}'!{}", cell.sheet_name, cell.cell_ref),
+                    threat_kind: "WebService".into(),
+                    severity: "Medium".into(),
+                    formula: formula.clone(),
+                    description: desc,
+                });
             } else if is_suspicious_hyperlink {
-                extracted.diagnostics.push(format!(
-                    "Security warning: Suspicious executable download hyperlink in cell '{}'!{}: '{}'",
+                let desc = format!(
+                    "Suspicious executable download hyperlink in cell '{}'!{}: '{}'",
                     cell.sheet_name, cell.cell_ref, formula
-                ));
+                );
+                extracted.diagnostics.push(format!("Security warning: {}", desc));
+                extracted.cell_threats.push(CellThreat {
+                    sheet_name: cell.sheet_name.clone(),
+                    cell_ref: cell.cell_ref.clone(),
+                    coordinate: format!("'{}'!{}", cell.sheet_name, cell.cell_ref),
+                    threat_kind: "SuspiciousHyperlink".into(),
+                    severity: "High".into(),
+                    formula: formula.clone(),
+                    description: desc,
+                });
             }
         }
     }

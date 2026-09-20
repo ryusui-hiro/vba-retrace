@@ -50,4 +50,12 @@ test('inspectMacroFileMarkdown and inspectMacroFileSarif reject invalid buffer',
   assert.throws(() => {
     vbaInsight.inspectMacroFileSarif(Buffer.from('corrupt'), 'test.xlsm');
   }, /inspection failed/);
+
+  assert.throws(() => {
+    vbaInsight.disasmMacroFileJson(Buffer.from('corrupt'));
+  }, /inspection failed/);
+
+  assert.throws(() => {
+    vbaInsight.disasmMacroFileMarkdown(Buffer.from('corrupt'));
+  }, /inspection failed/);
 });

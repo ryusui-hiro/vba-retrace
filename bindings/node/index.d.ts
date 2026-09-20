@@ -2,6 +2,10 @@
 /* eslint-disable */
 export declare function analyzeSourcesJson(sources: Array<SourceEntry>, includeSource?: boolean | undefined | null): string
 
+export declare function disasmMacroFileJson(data: Buffer): string
+
+export declare function disasmMacroFileMarkdown(data: Buffer): string
+
 export declare function inspectMacroFileJson(data: Buffer, includeSource?: boolean | undefined | null): string
 
 export declare function inspectMacroFileMarkdown(data: Buffer): string

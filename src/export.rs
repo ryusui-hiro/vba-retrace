@@ -635,6 +635,26 @@ pub fn to_json(a: &Analysis, x: Option<&ExtractedProject>, d: Disclosure) -> Str
         } else {
             o.push_str("null");
         }
+        o.push_str(&format!(
+            ",\"cell_threat_count\":{},\"cell_threats\":[",
+            extracted.cell_threats.len()
+        ));
+        for (index, threat) in extracted.cell_threats.iter().enumerate() {
+            if index > 0 {
+                o.push(',');
+            }
+            o.push_str(&format!(
+                "{{\"sheet_name\":{},\"cell_ref\":{},\"coordinate\":{},\"threat_kind\":{},\"severity\":{},\"formula\":{},\"description\":{}}}",
+                if reveal { q(&threat.sheet_name) } else { "null".into() },
+                if reveal { q(&threat.cell_ref) } else { "null".into() },
+                if reveal { q(&threat.coordinate) } else { "null".into() },
+                q(&threat.threat_kind),
+                q(&threat.severity),
+                if reveal { q(&threat.formula) } else { "null".into() },
+                if reveal { q(&threat.description) } else { "null".into() }
+            ));
+        }
+        o.push(']');
         o.push('}');
     } else {
         o.push_str("null");
@@ -2973,12 +2993,177 @@ pub fn inspect_to_markdown(inspection: &crate::ComprehensiveInspection) -> Strin
         inspection.extracted.modules.len()
     ));
     out.push_str(&format!(
+        "- **Cell Threats:** {}\n",
+        inspection.extracted.cell_threats.len()
+    ));
+    out.push_str(&format!(
         "- **Stomping Severity:** `{}`\n\n",
         inspection.stomping_report.overall_severity.as_str()
     ));
 
+    if !inspection.extracted.cell_threats.is_empty() {
+        out.push_str("## Worksheet & Cell Threats\n\n");
+        out.push_str("| Coordinate | Threat Kind | Severity | Description |\n");
+        out.push_str("|---|---|---|---|\n");
+        for threat in &inspection.extracted.cell_threats {
+            out.push_str(&format!(
+                "| `{}` | `{}` | `{}` | {} |\n",
+                threat.coordinate, threat.threat_kind, threat.severity, threat.description
+            ));
+        }
+        out.push('\n');
+    }
+
     out.push_str(&stomping_to_markdown(&inspection.stomping_report));
     out.push_str(&disasm_to_markdown(&inspection.pcode_disassembly));
+    out
+}
+
+fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static str, &'static str) {
+    let (rule_id, default_level) = match threat.threat_kind.as_str() {
+        "DDE" => ("VBA-CELL-001", "error"),
+        "XLM" => ("VBA-CELL-002", "error"),
+        "RemoteLink" => ("VBA-CELL-003", "warning"),
+        "WebService" => ("VBA-CELL-004", "warning"),
+        "SuspiciousHyperlink" => ("VBA-CELL-005", "warning"),
+        "AutoExecDefinedName" => ("VBA-CELL-006", "warning"),
+        "VeryHiddenSheet" => ("VBA-CELL-007", "note"),
+        "XlmMacroSheet" => ("VBA-CELL-008", "error"),
+        _ => ("VBA-CELL-001", "warning"),
+    };
+    let level = match threat.severity.as_str() {
+        "Critical" | "High" => "error",
+        "Medium" => "warning",
+        "Low" => "note",
+        _ => default_level,
+    };
+    (rule_id, level)
+}
+
+/// Export a ComprehensiveInspection as SARIF v2.1.0 for GitHub Code Scanning and VS Code integration,
+/// containing both VBA Stomping and Worksheet Cell Threat findings.
+pub fn inspection_to_sarif(
+    inspection: &crate::ComprehensiveInspection,
+    file_uri: &str,
+) -> String {
+    let mut out = String::from(
+        "{\"$schema\":\"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json\",\"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"vba-insight\",\"version\":\"0.1.0\",\"informationUri\":\"https://github.com/ryusui-hiro/vba-retrace\",\"rules\":[",
+    );
+    out.push_str(
+        "{\"id\":\"VBA-STOMP-001\",\"name\":\"SourcePurged\",\"shortDescription\":{\"text\":\"VBA Source Code Purged\"},\"fullDescription\":{\"text\":\"VBA source code has been completely stripped or purged while compiled P-code instructions remain executable.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-STOMP-002\",\"name\":\"ProcedureHiddenInPCode\",\"shortDescription\":{\"text\":\"Hidden Procedure in P-Code\"},\"fullDescription\":{\"text\":\"A procedure exists in the compiled P-code stream but does not appear in the VBA source text.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-STOMP-003\",\"name\":\"SuspiciousLiteralInPCode\",\"shortDescription\":{\"text\":\"Suspicious Literal in P-Code\"},\"fullDescription\":{\"text\":\"Suspicious string literal (such as URL, executable name, or command) is present in compiled P-code but absent from source code.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-STOMP-004\",\"name\":\"SensitiveCallInPCode\",\"shortDescription\":{\"text\":\"Sensitive API Call in P-Code\"},\"fullDescription\":{\"text\":\"Dangerous system API or shell execution call is found in compiled P-code but hidden from source text.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-STOMP-005\",\"name\":\"LineCountDiscrepancy\",\"shortDescription\":{\"text\":\"Line Count Discrepancy\"},\"fullDescription\":{\"text\":\"Large divergence between source code line count and compiled P-code line count.\"},\"defaultConfiguration\":{\"level\":\"warning\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-STOMP-006\",\"name\":\"ProcedureMissingInPCode\",\"shortDescription\":{\"text\":\"Procedure Missing in P-Code\"},\"fullDescription\":{\"text\":\"A procedure declared in source text is missing from the compiled P-code stream.\"},\"defaultConfiguration\":{\"level\":\"note\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-STOMP-007\",\"name\":\"PerformanceCachePurged\",\"shortDescription\":{\"text\":\"VBA Performance Cache Purged\"},\"fullDescription\":{\"text\":\"Compiled P-code performance cache has been wiped or omitted while source code procedures remain, indicating potential VBA Purging evasion.\"},\"defaultConfiguration\":{\"level\":\"warning\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-STOMP-008\",\"name\":\"HiddenGuiModule\",\"shortDescription\":{\"text\":\"Module Hidden from VBA GUI\"},\"fullDescription\":{\"text\":\"Module is present in dir stream and compiled for execution but omitted from PROJECT stream manifest, making it invisible in the Office VBA GUI (Evil Clippy technique).\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-STOMP-009\",\"name\":\"ProjectLockedOrUnviewable\",\"shortDescription\":{\"text\":\"Project Locked or Unviewable\"},\"fullDescription\":{\"text\":\"VBA project contains protection/lock attributes (CMG/DPB/GC) making the macro unviewable or password-protected in the VBA IDE.\"},\"defaultConfiguration\":{\"level\":\"note\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-STOMP-010\",\"name\":\"SourceCorruptedWithValidPCode\",\"shortDescription\":{\"text\":\"Corrupted Source Container with Executable P-Code\"},\"fullDescription\":{\"text\":\"Module source code container failed decompression or is malformed while executable compiled P-code remains, indicating anti-analysis stomping evasion.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-001\",\"name\":\"DDEExecutionFormula\",\"shortDescription\":{\"text\":\"Dynamic Data Exchange (DDE) Formula Execution\"},\"fullDescription\":{\"text\":\"Worksheet cell or defined name contains a formula executing commands via Dynamic Data Exchange (DDE).\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-002\",\"name\":\"XlmMacroExecutionFormula\",\"shortDescription\":{\"text\":\"Excel 4.0 (XLM) Macro Formula Execution\"},\"fullDescription\":{\"text\":\"Worksheet cell or defined name contains an Excel 4.0 macro expression executing code or launching processes.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-003\",\"name\":\"RemoteWorkbookLink\",\"shortDescription\":{\"text\":\"Remote Workbook Link Injection\"},\"fullDescription\":{\"text\":\"Worksheet cell formula references remote external workbook paths over UNC or HTTP/HTTPS.\"},\"defaultConfiguration\":{\"level\":\"warning\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-004\",\"name\":\"DataExfiltrationFormula\",\"shortDescription\":{\"text\":\"External Web Service / Exfiltration Formula\"},\"fullDescription\":{\"text\":\"Worksheet cell uses WEBSERVICE or FILTERXML to transmit or fetch data externally.\"},\"defaultConfiguration\":{\"level\":\"warning\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-005\",\"name\":\"SuspiciousDownloadHyperlink\",\"shortDescription\":{\"text\":\"Suspicious Download Hyperlink or Protocol Handler\"},\"fullDescription\":{\"text\":\"Worksheet HYPERLINK points to an executable, script, archive, or custom protocol handler.\"},\"defaultConfiguration\":{\"level\":\"warning\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-006\",\"name\":\"AutoExecDefinedName\",\"shortDescription\":{\"text\":\"Auto-Execution Defined Name\"},\"fullDescription\":{\"text\":\"Workbook defined name (such as Auto_Open or Auto_Close) triggers automatic macro execution.\"},\"defaultConfiguration\":{\"level\":\"warning\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-007\",\"name\":\"VeryHiddenWorksheet\",\"shortDescription\":{\"text\":\"VeryHidden Worksheet Cloaking\"},\"fullDescription\":{\"text\":\"Worksheet visibility is set to veryHidden to cloak malicious content from standard Excel UI.\"},\"defaultConfiguration\":{\"level\":\"note\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-008\",\"name\":\"XlmMacroSheetPresent\",\"shortDescription\":{\"text\":\"Excel 4.0 (XLM) Macro Sheet Present\"},\"fullDescription\":{\"text\":\"Workbook contains legacy Excel 4.0 macro sheet, frequently used in malware payloads.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+    );
+    out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
+    out.push_str(&q(file_uri));
+    out.push_str("}}],\"results\":[");
+
+    let mut first_result = true;
+    for f in &inspection.stomping_report.project_findings {
+        if !first_result {
+            out.push(',');
+        }
+        first_result = false;
+        let (rule_id, level) = finding_to_sarif_rule(f);
+        out.push_str(&format!(
+            "{{\"ruleId\":{},\"level\":{},\"message\":{{\"text\":{}}},\"locations\":[{{\"physicalLocation\":{{\"artifactLocation\":{{\"uri\":{}}}}},\"logicalLocations\":[{{\"name\":\"PROJECT\",\"kind\":\"project\"}}]}}]}}",
+            q(rule_id),
+            q(level),
+            q(&f.description),
+            q(file_uri)
+        ));
+    }
+    for m in &inspection.stomping_report.modules {
+        for f in &m.findings {
+            if !first_result {
+                out.push(',');
+            }
+            first_result = false;
+            let (rule_id, level) = finding_to_sarif_rule(f);
+            out.push_str(&format!(
+                "{{\"ruleId\":{},\"level\":{},\"message\":{{\"text\":{}}},\"locations\":[{{\"physicalLocation\":{{\"artifactLocation\":{{\"uri\":{}}}}},\"logicalLocations\":[{{\"name\":{},\"kind\":\"module\"}}]}}]}}",
+                q(rule_id),
+                q(level),
+                q(&f.description),
+                q(file_uri),
+                q(&m.module_name)
+            ));
+        }
+    }
+    for t in &inspection.extracted.cell_threats {
+        if !first_result {
+            out.push(',');
+        }
+        first_result = false;
+        let (rule_id, level) = cell_threat_to_sarif_rule(t);
+        let logical_kind = if t.coordinate.starts_with("sheet:") {
+            "sheet"
+        } else if t.coordinate.starts_with("definedName:") {
+            "definedName"
+        } else {
+            "cell"
+        };
+        out.push_str(&format!(
+            "{{\"ruleId\":{},\"level\":{},\"message\":{{\"text\":{}}},\"locations\":[{{\"physicalLocation\":{{\"artifactLocation\":{{\"uri\":{}}}}},\"logicalLocations\":[{{\"name\":{},\"kind\":{}}}]}}]}}",
+            q(rule_id),
+            q(level),
+            q(&t.description),
+            q(file_uri),
+            q(&t.coordinate),
+            q(logical_kind)
+        ));
+    }
+
+    out.push_str("]}]}");
     out
 }
 

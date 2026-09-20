@@ -6,7 +6,8 @@ use std::process::ExitCode;
 use vba_insight::compiled::PCodeLayoutProfile;
 use vba_insight::export::{
     Disclosure, disasm_to_json, disasm_to_markdown, inspect_to_json, inspect_to_markdown,
-    stomping_to_json, stomping_to_markdown, stomping_to_sarif, to_dot_with_disclosure, to_json,
+    inspection_to_sarif, stomping_to_json, stomping_to_markdown, stomping_to_sarif,
+    to_dot_with_disclosure, to_json,
 };
 use vba_insight::extract::{extract_macro_container, extract_xlsm_with_pcode_profile};
 use vba_insight::host::HostProfile;
@@ -137,8 +138,8 @@ fn run() -> Result<(), String> {
             }
         }
         "inspect" => {
-            if format != "json" && format != "markdown" && format != "text" {
-                return Err("format for inspect must be json, markdown, or text".into());
+            if format != "json" && format != "sarif" && format != "markdown" && format != "text" {
+                return Err("format for inspect must be json, sarif, markdown, or text".into());
             }
         }
         _ => {}
@@ -289,6 +290,10 @@ fn run() -> Result<(), String> {
         match format.as_str() {
             "json" => println!("{}", inspect_to_json(&inspection, disclosure)),
             "markdown" => print!("{}", inspect_to_markdown(&inspection)),
+            "sarif" => {
+                let file_uri = paths.first().map(String::as_str).unwrap_or("container");
+                println!("{}", inspection_to_sarif(&inspection, file_uri));
+            }
             _ => {
                 println!("=======================================================");
                 println!("           VBA MACRO CONTAINER INSPECTION REPORT        ");
@@ -310,7 +315,17 @@ fn run() -> Result<(), String> {
                     "Stomping Detected : {}",
                     inspection.stomping_report.has_stomping
                 );
+                if !inspection.extracted.cell_threats.is_empty() {
+                    println!("Cell Threats      : {}", inspection.extracted.cell_threats.len());
+                }
                 println!("-------------------------------------------------------");
+                if !inspection.extracted.cell_threats.is_empty() {
+                    println!("Worksheet & Cell Threats:");
+                    for t in &inspection.extracted.cell_threats {
+                        println!("  - [{:<8}] {:<20} | {:<16} | {}", t.severity, t.coordinate, t.threat_kind, t.description);
+                    }
+                    println!("-------------------------------------------------------");
+                }
                 println!("Modules Summary:");
                 for m in &inspection.stomping_report.modules {
                     println!(
@@ -360,5 +375,5 @@ fn usage() -> String {
        vba-insight extract FILE.xlsm [--format json] [--include-source] [--pcode-profile vba7-observed]
        vba-insight disasm FILE.xlsm [--format json|markdown|text]
        vba-insight stomping FILE.xlsm [--format json|sarif|markdown|text]
-       vba-insight inspect FILE.xlsm [--format json|markdown|text]".into()
+       vba-insight inspect FILE.xlsm [--format json|markdown|sarif|text]".into()
 }

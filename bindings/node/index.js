@@ -701,6 +701,8 @@ if (!nativeBinding) {
 
 module.exports = nativeBinding
 module.exports.analyzeSourcesJson = nativeBinding.analyzeSourcesJson
+module.exports.disasmMacroFileJson = nativeBinding.disasmMacroFileJson
+module.exports.disasmMacroFileMarkdown = nativeBinding.disasmMacroFileMarkdown
 module.exports.inspectMacroFileJson = nativeBinding.inspectMacroFileJson
 module.exports.inspectMacroFileMarkdown = nativeBinding.inspectMacroFileMarkdown
 module.exports.inspectMacroFileSarif = nativeBinding.inspectMacroFileSarif

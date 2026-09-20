@@ -3,7 +3,8 @@ use pyo3::prelude::*;
 use std::fs;
 
 use vba_insight::export::{
-    Disclosure, inspect_to_json, inspect_to_markdown, stomping_to_sarif, to_json,
+    Disclosure, disasm_to_json, disasm_to_markdown, inspect_to_json, inspect_to_markdown,
+    inspection_to_sarif, to_json,
 };
 use vba_insight::{AnalysisOptions, HostProfile, SourceUnit, inspect_macro_file};
 
@@ -64,7 +65,33 @@ fn inspect_macro_file_sarif(data: &Bound<'_, PyAny>, file_uri: &str) -> PyResult
     let inspection = inspect_macro_file(&bytes, &options)
         .map_err(|e| PyValueError::new_err(format!("inspection failed: {e}")))?;
 
-    Ok(stomping_to_sarif(&inspection.stomping_report, file_uri))
+    Ok(inspection_to_sarif(&inspection, file_uri))
+}
+
+#[pyfunction]
+fn disasm_macro_file_json(data: &Bound<'_, PyAny>) -> PyResult<String> {
+    let bytes = read_input_bytes(data)?;
+    let options = AnalysisOptions {
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+    let inspection = inspect_macro_file(&bytes, &options)
+        .map_err(|e| PyValueError::new_err(format!("inspection failed: {e}")))?;
+
+    Ok(disasm_to_json(&inspection.pcode_disassembly))
+}
+
+#[pyfunction]
+fn disasm_macro_file_markdown(data: &Bound<'_, PyAny>) -> PyResult<String> {
+    let bytes = read_input_bytes(data)?;
+    let options = AnalysisOptions {
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+    let inspection = inspect_macro_file(&bytes, &options)
+        .map_err(|e| PyValueError::new_err(format!("inspection failed: {e}")))?;
+
+    Ok(disasm_to_markdown(&inspection.pcode_disassembly))
 }
 
 #[pyfunction]
@@ -96,6 +123,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(inspect_macro_file_json, m)?)?;
     m.add_function(wrap_pyfunction!(inspect_macro_file_markdown, m)?)?;
     m.add_function(wrap_pyfunction!(inspect_macro_file_sarif, m)?)?;
+    m.add_function(wrap_pyfunction!(disasm_macro_file_json, m)?)?;
+    m.add_function(wrap_pyfunction!(disasm_macro_file_markdown, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_sources_json, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     Ok(())
