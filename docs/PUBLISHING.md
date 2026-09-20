@@ -76,8 +76,9 @@ and restrict publishing to the protected `main` branch.
 
 5. **Publish to Registries**:
    Dispatch the publishing workflows providing the release tag:
-   - **Publish PyPI** (`publish-pypi.yml`)
-   - **Publish npm** (`publish-npm.yml`)
-   - **Publish crates.io** (`publish-crates.yml`)
+   - **Publish PyPI** (`publish-pypi.yml`): Publishes pre-built wheels and sdist via PyPI Trusted Publishing.
+   - **Publish npm** (`publish-npm.yml`): Publishes native N-API packages to `npmjs.com` using an `NPM_TOKEN` secret.
+   - **Publish GitHub Packages** (`publish-github.yml`): Publishes scoped packages (`@ryusui-hiro/vba-insight`) to `npm.pkg.github.com`.
+   - **Publish crates.io** (`publish-crates.yml`): Publishes Rust crate to `crates.io`.
 
 Each publishing workflow verifies cryptographic SHA-256 hashes against `release-manifest.json` and ensures the commit SHA strictly matches before uploading.
