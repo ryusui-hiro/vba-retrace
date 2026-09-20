@@ -193,15 +193,21 @@ if cell_threats:
         print(f"  - {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
 
 # 3. GitHub Advanced Security / CI 統合用の OASIS SARIF v2.1.0 レポートを出力
+# (VBA Stomping VBA-STOMP-001..010 および セル脅威 VBA-CELL-001..008 の双方を含みます)
 sarif_json = vba_insight.inspect_file_sarif("suspicious.xlsm")
 with open("security_report.sarif", "w", encoding="utf-8") as f:
     f.write(sarif_json)
 
-# 4. 整形済み Markdown 検査サマリーを取得
+# 4. コンパイル済み VBA P-Code バイトコード逆アセンブリの取得
+pcode_modules = vba_insight.disasm_file("suspicious.xlsm")
+for mod in pcode_modules:
+    print(f"モジュール: {mod['module_name']} - {len(mod['lines'])} 行の P-Code")
+
+# 5. 整形済み Markdown 検査サマリーを取得
 markdown_summary = vba_insight.inspect_file_markdown("suspicious.xlsm")
 print(markdown_summary)
 
-# 5. 純粋な VBA ソースコードの静的構文解析
+# 6. 純粋な VBA ソースコードの静的構文解析
 vba_sources = [
     ("Module1.bas", "Public Sub Test()\n    MsgBox \"Hello\"\nEnd Sub\n")
 ]
@@ -221,6 +227,7 @@ import {
   inspectMacroFileJson,
   inspectMacroFileSarif,
   inspectMacroFileMarkdown,
+  disasmMacroFileJson,
   analyzeSourcesJson,
 } from 'vba-insight';
 
@@ -239,15 +246,25 @@ if (report.stomping?.has_stomping) {
   }
 }
 
+// 危険なワークシートセル脅威の確認（DDE, XLM, WEBSERVICE 等）
+const cellThreats = report.analysis?.workbook_structure?.cell_threats ?? [];
+for (const threat of cellThreats) {
+  console.warn(`  - [${threat.threat_kind}] ${threat.coordinate}: ${threat.description}`);
+}
+
 // 3. CI コードスキャン用の SARIF v2.1.0 レポートを出力
 const sarifReport = inspectMacroFileSarif(fileBuffer, 'suspicious.xlsm');
 fs.writeFileSync('macro-scan.sarif', sarifReport);
 
-// 4. GitHub 形式の Markdown 検査レポートを生成
+// 4. コンパイル済み P-Code 命令の逆アセンブリ
+const pcodeJson = disasmMacroFileJson(fileBuffer);
+console.log('P-Code モジュール数:', JSON.parse(pcodeJson).length);
+
+// 5. GitHub 形式の Markdown 検査レポートを生成
 const markdownReport = inspectMacroFileMarkdown(fileBuffer);
 console.log(markdownReport);
 
-// 5. VBA ソースコードの静的解析
+// 6. VBA ソースコードの静的解析
 const sourceUnits = [
   {
     name: 'Module1.bas',
@@ -282,16 +299,20 @@ console.log('解析完了。コード実行の有無:', parsedAnalysis.project.c
 
 ### 2. ワークシート・セル & ブック脅威スキャナー
 
-ワークシートのセル数式、定義名、シートメタデータを検査します。
+`vba-insight` は、ワークシート数式、定義名、シートメタデータを以下の 8 つの専用セキュリティルールで検査します：
 
-- **DDE（Dynamic Data Exchange）インジェクション**: `=cmd|'/c calc'!A0` や `="cmd.exe"|...` などの DDE 実行数式を検出。
-- **旧形式 XLM 4.0 マクロ**: `=EXEC(...)`、`=CALL(...)`、`=REGISTER(...)` 等の Excel 4.0 マクロ数式を検出。
-- **データ外部持ち出し（Data Exfiltration）**: 機密セル情報を外部サーバーへ自動送信可能な `=WEBSERVICE(...)` 数式を検出。
-- **リモートインジェクション**: UNC リモートパス（`\\attacker\share`）やリモート URL（`http://`、`ftp://`）を検知。
-- **不審なハイパーリンク**: 実行可能ファイルやスクリプト（`.exe`、`.scr`、`.bat`、`.ps1`、`.vbs`、`.js`）を指す `=HYPERLINK(...)` 数式を検知。
+| ルール ID | 検知種別 | 重要度 | 検出ロジックと概要 |
+|---|---|:---:|---|
+| `VBA-CELL-001` | `DDEExecutionFormula` | **Critical** | セル数式または定義名に DDE（Dynamic Data Exchange）経由で外部プロセスを起動する式が含まれている。 |
+| `VBA-CELL-002` | `XlmMacroExecutionFormula` | **Critical** | セル数式または定義名に Excel 4.0（XLM）マクロ関数（`EXEC`, `CALL`, `REGISTER` 等）によるコード実行が含まれている。 |
+| `VBA-CELL-003` | `RemoteWorkbookLink` | **High** | セル数式が UNC リモートパス（`\\server\share`）や外部 URL（HTTP/HTTPS）を参照している。 |
+| `VBA-CELL-004` | `DataExfiltrationFormula` | **Medium** | セル数式で `=WEBSERVICE(...)` や `FILTERXML` を使用し、機密データを外部へ送信可能な状態になっている。 |
+| `VBA-CELL-005` | `SuspiciousDownloadHyperlink` | **High** | `=HYPERLINK(...)` 数式が実行可能ファイル、スクリプト、アーカイブ、カスタムプロトコル（`.exe`, `.bat`, `search-ms:` 等）を指している。 |
+| `VBA-CELL-006` | `AutoExecDefinedName` | **High** | ブック定義名（`Auto_Open`、`_xlnm.Auto_Open`、`Auto_Close` 等）がマクロ自動実行をトリガーする。 |
+| `VBA-CELL-007` | `VeryHiddenWorksheet` | **Low** | ワークシートが `state="veryHidden"` に設定されており、Excel 通常 UI から悪意あるシートが隠蔽されている。 |
+| `VBA-CELL-008` | `XlmMacroSheetPresent` | **Critical** | マルウェアの攻撃ペイロードとして多用される、旧形式の Excel 4.0 マクロシートが存在する。 |
+
 - **全角文字難読化回避の正規化**: 数式検査前に全角英数字・記号（`U+FF01`〜`U+FF5E`、`U+3000`）を標準 ASCII に正規化し、難読化による検知回避を無力化。
-- **ブック自動実行トリガー**: ブック定義名の `Auto_Open`、`_xlnm.Auto_Open`、`Auto_Close` 等の自動実行トリガーを検知。
-- **veryHidden ワークシート検知**: 悪意あるマクロペイロードを隠蔽するためによく使われる、`state="veryHidden"` 属性を持つ不可視シートを検知。
 
 ---
 

@@ -1,6 +1,8 @@
 use std::fs;
 use std::process::Command;
-use vba_insight::export::{Disclosure, inspect_to_json, inspect_to_markdown, stomping_to_sarif};
+use vba_insight::export::{
+    Disclosure, inspect_to_json, inspect_to_markdown, inspection_to_sarif, stomping_to_sarif,
+};
 use vba_insight::extract::extract_macro_container;
 use vba_insight::host::HostProfile;
 use vba_insight::stomping::{StompingFindingKind, StompingSeverity};
@@ -1325,6 +1327,21 @@ fn e2e_cli_binary_execution_workflow() {
     assert!(stdout.contains("\"schema_version\":\"0.1\""));
     assert!(stdout.contains("CliProject"));
 
+    // 1b. Test 'inspect --format sarif'
+    let output_inspect_sarif = Command::new(bin_path)
+        .arg("inspect")
+        .arg(&file_path)
+        .arg("--format")
+        .arg("sarif")
+        .output()
+        .expect("CLI execution failed");
+
+    assert!(output_inspect_sarif.status.success());
+    let stdout_inspect_sarif = String::from_utf8_lossy(&output_inspect_sarif.stdout);
+    assert!(stdout_inspect_sarif.contains("sarif-schema-2.1.0.json"));
+    assert!(stdout_inspect_sarif.contains("VBA-STOMP-001"));
+    assert!(stdout_inspect_sarif.contains("VBA-CELL-001"));
+
     // 2. Test 'stomping --format sarif'
     let output_sarif = Command::new(bin_path)
         .arg("stomping")
@@ -2176,4 +2193,45 @@ fn e2e_defined_name_and_very_hidden_sheet_threat_detection() {
             .any(|d| d.contains("Potential DDE execution formula in cell 'Sheet1'!A2")),
         "should detect normalized fullwidth DDE formula: {diags:?}"
     );
+
+    // Verify structured cell_threats
+    let threats = &inspection.extracted.cell_threats;
+    assert!(!threats.is_empty(), "cell_threats should not be empty");
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "VeryHiddenSheet"),
+        "should have VeryHiddenSheet threat: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "AutoExecDefinedName"),
+        "should have AutoExecDefinedName threat: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "DDE"),
+        "should have DDE threat: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "XLM"),
+        "should have XLM threat: {threats:?}"
+    );
+
+    // Verify inspect_to_json output contains cell_threats
+    let json_report = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(json_report.contains("\"cell_threats\":["));
+    assert!(json_report.contains("\"threat_kind\":\"DDE\""));
+    assert!(json_report.contains("\"threat_kind\":\"XLM\""));
+
+    // Verify inspection_to_sarif output contains both rules and results
+    let sarif_report = inspection_to_sarif(&inspection, "threat_test.xlsm");
+    assert!(sarif_report.contains("\"id\":\"VBA-STOMP-001\""));
+    assert!(sarif_report.contains("\"id\":\"VBA-CELL-001\""));
+    assert!(sarif_report.contains("\"id\":\"VBA-CELL-002\""));
+    assert!(sarif_report.contains("\"ruleId\":\"VBA-CELL-001\""));
+    assert!(sarif_report.contains("\"ruleId\":\"VBA-CELL-002\""));
+    assert!(sarif_report.contains("\"ruleId\":\"VBA-CELL-006\""));
+    assert!(sarif_report.contains("\"ruleId\":\"VBA-CELL-007\""));
+
+    // Verify inspect_to_markdown contains threats table
+    let md_report = inspect_to_markdown(&inspection);
+    assert!(md_report.contains("## Worksheet & Cell Threats"));
+    assert!(md_report.contains("- **Cell Threats:**"));
 }

@@ -1,7 +1,8 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use vba_insight::export::{
-    Disclosure, inspect_to_json, inspect_to_markdown, stomping_to_sarif, to_json,
+    Disclosure, disasm_to_json, disasm_to_markdown, inspect_to_json, inspect_to_markdown,
+    inspection_to_sarif, to_json,
 };
 use vba_insight::{AnalysisOptions, HostProfile, SourceUnit, inspect_macro_file};
 
@@ -62,7 +63,39 @@ pub fn inspect_macro_file_sarif(data: Buffer, file_uri: Option<String>) -> napi:
     })?;
 
     let uri = file_uri.as_deref().unwrap_or("macro_container");
-    Ok(stomping_to_sarif(&inspection.stomping_report, uri))
+    Ok(inspection_to_sarif(&inspection, uri))
+}
+
+#[napi]
+pub fn disasm_macro_file_json(data: Buffer) -> napi::Result<String> {
+    let options = AnalysisOptions {
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+    let inspection = inspect_macro_file(data.as_ref(), &options).map_err(|e| {
+        napi::Error::new(
+            napi::Status::GenericFailure,
+            format!("inspection failed: {e}"),
+        )
+    })?;
+
+    Ok(disasm_to_json(&inspection.pcode_disassembly))
+}
+
+#[napi]
+pub fn disasm_macro_file_markdown(data: Buffer) -> napi::Result<String> {
+    let options = AnalysisOptions {
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+    let inspection = inspect_macro_file(data.as_ref(), &options).map_err(|e| {
+        napi::Error::new(
+            napi::Status::GenericFailure,
+            format!("inspection failed: {e}"),
+        )
+    })?;
+
+    Ok(disasm_to_markdown(&inspection.pcode_disassembly))
 }
 
 #[napi]

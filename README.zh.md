@@ -193,15 +193,21 @@ if cell_threats:
         print(f"  - {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
 
 # 3. 导出符合 OASIS SARIF v2.1.0 标准的安全报告（对接 GitHub Code Scanning / CI）
+# (包含 VBA Stomping VBA-STOMP-001..010 与 单元格威胁 VBA-CELL-001..008 规则)
 sarif_json = vba_insight.inspect_file_sarif("suspicious.xlsm")
 with open("security_report.sarif", "w", encoding="utf-8") as f:
     f.write(sarif_json)
 
-# 4. 导出格式化的 Markdown 检查摘要
+# 4. 反编译提取已编译的 VBA P-Code 字节码指令
+pcode_modules = vba_insight.disasm_file("suspicious.xlsm")
+for mod in pcode_modules:
+    print(f"模块: {mod['module_name']} - {len(mod['lines'])} 行 P-Code")
+
+# 5. 导出格式化的 Markdown 检查摘要
 markdown_summary = vba_insight.inspect_file_markdown("suspicious.xlsm")
 print(markdown_summary)
 
-# 5. 针对纯 VBA 源码模块进行语法分析
+# 6. 针对纯 VBA 源码模块进行语法分析
 vba_sources = [
     ("Module1.bas", "Public Sub Test()\n    MsgBox \"Hello\"\nEnd Sub\n")
 ]
@@ -221,6 +227,7 @@ import {
   inspectMacroFileJson,
   inspectMacroFileSarif,
   inspectMacroFileMarkdown,
+  disasmMacroFileJson,
   analyzeSourcesJson,
 } from 'vba-insight';
 
@@ -239,15 +246,25 @@ if (report.stomping?.has_stomping) {
   }
 }
 
+// 检查危险的工作表单元格威胁（DDE, XLM, WEBSERVICE 等）
+const cellThreats = report.analysis?.workbook_structure?.cell_threats ?? [];
+for (const threat of cellThreats) {
+  console.warn(`  - [${threat.threat_kind}] ${threat.coordinate}: ${threat.description}`);
+}
+
 // 3. 导出用于 CI 代码扫描的 SARIF v2.1.0 报告
 const sarifReport = inspectMacroFileSarif(fileBuffer, 'suspicious.xlsm');
 fs.writeFileSync('macro-scan.sarif', sarifReport);
 
-// 4. 生成 GitHub 风格 Markdown 审计报告
+// 4. 反编译提取编译后 P-Code 指令
+const pcodeJson = disasmMacroFileJson(fileBuffer);
+console.log('P-Code 模块数:', JSON.parse(pcodeJson).length);
+
+// 5. 生成 GitHub 风格 Markdown 审计报告
 const markdownReport = inspectMacroFileMarkdown(fileBuffer);
 console.log(markdownReport);
 
-// 5. 纯 VBA 源码静态分析
+// 6. 纯 VBA 源码静态分析
 const sourceUnits = [
   {
     name: 'Module1.bas',
@@ -282,16 +299,20 @@ console.log('静态分析完成。是否执行代码:', parsedAnalysis.project.c
 
 ### 2. 工作表单元格与工作簿威胁扫描器
 
-针对工作簿公式、定义名及工作表元数据进行威胁筛查：
+`vba-insight` 针对工作簿公式、定义名及工作表元数据进行 8 项专业安全规则筛查：
 
-- **动态数据交换（DDE）注入**: 捕捉 `=cmd|'/c calc'!A0` 或 `="cmd.exe"|...` 等 DDE 执行公式。
-- **传统 XLM 4.0 宏**: 标记 `=EXEC(...)`、`=CALL(...)`、`=REGISTER(...)` 等 Excel 4.0 宏公式。
-- **数据外发（Data Exfiltration）**: 识别能够隐蔽将敏感单元格内容通过 HTTP 发送至远端服务器的 `=WEBSERVICE(...)` 公式。
-- **远程代码注入**: 标记 UNC 共享路径（`\\attacker\share`）与远程 URL（`http://`、`ftp://`）。
-- **可疑超链接**: 捕捉指向可执行文件或脚本的 `=HYPERLINK(...)` 公式（`.exe`、`.scr`、`.bat`、`.ps1`、`.vbs`、`.js`）。
+| 规则编号 | 违规类型 | 严重程度 | 规则描述与检测逻辑 |
+|---|---|:---:|---|
+| `VBA-CELL-001` | `DDEExecutionFormula` | **Critical** | 工作表单元格或定义名称包含通过动态数据交换（DDE）启动外部进程的公式。 |
+| `VBA-CELL-002` | `XlmMacroExecutionFormula` | **Critical** | 工作表单元格或定义名称包含 Excel 4.0（XLM）宏执行函数（如 `EXEC`, `CALL`, `REGISTER` 等）。 |
+| `VBA-CELL-003` | `RemoteWorkbookLink` | **High** | 单元格公式引用远端外部工作簿路径（UNC 共享 `\\server\share` 或 HTTP/HTTPS）。 |
+| `VBA-CELL-004` | `DataExfiltrationFormula` | **Medium** | 单元格使用 `=WEBSERVICE(...)` 或 `FILTERXML` 公式，可隐蔽将敏感数据发送至外部。 |
+| `VBA-CELL-005` | `SuspiciousDownloadHyperlink` | **High** | 工作表 `=HYPERLINK(...)` 公式指向可执行文件、脚本、压缩包或伪协议（`.exe`, `.bat`, `search-ms:` 等）。 |
+| `VBA-CELL-006` | `AutoExecDefinedName` | **High** | 工作簿定义名称（如 `Auto_Open`、`_xlnm.Auto_Open`、`Auto_Close`）触发宏自动执行。 |
+| `VBA-CELL-007` | `VeryHiddenWorksheet` | **Low** | 工作表被标记为 `state="veryHidden"`，在标准 Excel 用户界面中不可见，通常用于隐匿恶意载荷。 |
+| `VBA-CELL-008` | `XlmMacroSheetPresent` | **Critical** | 工作簿包含容易被恶意利用的传统 Excel 4.0 宏工作表。 |
+
 - **全角字符混淆逃逸防御**: 在检查公式前，自动将全角字符（`U+FF01`–`U+FF5E`、`U+3000`）规范化映射为标准 ASCII，破坏利用全角字符绕过安全检查的企图。
-- **工作簿自动执行触发器**: 扫描工作簿定义名称中的 `Auto_Open`、`_xlnm.Auto_Open`、`Auto_Close` 等触发器。
-- **veryHidden 隐蔽工作表检测**: 识别标记为 `state="veryHidden"` 的极度隐藏工作表，防范攻击者在其中潜伏恶意宏荷载。
 
 ---
 

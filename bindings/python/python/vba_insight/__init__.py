@@ -81,6 +81,45 @@ def inspect_file_sarif(
     return _native.inspect_macro_file_sarif(arg, uri)
 
 
+def disasm_file(target: InputType) -> list[dict[str, Any]]:
+    """Disassemble VBA P-code instructions from an Office macro container into Python dictionaries.
+
+    Args:
+        target: File path (str or Path) or file contents (bytes/bytearray).
+
+    Returns:
+        list of module disassembly dictionaries with instruction mnemonic, opcode, and operands.
+    """
+    raw_json = disasm_file_json(target)
+    return json.loads(raw_json)
+
+
+def disasm_file_json(target: InputType) -> str:
+    """Disassemble VBA P-code instructions from an Office macro container and return as JSON.
+
+    Args:
+        target: File path (str or Path) or file contents (bytes/bytearray).
+
+    Returns:
+        JSON string containing disassembled P-code modules.
+    """
+    arg = str(target) if isinstance(target, Path) else target
+    return _native.disasm_macro_file_json(arg)
+
+
+def disasm_file_markdown(target: InputType) -> str:
+    """Generate a formatted Markdown disassembly report of VBA P-code for an Office macro container.
+
+    Args:
+        target: File path (str or Path) or file contents (bytes/bytearray).
+
+    Returns:
+        Markdown disassembly report string.
+    """
+    arg = str(target) if isinstance(target, Path) else target
+    return _native.disasm_macro_file_markdown(arg)
+
+
 def analyze_sources(
     sources: list[tuple[str, str]],
     *,
@@ -120,6 +159,9 @@ __all__ = [
     "__version__",
     "analyze_sources",
     "analyze_sources_json",
+    "disasm_file",
+    "disasm_file_json",
+    "disasm_file_markdown",
     "inspect_file",
     "inspect_file_json",
     "inspect_file_markdown",

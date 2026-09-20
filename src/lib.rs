@@ -65,13 +65,14 @@ pub mod zip;
 pub use analyze::{AnalysisOptions, analyze, detect_entry_points};
 pub use export::{
     Disclosure, disasm_to_json, disasm_to_markdown, inspect_to_json, inspect_to_markdown,
-    stomping_to_json, stomping_to_markdown, stomping_to_sarif, to_dot, to_dot_with_disclosure,
-    to_json,
+    inspection_to_sarif, stomping_to_json, stomping_to_markdown, stomping_to_sarif, to_dot,
+    to_dot_with_disclosure, to_json,
 };
 pub use extract::{
-    ExtractedModule, ExtractedModulePCodeAnalysis, ExtractedProject, ExtractedProjectPCodeAnalysis,
-    PCodeAnalysisOptions, detect_project_stomping, disassemble_extracted_module,
-    disassemble_extracted_project, extract_macro_container, extract_xlsm,
+    CellThreat, ExtractedModule, ExtractedModulePCodeAnalysis, ExtractedProject,
+    ExtractedProjectPCodeAnalysis, PCodeAnalysisOptions, detect_project_stomping,
+    disassemble_extracted_module, disassemble_extracted_project, extract_macro_container,
+    extract_xlsm,
 };
 pub use formula_eval::{
     FormulaEvaluation, FormulaEvaluationLimits, FormulaValue, evaluate_formula,

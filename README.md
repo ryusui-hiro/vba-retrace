@@ -193,15 +193,21 @@ if cell_threats:
         print(f"  - {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
 
 # 3. Export OASIS SARIF v2.1.0 report for GitHub Advanced Security / CI integration
+# (Includes both VBA Stomping VBA-STOMP-001..010 and Cell Threat VBA-CELL-001..008 rules)
 sarif_json = vba_insight.inspect_file_sarif("suspicious.xlsm")
 with open("security_report.sarif", "w", encoding="utf-8") as f:
     f.write(sarif_json)
 
-# 4. Export a formatted Markdown inspection summary
+# 4. Disassemble compiled VBA P-code bytecode instructions
+pcode_modules = vba_insight.disasm_file("suspicious.xlsm")
+for mod in pcode_modules:
+    print(f"Module: {mod['module_name']} - {len(mod['lines'])} pcode lines")
+
+# 5. Export a formatted Markdown inspection summary
 markdown_summary = vba_insight.inspect_file_markdown("suspicious.xlsm")
 print(markdown_summary)
 
-# 5. Pure static analysis of VBA source units
+# 6. Pure static analysis of VBA source units
 vba_sources = [
     ("Module1.bas", "Public Sub Test()\n    MsgBox \"Hello\"\nEnd Sub\n")
 ]
@@ -221,6 +227,7 @@ import {
   inspectMacroFileJson,
   inspectMacroFileSarif,
   inspectMacroFileMarkdown,
+  disasmMacroFileJson,
   analyzeSourcesJson,
 } from 'vba-insight';
 
@@ -239,15 +246,25 @@ if (report.stomping?.has_stomping) {
   }
 }
 
+// Check dangerous worksheet cell threats (DDE, XLM, WEBSERVICE)
+const cellThreats = report.analysis?.workbook_structure?.cell_threats ?? [];
+for (const threat of cellThreats) {
+  console.warn(`  - [${threat.threat_kind}] ${threat.coordinate}: ${threat.description}`);
+}
+
 // 3. Export SARIF v2.1.0 report for CI code scanning
 const sarifReport = inspectMacroFileSarif(fileBuffer, 'suspicious.xlsm');
 fs.writeFileSync('macro-scan.sarif', sarifReport);
 
-// 4. Generate GitHub-flavored Markdown inspection report
+// 4. Disassemble compiled P-code instructions
+const pcodeJson = disasmMacroFileJson(fileBuffer);
+console.log('P-Code modules count:', JSON.parse(pcodeJson).length);
+
+// 5. Generate GitHub-flavored Markdown inspection report
 const markdownReport = inspectMacroFileMarkdown(fileBuffer);
 console.log(markdownReport);
 
-// 5. Static analysis of raw VBA source text
+// 6. Static analysis of raw VBA source text
 const sourceUnits = [
   {
     name: 'Module1.bas',
@@ -282,16 +299,20 @@ console.log('Analysis completed. Code executed:', parsedAnalysis.project.code_ex
 
 ### 2. Worksheet Cell & Workbook Threat Scanner
 
-Scans workbook cell formulas, defined names, and worksheet metadata:
+`vba-insight` scans workbook cell formulas, defined names, and worksheet metadata against 8 dedicated security rules:
 
-- **Dynamic Data Exchange (DDE) Injection**: Detects DDE execution vectors such as `=cmd|'/c calc'!A0` or `="cmd.exe"|...`.
-- **Legacy XLM 4.0 Macros**: Flags execution via Excel 4.0 macro formulas including `=EXEC(...)`, `=CALL(...)`, and `=REGISTER(...)`.
-- **Data Exfiltration**: Detects `=WEBSERVICE(...)` formulas capable of silently transmitting sensitive cell values to remote servers.
-- **Remote Injection**: Flags UNC remote paths (`\\attacker\share`) and remote URLs (`http://`, `ftp://`).
-- **Suspicious Hyperlinks**: Identifies `=HYPERLINK(...)` formulas targeting executable files or scripts (`.exe`, `.scr`, `.bat`, `.ps1`, `.vbs`, `.js`).
+| Rule ID | Finding Kind | Severity | Description & Detection Logic |
+|---|---|:---:|---|
+| `VBA-CELL-001` | `DDEExecutionFormula` | **Critical** | Worksheet cell or defined name contains a formula executing commands via Dynamic Data Exchange (DDE). |
+| `VBA-CELL-002` | `XlmMacroExecutionFormula` | **Critical** | Worksheet cell or defined name contains an Excel 4.0 (XLM) macro expression executing code or launching processes. |
+| `VBA-CELL-003` | `RemoteWorkbookLink` | **High** | Worksheet cell formula references remote external workbook paths over UNC (`\\server\share`) or HTTP/HTTPS. |
+| `VBA-CELL-004` | `DataExfiltrationFormula` | **Medium** | Worksheet cell uses `=WEBSERVICE(...)` or `FILTERXML` capable of silently transmitting sensitive cell values externally. |
+| `VBA-CELL-005` | `SuspiciousDownloadHyperlink` | **High** | Worksheet `=HYPERLINK(...)` formula points to an executable, script, archive, or custom protocol handler (`.exe`, `.scr`, `.bat`, `search-ms:`, etc.). |
+| `VBA-CELL-006` | `AutoExecDefinedName` | **High** | Workbook defined name (such as `Auto_Open`, `_xlnm.Auto_Open`, or `Auto_Close`) triggers automatic macro execution. |
+| `VBA-CELL-007` | `VeryHiddenWorksheet` | **Low** | Worksheet visibility is set to `state="veryHidden"` to cloak malicious macro payloads from the standard Excel UI. |
+| `VBA-CELL-008` | `XlmMacroSheetPresent` | **Critical** | Workbook contains a legacy Excel 4.0 macro sheet, frequently leveraged in evasion payloads. |
+
 - **Full-Width Character Evasion Defense**: Automatically normalizes full-width Unicode characters (`U+FF01`–`U+FF5E`, `U+3000`) to standard ASCII prior to formula inspection, neutralizing obfuscation tricks.
-- **Workbook Auto-Exec Triggers**: Scans workbook defined names for `Auto_Open`, `_xlnm.Auto_Open`, and `Auto_Close` execution triggers.
-- **VeryHidden Worksheet Detection**: Detects hidden sheets marked as `state="veryHidden"`, commonly used to conceal malicious macro payloads.
 
 ---
 
