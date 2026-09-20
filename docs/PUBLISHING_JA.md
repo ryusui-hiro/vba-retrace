@@ -41,19 +41,31 @@
 4. これにより、初回リリース実行時に GitHub Actions から OIDC 認証で自動的にパッケージが登録・公開されます（手動アップロード不要）。
 
 ### B. npm (Node.js) の設定手順
-npm の Trusted Publishing（OIDC）は「既に存在するパッケージ」に設定する仕様となっているため、初回のみパッケージのブートストラップが必要です。
+npm の Trusted Publishing（OIDC）は「既に存在するパッケージ」に設定する仕様となっているため、初回公開には以下のいずれかの方法を使用します：
 
-1. [npm](https://www.npmjs.com/) にアカウントを作成・ログインします。
-2. **初回ブートストラップ（初回のみ）**:
-   - 後述の「リリースビルド手順」で生成された `.tgz` ファイル群（ルートおよび各プラットフォーム用 8 パッケージ）をローカルで `npm login` の後、公開します：
-     ```bash
-     npm publish dist/release/vba-insight-0.1.0.tgz --access public
-     # 各ネイティブプラットフォームパッケージも同様に公開
-     ```
-3. **Trusted Publisher の登録（初回公開後）**:
-   - npm サイト上のパッケージの **Settings** -> **Publishing Access** -> **Trusted Publishers** を開きます。
-   - GitHub Actions を選択し、リポジトリ `ryusui-hiro/vba-retrace`、ワークフロー `publish-npm.yml`、環境 `npm` を指定します。
-   - 以降のリリースは GitHub Actions から OIDC で完全自動公開されます。
+#### 方法 1: npm Access Token を GitHub Actions Secret に登録（推奨・自動化）
+1. [npm](https://www.npmjs.com/) にログインし、右上のユーザーアイコン -> **Access Tokens** -> **Generate New Token** を選択します。
+2. **Granular Access Token**（または **Classic Token - Automation**）を作成し、Permissions で **Read and write**（パッケージの公開権限）を選択します。
+3. トークンをコピーし、GitHub リポジトリ（または `npm` Environment）の Secret に **`NPM_TOKEN`** として登録します：
+   ```bash
+   gh secret set NPM_TOKEN --env npm
+   # またはリポジトリ共通シークレットとして登録
+   gh secret set NPM_TOKEN
+   ```
+4. これにより、以降は `publish-npm.yml` ワークフローを実行するだけで、全 9 種類のパッケージが自動的に npmjs.com へ一括公開されます：
+   ```bash
+   gh workflow run publish-npm.yml -f tag=v0.1.0
+   ```
+
+#### 方法 2: 初回のみローカルからブートストラップ公開
+1. ローカル端末で `npm login` を実行して認証します。
+2. `dist/release/` 配下の tarball（ルートおよび 8 つのネイティブプラットフォームパッケージ）を公開します：
+   ```bash
+   for pkg in dist/release/vba-insight-*.tgz dist/release/vba-insight-0.1.0.tgz; do
+     npm publish "$pkg" --access public
+   done
+   ```
+3. 初回公開完了後、npmjs.com 上でパッケージの **Settings** -> **Publishing Access** -> **Trusted Publishers** を開き、GitHub Actions（リポジトリ `ryusui-hiro/vba-retrace`、ワークフロー `publish-npm.yml`、環境 `npm`）を登録することで、次回以降はトークン不要の OIDC Trusted Publishing に移行できます。
 
 ### C. crates.io (Rust) の設定手順
 1. [crates.io](https://crates.io/) に GitHub アカウントでログインします。

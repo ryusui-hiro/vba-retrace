@@ -31,4 +31,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           PUBLIC_REGISTRY: npm
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: python3 scripts/publish-npm-release.py
