@@ -806,7 +806,7 @@ pub(crate) fn date_components_from_serial(serial: f64) -> Option<(i32, i32, i32,
     ))
 }
 
-fn days_in_month(year: i32, month: i32) -> i32 {
+pub(crate) fn days_in_month(year: i32, month: i32) -> i32 {
     match month {
         2 if is_leap_year(year) => 29,
         2 => 28,

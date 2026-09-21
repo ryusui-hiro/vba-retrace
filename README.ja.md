@@ -340,7 +340,7 @@ console.log('解析完了。コード実行の有無:', parsedAnalysis.project.c
 | `VBA-CELL-014` | `ExternalSubdocumentReference` | **High** | リレーションシップが外部サブドキュメントまたはフレーム（`subDocument` / `frame`）を HTTP/HTTPS/SMB 経由で参照している。 |
 
 - **コンテナレベル脅威検査**: マクロが存在しない DOCX/XLSX コンテナであっても、OOXML リレーションシップやパーツ構造からリモートテンプレートインジェクション、埋め込み OLE パッケージ、外部 Moniker リンク、ActiveX コントロールを自動検出。
-- **数式動的難読化解除（De-obfuscation）**: 難読化された複合数式を有界評価エンジンで動的解決。グリッド動的解決（`INDIRECT()`, `OFFSET()`, `ADDRESS()`）、複数セル範囲結合（`CONCAT()`, `TEXTJOIN()`）、2D テーブル参照（`INDEX()`, `VLOOKUP()`, `HLOOKUP()`, `MATCH()`）、基数・Unicode 変換（`HEX2DEC()`, `BIN2DEC()`, `UNICHAR()`）、文字列・数学関数（`CHAR()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`）を連鎖評価し、静的パターンマッチングをすり抜けるセル跨ぎの DDE 実行や LOLBins、遠隔ダウンロードペイロードを自動暴きます。
+- **数式動的難読化解除（De-obfuscation）**: 難読化された複合数式を有界評価エンジンで動的解決。グリッド動的解決（`INDIRECT()`, `OFFSET()`, `ADDRESS()`）、ビット演算暗号復号（`BITXOR()`, `BITAND()`, `BITOR()`, `BITLSHIFT()`, `BITRSHIFT()`）、最新動的検索（`XLOOKUP()`, `XMATCH()`）、テキスト分解（`TEXTBEFORE()`, `TEXTAFTER()`, `TEXTSPLIT()`）、複数セル範囲結合（`CONCAT()`, `TEXTJOIN()`）、2D テーブル参照（`INDEX()`, `VLOOKUP()`, `HLOOKUP()`, `MATCH()`）、基数・Unicode 変換（`HEX2DEC()`, `BIN2DEC()`, `UNICHAR()`）、文字列・数学関数（`CHAR()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`）を連鎖評価し、静的パターンマッチングをすり抜けるセル跨ぎの DDE 実行や LOLBins、遠隔ダウンロードペイロードを自動暴きます。
 - **全角文字難読化回避の正規化**: 数式検査前に全角英数字・記号（`U+FF01`〜`U+FF5E`、`U+3000`）を標準 ASCII に正規化し、難読化による検知回避を無力化。
 
 ---

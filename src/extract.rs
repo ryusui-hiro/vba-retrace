@@ -551,6 +551,16 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("indirect")
                 || f_lower.contains("offset")
                 || f_lower.contains("address")
+                || f_lower.contains("bitand")
+                || f_lower.contains("bitor")
+                || f_lower.contains("bitxor")
+                || f_lower.contains("bitlshift")
+                || f_lower.contains("bitrshift")
+                || f_lower.contains("xlookup")
+                || f_lower.contains("xmatch")
+                || f_lower.contains("textbefore")
+                || f_lower.contains("textafter")
+                || f_lower.contains("textsplit")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(

