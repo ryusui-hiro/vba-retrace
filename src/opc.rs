@@ -32,17 +32,17 @@ const STRICT_OFFICE_RELATIONSHIPS_NS: &str =
     "http://purl.oclc.org/ooxml/officeDocument/relationships";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TargetMode {
+pub(crate) enum TargetMode {
     Internal,
     External,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Relationship {
-    id: String,
-    relationship_type: String,
-    target: String,
-    target_mode: TargetMode,
+pub(crate) struct Relationship {
+    pub(crate) id: String,
+    pub(crate) relationship_type: String,
+    pub(crate) target: String,
+    pub(crate) target_mode: TargetMode,
 }
 
 pub(crate) struct XlsmPackageParts {
@@ -184,7 +184,7 @@ fn unique_relationship<'a>(
     Ok(relationship)
 }
 
-fn read_relationships(
+pub(crate) fn read_relationships(
     archive: &ZipArchive<'_>,
     part_name: &str,
     max_relationships: usize,

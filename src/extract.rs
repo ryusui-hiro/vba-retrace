@@ -862,6 +862,12 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
             }
         }
     }
+    scan_ooxml_package_threats(
+        &zip,
+        &mut extracted.cell_threats,
+        &mut extracted.diagnostics,
+        limits.max_zip_entries,
+    );
     Ok(extracted)
 }
 
@@ -1208,8 +1214,32 @@ pub fn extract_macro_container(data: &[u8], limits: &Limits) -> Result<Extracted
                                 "OPC resolution failed ({orig_err}); extracted directly from entry '{}'",
                                 entry.name
                             ));
+                            scan_ooxml_package_threats(
+                                &zip,
+                                &mut extracted.cell_threats,
+                                &mut extracted.diagnostics,
+                                limits.max_zip_entries,
+                            );
                             return Ok(extracted);
                         }
+                    }
+                    let mut package_threats = Vec::new();
+                    let mut package_diagnostics = Vec::new();
+                    scan_ooxml_package_threats(
+                        &zip,
+                        &mut package_threats,
+                        &mut package_diagnostics,
+                        limits.max_zip_entries,
+                    );
+                    if !package_threats.is_empty() {
+                        let mut project = ExtractedProject::default();
+                        project.diagnostics.push(format!(
+                            "No VBA macro code found in container, but detected {} package-level threat(s)",
+                            package_threats.len()
+                        ));
+                        project.diagnostics.extend(package_diagnostics);
+                        project.cell_threats = package_threats;
+                        return Ok(project);
                     }
                 }
                 Err(orig_err)
@@ -1219,6 +1249,175 @@ pub fn extract_macro_container(data: &[u8], limits: &Limits) -> Result<Extracted
         extract_vba_project(data, limits)
     } else {
         Err("unrecognized macro container format (expected ZIP or CFB/OLE header)".into())
+    }
+}
+
+/// Scan an OOXML ZIP package for container-level security threats, including:
+/// - Remote Template Injection (`VBA-CELL-010`, Critical)
+/// - Embedded OLE / executable package (`VBA-CELL-011`, High)
+/// - External OLE object reference (`VBA-CELL-012`, High)
+/// - Embedded ActiveX control (`VBA-CELL-013`, Medium)
+/// - External subdocument / frame reference (`VBA-CELL-014`, High)
+pub fn scan_ooxml_package_threats(
+    zip: &ZipArchive<'_>,
+    threats: &mut Vec<CellThreat>,
+    diagnostics: &mut Vec<String>,
+    max_entries: usize,
+) {
+    fn is_external_target(target: &str, mode: crate::opc::TargetMode) -> bool {
+        if mode == crate::opc::TargetMode::External {
+            return true;
+        }
+        let t = target.trim();
+        let lower = t.to_ascii_lowercase();
+        lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || lower.starts_with("ftp://")
+            || lower.starts_with("file://")
+            || lower.starts_with("\\\\")
+            || lower.starts_with("//")
+            || lower.starts_with("mhtml:")
+            || lower.starts_with("ms-msdt:")
+            || lower.starts_with("search-ms:")
+            || lower.starts_with("javascript:")
+    }
+
+    // 1. Inspect package parts / entry names for embedded binaries and controls
+    for entry in zip.entries.iter().take(max_entries) {
+        let name_lower = entry.name.to_ascii_lowercase();
+        let is_dir = entry.name.ends_with('/') || entry.name.ends_with('\\');
+        if is_dir {
+            continue;
+        }
+
+        // Check for embedded OLE / executable packages (e.g. xl/embeddings/oleObject1.bin, word/embeddings/package.bin)
+        if name_lower.contains("/embeddings/")
+            || name_lower.starts_with("embeddings/")
+            || name_lower.contains("\\embeddings\\")
+        {
+            let coord = format!("part:{}", entry.name);
+            if !threats.iter().any(|t| t.coordinate == coord) {
+                let desc = format!(
+                    "Embedded OLE object or package detected in container part '{}' (uncompressed size: {} bytes)",
+                    entry.name, entry.uncompressed_size
+                );
+                diagnostics.push(format!("Security warning: {desc}"));
+                threats.push(CellThreat {
+                    sheet_name: "Package".into(),
+                    cell_ref: entry.name.clone(),
+                    coordinate: coord,
+                    threat_kind: "EmbeddedOlePackage".into(),
+                    severity: "High".into(),
+                    formula: entry.name.clone(),
+                    description: desc,
+                });
+            }
+        }
+
+        // Check for embedded ActiveX controls (e.g. xl/activeX/activeX1.bin)
+        if name_lower.contains("/activex/")
+            || name_lower.starts_with("activex/")
+            || name_lower.contains("\\activex\\")
+        {
+            let coord = format!("part:{}", entry.name);
+            if !threats.iter().any(|t| t.coordinate == coord) {
+                let desc = format!(
+                    "Embedded ActiveX control detected in container part '{}' (uncompressed size: {} bytes)",
+                    entry.name, entry.uncompressed_size
+                );
+                diagnostics.push(format!("Security warning: {desc}"));
+                threats.push(CellThreat {
+                    sheet_name: "Package".into(),
+                    cell_ref: entry.name.clone(),
+                    coordinate: coord,
+                    threat_kind: "ActiveXControl".into(),
+                    severity: "Medium".into(),
+                    formula: entry.name.clone(),
+                    description: desc,
+                });
+            }
+        }
+    }
+
+    // 2. Inspect all OPC relationship parts (.rels) for external references
+    let rels_entries: Vec<String> = zip
+        .entries
+        .iter()
+        .take(max_entries)
+        .filter(|e| e.name.to_ascii_lowercase().ends_with(".rels"))
+        .map(|e| e.name.clone())
+        .collect();
+
+    for rels_part in rels_entries {
+        if let Ok(relationships) = crate::opc::read_relationships(zip, &rels_part, max_entries) {
+            for rel in relationships {
+                let rel_type = rel.relationship_type.to_ascii_lowercase();
+                let is_ext = is_external_target(&rel.target, rel.target_mode);
+
+                // Check for Remote Template Injection (attachedTemplate)
+                if rel_type.contains("attachedtemplate") && is_ext {
+                    let coord = format!("rel:{}->{}", rels_part, rel.id);
+                    if !threats.iter().any(|t| t.coordinate == coord) {
+                        let desc = format!(
+                            "Remote Template Injection detected: relationship '{}' in '{}' targets external template '{}'",
+                            rel.id, rels_part, rel.target
+                        );
+                        diagnostics.push(format!("Security warning: {desc}"));
+                        threats.push(CellThreat {
+                            sheet_name: "Package".into(),
+                            cell_ref: rel.id.clone(),
+                            coordinate: coord,
+                            threat_kind: "RemoteTemplateInjection".into(),
+                            severity: "Critical".into(),
+                            formula: rel.target.clone(),
+                            description: desc,
+                        });
+                    }
+                }
+
+                // Check for External OLE Object links
+                if rel_type.contains("oleobject") && is_ext {
+                    let coord = format!("rel:{}->{}", rels_part, rel.id);
+                    if !threats.iter().any(|t| t.coordinate == coord) {
+                        let desc = format!(
+                            "External OLE object link detected: relationship '{}' in '{}' targets external object '{}'",
+                            rel.id, rels_part, rel.target
+                        );
+                        diagnostics.push(format!("Security warning: {desc}"));
+                        threats.push(CellThreat {
+                            sheet_name: "Package".into(),
+                            cell_ref: rel.id.clone(),
+                            coordinate: coord,
+                            threat_kind: "ExternalOleObject".into(),
+                            severity: "High".into(),
+                            formula: rel.target.clone(),
+                            description: desc,
+                        });
+                    }
+                }
+
+                // Check for External Subdocument / Frame references
+                if (rel_type.contains("subdocument") || rel_type.contains("frame")) && is_ext {
+                    let coord = format!("rel:{}->{}", rels_part, rel.id);
+                    if !threats.iter().any(|t| t.coordinate == coord) {
+                        let desc = format!(
+                            "External subdocument / frame reference detected: relationship '{}' in '{}' targets external resource '{}'",
+                            rel.id, rels_part, rel.target
+                        );
+                        diagnostics.push(format!("Security warning: {desc}"));
+                        threats.push(CellThreat {
+                            sheet_name: "Package".into(),
+                            cell_ref: rel.id.clone(),
+                            coordinate: coord,
+                            threat_kind: "ExternalSubdocument".into(),
+                            severity: "High".into(),
+                            formula: rel.target.clone(),
+                            description: desc,
+                        });
+                    }
+                }
+            }
+        }
     }
 }
 

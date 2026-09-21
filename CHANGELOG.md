@@ -1,5 +1,8 @@
 # Changelog
 
+- Added container-level OOXML package threat scanning (`scan_ooxml_package_threats`) across `.xlsm`, `.docm`, `.pptm`, and macro-less OOXML containers (`.docx`, `.xlsx`), detecting Remote Template Injection (`VBA-CELL-010`), Embedded OLE Packages / Equation Editor droppers (`VBA-CELL-011`), External OLE Object links (`VBA-CELL-012`), Embedded ActiveX controls (`VBA-CELL-013`), and External Subdocument references (`VBA-CELL-014`).
+- Enhanced `extract_macro_container` and `inspect_macro_container` with graceful fallback for weaponized macro-less containers (such as Word documents with external template injection or Excel documents with embedded OLE packages without VBA modules), extracting and reporting package threats in JSON and SARIF.
+- Extended SARIF v2.1.0 and JSON exports with complete rule definitions, descriptors, and results for `VBA-CELL-010` through `VBA-CELL-014` with logical location mapping for package parts and OPC relationships.
 - Extended Excel formula evaluation engine (`formula_eval`) with 18 additional functions:
   - **Radix & Base Conversions**: `HEX2DEC`, `DEC2HEX`, `BIN2DEC`, `DEC2BIN`, `OCT2DEC`, `DEC2OCT` (supporting 40-bit two's complement and padding).
   - **Unicode Encoding**: `UNICHAR` and `UNICODE` (supporting full UTF-8 Unicode code points and surrogate exclusion).

@@ -206,7 +206,7 @@ if cell_threats:
         print(f"  - [{threat['rule_id']}] {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
 
 # 3. GitHub Advanced Security / CI 統合用の OASIS SARIF v2.1.0 レポートを出力
-# (VBA Stomping VBA-STOMP-001..010 および セル脅威 VBA-CELL-001..009 の双方を含みます)
+# (VBA Stomping VBA-STOMP-001..010 および コンテナ・セル脅威 VBA-CELL-001..014 の双方を含みます)
 sarif_json = vba_insight.inspect_file_sarif("suspicious.xlsm")
 with open("security_report.sarif", "w", encoding="utf-8") as f:
     f.write(sarif_json)
@@ -318,9 +318,9 @@ console.log('解析完了。コード実行の有無:', parsedAnalysis.project.c
 | `VBA-STOMP-009` | `ProjectLockedOrUnviewable` | **Low** | VBA プロジェクトに保護・ロック属性（`CMG`, `DPB`, `GC`）が付与されており、標準の Office VBA IDE から閲覧できないように隠蔽されている。 |
 | `VBA-STOMP-010` | `SourceCorruptedWithValidPCode` | **Critical** | モジュールのソースコード格納コンテナが MS-OVBA 解凍に失敗または破損しているにもかかわらず、有効で実行可能な P-Code が存在している。 |
 
-### 2. ワークシート・セル & ブック脅威スキャナー
+### 2. コンテナパッケージ & ワークシート・セル脅威スキャナー
 
-`vba-insight` は、ワークシート数式、定義名、シートメタデータを以下の 9 つの専用セキュリティルールで検査します：
+`vba-insight` は、コンテナパッケージ（OOXML リレーションシップ、埋め込み OLE パッケージ）、ワークシート数式、定義名、シートメタデータを以下の 14 の専用セキュリティルールで検査します：
 
 | ルール ID | 検知種別 | 重要度 | 検出ロジックと概要 |
 |---|---|:---:|---|
@@ -333,7 +333,13 @@ console.log('解析完了。コード実行の有無:', parsedAnalysis.project.c
 | `VBA-CELL-007` | `VeryHiddenWorksheet` | **Low** | ワークシートが `state="veryHidden"` に設定されており、Excel 通常 UI から悪意あるシートが隠蔽されている。 |
 | `VBA-CELL-008` | `XlmMacroSheetPresent` | **Critical** | マルウェアの攻撃ペイロードとして多用される、旧形式の Excel 4.0 マクロシートが存在する。 |
 | `VBA-CELL-009` | `DeobfuscatedThreatFormula` | **Critical** | 数式難読化（`CHAR`, `CONCATENATE`, 文字列置換等）が動的に評価され、実行可能ファイル、コマンド、または DDE ペイロードに解決される。 |
+| `VBA-CELL-010` | `RemoteTemplateInjection` | **Critical** | リレーションシップが外部テンプレート（`attachedTemplate`）を HTTP/HTTPS/SMB 経由で参照し、遠隔の不正 dotm ペイロードを読み込む。 |
+| `VBA-CELL-011` | `EmbeddedOlePackage` | **High** | OOXML コンテナ内の `/embeddings/` に埋め込み OLE バイナリまたはパッケージ（CVE-2017-11882 数式エディタ攻撃等）が存在する。 |
+| `VBA-CELL-012` | `ExternalOleObject` | **High** | リレーションシップが外部 OLE オブジェクト（`oleObject`）を HTTP/HTTPS/SMB 経由で参照し、遠隔 Moniker や脆弱性悪用を可能にする。 |
+| `VBA-CELL-013` | `ActiveXControlPresent` | **Medium** | OOXML コンテナ内の `/activex/` に埋め込み ActiveX コントロールが存在し、マクロレス悪用を可能にする。 |
+| `VBA-CELL-014` | `ExternalSubdocumentReference` | **High** | リレーションシップが外部サブドキュメントまたはフレーム（`subDocument` / `frame`）を HTTP/HTTPS/SMB 経由で参照している。 |
 
+- **コンテナレベル脅威検査**: マクロが存在しない DOCX/XLSX コンテナであっても、OOXML リレーションシップやパーツ構造からリモートテンプレートインジェクション、埋め込み OLE パッケージ、外部 Moniker リンク、ActiveX コントロールを自動検出。
 - **数式動的難読化解除（De-obfuscation）**: 難読化された複合数式（`CHAR()`, `UNICHAR()`, `HEX2DEC()`, `BIN2DEC()`, `INDEX()`, `VLOOKUP()`, `TEXTJOIN()`, `&`, `CONCATENATE()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`）を有界評価エンジンで動的に解決し、静的パターンマッチングをすり抜ける隠蔽LOLBinsやDDE実行、ダウンロードペイロードを自動暴きます。
 - **全角文字難読化回避の正規化**: 数式検査前に全角英数字・記号（`U+FF01`〜`U+FF5E`、`U+3000`）を標準 ASCII に正規化し、難読化による検知回避を無力化。
 

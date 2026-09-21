@@ -206,7 +206,7 @@ if cell_threats:
         print(f"  - [{threat['rule_id']}] {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
 
 # 3. Export OASIS SARIF v2.1.0 report for GitHub Advanced Security / CI integration
-# (Includes both VBA Stomping VBA-STOMP-001..010 and Cell Threat VBA-CELL-001..009 rules)
+# (Includes both VBA Stomping VBA-STOMP-001..010 and Container/Cell Threat VBA-CELL-001..014 rules)
 sarif_json = vba_insight.inspect_file_sarif("suspicious.xlsm")
 with open("security_report.sarif", "w", encoding="utf-8") as f:
     f.write(sarif_json)
@@ -318,9 +318,9 @@ console.log('Analysis completed. Code executed:', parsedAnalysis.project.code_ex
 | `VBA-STOMP-009` | `ProjectLockedOrUnviewable` | **Low** | VBA project has protection/lock attributes (`CMG`, `DPB`, `GC`) rendering it unviewable in the standard Office VBA IDE. |
 | `VBA-STOMP-010` | `SourceCorruptedWithValidPCode` | **Critical** | Source code container fails MS-OVBA decompression or is corrupted while valid compiled P-code remains executable. |
 
-### 2. Worksheet Cell & Workbook Threat Scanner
+### 2. Container Package & Worksheet Cell Threat Scanner
 
-`vba-insight` scans workbook cell formulas, defined names, and worksheet metadata against 9 dedicated security rules:
+`vba-insight` scans container packages (OOXML relationships, embedded OLE parts), workbook cell formulas, defined names, and worksheet metadata against 14 dedicated security rules:
 
 | Rule ID | Finding Kind | Severity | Description & Detection Logic |
 |---|---|:---:|---|
@@ -333,7 +333,13 @@ console.log('Analysis completed. Code executed:', parsedAnalysis.project.code_ex
 | `VBA-CELL-007` | `VeryHiddenWorksheet` | **Low** | Worksheet visibility is set to `state="veryHidden"` to cloak malicious macro payloads from the standard Excel UI. |
 | `VBA-CELL-008` | `XlmMacroSheetPresent` | **Critical** | Workbook contains a legacy Excel 4.0 macro sheet, frequently leveraged in evasion payloads. |
 | `VBA-CELL-009` | `DeobfuscatedThreatFormula` | **Critical** | Formula obfuscation (`CHAR`, `CONCATENATE`, string substitution) dynamically resolves to an executable, command, or DDE payload. |
+| `VBA-CELL-010` | `RemoteTemplateInjection` | **Critical** | Relationship links to an external template over HTTP/HTTPS/SMB (`attachedTemplate`), loading remote malicious dotm payloads. |
+| `VBA-CELL-011` | `EmbeddedOlePackage` | **High** | OOXML package contains embedded OLE binary or packager payload in `/embeddings/` (e.g., CVE-2017-11882 exploit droppers). |
+| `VBA-CELL-012` | `ExternalOleObject` | **High** | Relationship links to an external OLE object over HTTP/HTTPS/SMB (`oleObject`), enabling remote Moniker or exploit execution. |
+| `VBA-CELL-013` | `ActiveXControlPresent` | **Medium** | OOXML package contains embedded ActiveX control binary in `/activex/`, enabling macro-less exploitation. |
+| `VBA-CELL-014` | `ExternalSubdocumentReference` | **High** | Relationship links to an external subdocument or frame over HTTP/HTTPS/SMB (`subDocument` / `frame`). |
 
+- **Container-Level Threat Inspection**: Automatically scans OOXML package relationships and parts for Remote Template Injection, embedded OLE packager binaries, external Moniker links, and ActiveX controls even in macro-less weaponized containers.
 - **Dynamic Formula De-Obfuscation**: Evaluates complex obfuscated formulas (`CHAR()`, `UNICHAR()`, `HEX2DEC()`, `BIN2DEC()`, `INDEX()`, `VLOOKUP()`, `TEXTJOIN()`, `&`, `CONCATENATE()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`) to uncover hidden LOLBins, DDE execution, and download payloads that evade static pattern matching.
 - **Full-Width Character Evasion Defense**: Automatically normalizes full-width Unicode characters (`U+FF01`–`U+FF5E`, `U+3000`) to standard ASCII prior to formula inspection, neutralizing obfuscation tricks.
 
