@@ -320,7 +320,7 @@ console.log('解析完了。コード実行の有無:', parsedAnalysis.project.c
 
 ### 2. コンテナパッケージ & ワークシート・セル脅威スキャナー
 
-`vba-insight` は、コンテナパッケージ（OOXML リレーションシップ、埋め込み OLE パッケージ）、ワークシート数式、定義名、シートメタデータを以下の 14 の専用セキュリティルールで検査します：
+`vba-insight` は、コンテナパッケージ（OOXML リレーションシップ、埋め込み OLE パッケージ）、ワークシート数式、定義名、シートメタデータを以下の 19 の専用セキュリティルールで検査します：
 
 | ルール ID | 検知種別 | 重要度 | 検出ロジックと概要 |
 |---|---|:---:|---|
@@ -341,9 +341,11 @@ console.log('解析完了。コード実行の有無:', parsedAnalysis.project.c
 | `VBA-CELL-015` | `SuspiciousPrinterSettings` | **High** | プリンター設定（`printerSettings*.bin`）に外部 UNC パス（`\\host\share`）、遠隔 URL、またはコマンド実行トリガー（CVE-2023-36884 / Storm-0978）が含まれている。 |
 | `VBA-CELL-016` | `CustomXmlPayloadSmuggling` | **High** | カスタム XML パーツ（`/customXml/*.xml`）内に Base64 化された PE 実行バイナリ、XXE 外部実体インジェクション、またはスクリプト/HTML ペイロードが隠蔽密輸されている。 |
 | `VBA-CELL-017` | `SuspiciousProtocolHandler` | **Critical** | リレーションシップのターゲットが危険なカスタムプロトコルハンドラー（`ms-msdt:` / Follina CVE-2022-30190、`search-ms:`、`ms-appinstaller:`、`mhtml:`、`javascript:`、`vbscript:` 等）を参照している。 |
+| `VBA-CELL-018` | `SuspiciousDrawingAction` | **High** | 描画シェイプ、スライドトリガー、または VML ボタンのアクションにマウスホバー実行（`<a:hlinkHover>`）、マクロ実行リンク（`ppaction://macro`、`<x:FmlaMacro>`）、危険な実行可能ファイルリンクが定義されている。 |
+| `VBA-CELL-019` | `ExternalDataConnection` | **High** | 外部データ接続（`/xl/connections.xml`、クエリテーブル、差し込み印刷等）に NTLM 認証詐取を狙う UNC パス、リモート Web クエリ、またはコマンドインジェクション（`xp_cmdshell`、PowerShell 等）が含まれている。 |
 
-- **コンテナレベル脅威検査**: マクロが存在しない DOCX/XLSX コンテナであっても、OOXML リレーションシップやパーツ構造からリモートテンプレートインジェクション、埋め込み OLE パッケージ、外部 Moniker リンク、ActiveX コントロール、プリンター設定 UNC 誘導、カスタム XML ペイロード密輸、および危険なプロトコルハンドラーを自動検出。
-- **数式動的難読化解除（De-obfuscation）**: 難読化された複合数式を有界評価エンジンで動的解決。グリッド動的解決（`INDIRECT()`, `OFFSET()`, `ADDRESS()`）、ビット演算暗号復号（`BITXOR()`, `BITAND()`, `BITOR()`, `BITLSHIFT()`, `BITRSHIFT()`）、基数変換（`BASE()`, `DECIMAL()`, `HEX2DEC()`, `BIN2DEC()`）、最新動的配列変形（`TAKE()`, `DROP()`, `CHOOSEROWS()`, `CHOOSECOLS()`, `TOROW()`, `TOCOL()`, `EXPAND()`）、最新動的検索（`XLOOKUP()`, `XMATCH()`）、テキスト分解・シリアライズ（`TEXTBEFORE()`, `TEXTAFTER()`, `TEXTSPLIT()`, `ARRAYTOTEXT()`, `VALUETOTEXT()`）、複数セル範囲結合（`CONCAT()`, `TEXTJOIN()`）、2D テーブル参照（`INDEX()`, `VLOOKUP()`, `HLOOKUP()`, `MATCH()`）、Unicode 変換（`UNICHAR()`, `UNICODE()`）、文字列・数学関数（`CHAR()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`）を連鎖評価し、静的パターンマッチングをすり抜けるセル跨ぎの DDE 実行や LOLBins、遠隔ダウンロードペイロードを自動暴きます。
+- **コンテナレベル脅威検査**: マクロが存在しない DOCX/XLSX コンテナであっても、OOXML リレーションシップ、描画オブジェクト、外部データ接続、およびパーツ構造からリモートテンプレートインジェクション、埋め込み OLE パッケージ、外部 Moniker リンク、ActiveX コントロール、プリンター設定 UNC 誘導、カスタム XML ペイロード密輸、描画ホバー/マクロアクション、外部データ接続 / NTLM 誘導、および危険なプロトコルハンドラーを自動検出。
+- **動的数式難読化解除**: ワークブック全体のセルグリッドにまたがる難読化数式を、動的セル参照解決（`INDIRECT()`、`OFFSET()`、`ADDRESS()`）、動的配列フィルタリング・ソート（`FILTER()`、`SORT()`、`SORTBY()`、`UNIQUE()`、`WRAPROWS()`、`WRAPCOLS()`）、ビット演算復号（`BITXOR()`、`BITAND()`、`BITOR()`、`BITLSHIFT()`、`BITRSHIFT()`）、基数変換（`BASE()`、`DECIMAL()`、`HEX2DEC()`、`BIN2DEC()`）、最新動的配列変形（`TAKE()`、`DROP()`、`CHOOSEROWS()`、`CHOOSECOLS()`、`TOROW()`、`TOCOL()`、`EXPAND()`）、最新動的検索（`XLOOKUP()`、`XMATCH()`）、テキスト分解・シリアライズ（`TEXTBEFORE()`、`TEXTAFTER()`、`TEXTSPLIT()`、`ARRAYTOTEXT()`、`VALUETOTEXT()`）、複数セル範囲結合（`CONCAT()`、`TEXTJOIN()`）、2D テーブル参照（`INDEX()`、`VLOOKUP()`、`HLOOKUP()`、`MATCH()`）、Unicode 変換（`UNICHAR()`、`UNICODE()`）、および文字列・数学関数（`CHAR()`、`MID()`、`SUBSTITUTE()`、`CHOOSE()`、`HYPERLINK()`、`ROWS()`、`COLUMNS()`、`MROUND()`）を有界評価することで、静的パターン照合を回避する隠蔽 LOLBins、セル連携 DDE 実行、遠隔ダウンロードペイロードを動的に復元検知。
 - **全角文字難読化回避の正規化**: 数式検査前に全角英数字・記号（`U+FF01`〜`U+FF5E`、`U+3000`）を標準 ASCII に正規化し、難読化による検知回避を無力化。
 
 ---

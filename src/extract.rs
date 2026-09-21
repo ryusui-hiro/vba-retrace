@@ -572,6 +572,15 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("torow")
                 || f_lower.contains("tocol")
                 || f_lower.contains("expand")
+                || f_lower.contains("wraprows")
+                || f_lower.contains("wrapcols")
+                || f_lower.contains("filter")
+                || f_lower.contains("sort")
+                || f_lower.contains("sortby")
+                || f_lower.contains("unique")
+                || f_lower.contains("rows")
+                || f_lower.contains("columns")
+                || f_lower.contains("mround")
                 || f_lower.contains("arraytotext")
                 || f_lower.contains("valuetotext")
                 || has_fn("hyperlink")
@@ -1287,6 +1296,8 @@ pub fn extract_macro_container(data: &[u8], limits: &Limits) -> Result<Extracted
 /// - Suspicious printer settings with UNC path or external target (`VBA-CELL-015`, High)
 /// - Custom XML payload / executable / XXE smuggling (`VBA-CELL-016`, High)
 /// - Suspicious protocol handlers (ms-msdt, search-ms, etc.) in relationships (`VBA-CELL-017`, Critical)
+/// - Suspicious drawing/shape action, hover trigger, or VML macro (`VBA-CELL-018`, High)
+/// - External data connection, web query, or NTLM coercion (`VBA-CELL-019`, High)
 pub fn scan_ooxml_package_threats(
     zip: &ZipArchive<'_>,
     threats: &mut Vec<CellThreat>,
@@ -1591,6 +1602,139 @@ pub fn scan_ooxml_package_threats(
                 }
             }
         }
+
+        // Check for suspicious drawings, slides, and VML form controls
+        let is_drawing_or_slide = (name_lower.contains("/drawings/drawing")
+            || name_lower.starts_with("drawings/drawing")
+            || name_lower.contains("\\drawings\\drawing")
+            || name_lower.contains("vmldrawing")
+            || name_lower.contains("/slides/slide")
+            || name_lower.starts_with("slides/slide")
+            || name_lower.contains("/notesslides/notesslide"))
+            && (name_lower.ends_with(".xml") || name_lower.ends_with(".vml"));
+        if is_drawing_or_slide {
+            let Ok(data) = zip.read(entry) else { continue };
+            let s = String::from_utf8_lossy(&data);
+            let s_lower = s.to_ascii_lowercase();
+
+            let mut indicator: Option<(&'static str, String)> = None;
+            if s_lower.contains("ppaction://program") {
+                indicator = Some((
+                    "Critical",
+                    "Shape or slide action launches external program ('ppaction://program')".into(),
+                ));
+            } else if s_lower.contains("ppaction://macro") {
+                indicator = Some((
+                    "High",
+                    "Shape or slide action executes macro ('ppaction://macro')".into(),
+                ));
+            } else if s_lower.contains("<a:hlinkhover") || s_lower.contains("hlinkhover") {
+                indicator = Some((
+                    "High",
+                    "Drawing object configured with mouse-over hover trigger ('<a:hlinkHover>')"
+                        .into(),
+                ));
+            } else if s_lower.contains("<x:fmlamacro>") {
+                let macro_name = if let Some(start) = s_lower.find("<x:fmlamacro>") {
+                    let rest = &s[start + 13..];
+                    if let Some(end) = rest.find("</") {
+                        rest[..end].trim().to_string()
+                    } else {
+                        "Unknown".into()
+                    }
+                } else {
+                    "Unknown".into()
+                };
+                indicator = Some((
+                    "High",
+                    format!("VML form control shape links to macro execution ('{macro_name}')"),
+                ));
+            }
+
+            if let Some((sev, details)) = indicator {
+                let coord = format!("part:{}", entry.name);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Suspicious drawing or shape action detected in part '{}': {details}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Package".into(),
+                        cell_ref: entry.name.clone(),
+                        coordinate: coord,
+                        threat_kind: "SuspiciousDrawingAction".into(),
+                        severity: sev.into(),
+                        formula: entry.name.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for external data connections and query tables
+        let is_connection = (name_lower.contains("connections.xml")
+            || name_lower.contains("querytable")
+            || name_lower.ends_with("settings.xml"))
+            && name_lower.ends_with(".xml");
+        if is_connection {
+            let Ok(data) = zip.read(entry) else { continue };
+            let s = String::from_utf8_lossy(&data);
+            let s_lower = s.to_ascii_lowercase();
+
+            let mut indicator: Option<(&'static str, String)> = None;
+            if s_lower.contains("xp_cmdshell")
+                || s_lower.contains("powershell")
+                || s_lower.contains("cmd.exe")
+            {
+                indicator = Some((
+                    "Critical",
+                    "External data connection contains shell command trigger".into(),
+                ));
+            } else if (s_lower.contains("type=\"4\"")
+                && (s_lower.contains("http://") || s_lower.contains("https://")))
+                || s_lower.contains("connection=\"url;http")
+                || s_lower.contains("connection=\"url;https")
+            {
+                indicator = Some((
+                    "High",
+                    "External web query data connection targets remote URL payload".into(),
+                ));
+            } else if s_lower.contains("data source=\\\\")
+                || s_lower.contains("data source=//")
+                || (s_lower.contains("connection=")
+                    && (s_lower.contains("\\\\") || s_lower.contains("//")))
+                || (s_lower.contains("<w:mailmerge")
+                    && (s_lower.contains("\\\\")
+                        || s_lower.contains("http://")
+                        || s_lower.contains("https://")))
+            {
+                indicator = Some((
+                    "High",
+                    "External data connection or MailMerge contains remote UNC path (NTLM credential coercion vector)".into(),
+                ));
+            }
+
+            if let Some((sev, details)) = indicator {
+                let coord = format!("part:{}", entry.name);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "External data connection security threat detected in part '{}': {details}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Package".into(),
+                        cell_ref: entry.name.clone(),
+                        coordinate: coord,
+                        threat_kind: "ExternalDataConnection".into(),
+                        severity: sev.into(),
+                        formula: entry.name.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
     }
 
     // 2. Inspect all OPC relationship parts (.rels) for external references
@@ -1722,6 +1866,75 @@ pub fn scan_ooxml_package_threats(
                             coordinate: coord,
                             threat_kind: "SuspiciousProtocolHandler".into(),
                             severity: "Critical".into(),
+                            formula: rel.target.clone(),
+                            description: desc,
+                        });
+                    }
+                }
+
+                // Check for Suspicious Drawing / Slide Relationships
+                let is_drawing_rels = rels_part.to_ascii_lowercase().contains("drawing")
+                    || rels_part.to_ascii_lowercase().contains("slide");
+                if is_drawing_rels && is_ext {
+                    let t_lower = rel.target.to_ascii_lowercase();
+                    let is_dangerous_target = t_lower.ends_with(".exe")
+                        || t_lower.ends_with(".scr")
+                        || t_lower.ends_with(".bat")
+                        || t_lower.ends_with(".vbs")
+                        || t_lower.ends_with(".ps1")
+                        || t_lower.ends_with(".cmd")
+                        || t_lower.ends_with(".hta")
+                        || t_lower.ends_with(".cpl")
+                        || t_lower.ends_with(".msi")
+                        || t_lower.ends_with(".jar")
+                        || t_lower.ends_with(".iso")
+                        || t_lower.ends_with(".img")
+                        || t_lower.ends_with(".vhd")
+                        || t_lower.ends_with(".lnk")
+                        || t_lower.starts_with("ms-msdt:")
+                        || t_lower.starts_with("search-ms:")
+                        || t_lower.starts_with("ms-appinstaller:")
+                        || t_lower.starts_with("mhtml:")
+                        || t_lower.starts_with("javascript:")
+                        || t_lower.starts_with("vbscript:")
+                        || t_lower.starts_with("file:////")
+                        || t_lower.starts_with("\\\\");
+                    if is_dangerous_target {
+                        let coord = format!("rel:{}->{}", rels_part, rel.id);
+                        if !threats.iter().any(|t| t.coordinate == coord) {
+                            let desc = format!(
+                                "Suspicious drawing or slide relationship '{}' in '{}' targets dangerous resource '{}'",
+                                rel.id, rels_part, rel.target
+                            );
+                            diagnostics.push(format!("Security warning: {desc}"));
+                            threats.push(CellThreat {
+                                sheet_name: "Package".into(),
+                                cell_ref: rel.id.clone(),
+                                coordinate: coord,
+                                threat_kind: "SuspiciousDrawingAction".into(),
+                                severity: "Critical".into(),
+                                formula: rel.target.clone(),
+                                description: desc,
+                            });
+                        }
+                    }
+                }
+
+                // Check for External Data Connection / MailMerge relationships
+                if (rel_type.contains("connection") || rel_type.contains("mailmerge")) && is_ext {
+                    let coord = format!("rel:{}->{}", rels_part, rel.id);
+                    if !threats.iter().any(|t| t.coordinate == coord) {
+                        let desc = format!(
+                            "External data connection relationship '{}' in '{}' targets external resource '{}'",
+                            rel.id, rels_part, rel.target
+                        );
+                        diagnostics.push(format!("Security warning: {desc}"));
+                        threats.push(CellThreat {
+                            sheet_name: "Package".into(),
+                            cell_ref: rel.id.clone(),
+                            coordinate: coord,
+                            threat_kind: "ExternalDataConnection".into(),
+                            severity: "High".into(),
                             formula: rel.target.clone(),
                             description: desc,
                         });

