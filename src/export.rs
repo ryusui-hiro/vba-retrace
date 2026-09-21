@@ -3048,6 +3048,8 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "SuspiciousPrinterSettings" => ("VBA-CELL-015", "error"),
         "CustomXmlPayloadSmuggling" => ("VBA-CELL-016", "error"),
         "SuspiciousProtocolHandler" => ("VBA-CELL-017", "error"),
+        "SuspiciousDrawingAction" => ("VBA-CELL-018", "error"),
+        "ExternalDataConnection" => ("VBA-CELL-019", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3148,7 +3150,13 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-016\",\"name\":\"CustomXmlPayloadSmuggling\",\"shortDescription\":{\"text\":\"Custom XML Part Payload Smuggling\"},\"fullDescription\":{\"text\":\"Container custom XML part contains smuggled base64 executables, script tags, XXE external entities, or exploit protocol handlers.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-017\",\"name\":\"SuspiciousProtocolHandler\",\"shortDescription\":{\"text\":\"Suspicious Protocol Handler / URI Exploit Target\"},\"fullDescription\":{\"text\":\"Package relationship links to dangerous protocol handlers such as ms-msdt (Follina), search-ms, ms-appinstaller, or mhtml.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-017\",\"name\":\"SuspiciousProtocolHandler\",\"shortDescription\":{\"text\":\"Suspicious Protocol Handler / URI Exploit Target\"},\"fullDescription\":{\"text\":\"Package relationship links to dangerous protocol handlers such as ms-msdt (Follina), search-ms, ms-appinstaller, or mhtml.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-018\",\"name\":\"SuspiciousDrawingAction\",\"shortDescription\":{\"text\":\"Suspicious Drawing or Shape Action / Macro Trigger\"},\"fullDescription\":{\"text\":\"Drawing shape, slide action, or VML form control is configured with mouse-over hover triggers, executable program launches, or auto-macro execution.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-019\",\"name\":\"ExternalDataConnection\",\"shortDescription\":{\"text\":\"External Data Connection / NTLM Coercion / Web Query\"},\"fullDescription\":{\"text\":\"Container connections, query tables, or MailMerge settings contain remote UNC paths (NTLM credential coercion), web queries, or command injection.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

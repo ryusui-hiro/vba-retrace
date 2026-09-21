@@ -1,6 +1,16 @@
 # Changelog
 
 - Added OOXML container package security threat inspection rules:
+  - **Suspicious Drawing Action (`VBA-CELL-018`, High)**: Detects drawing shapes, PowerPoint slide actions, and legacy Excel VML form controls configured with mouse-over hover triggers (`<a:hlinkHover>`), external program execution (`ppaction://program`), macro actions (`ppaction://macro`), VML button macro bindings (`<x:FmlaMacro>`), or drawing relationships targeting dangerous executables/scripts or exploit protocol handlers.
+  - **External Data Connection (`VBA-CELL-019`, High)**: Detects external data connections, query tables, and Word MailMerge configurations containing remote UNC paths (`Data Source=\\`, NTLM credential coercion vector), web query remote payloads (`type="4"`, `connection="URL;http..."`), or command injection keywords (`xp_cmdshell`, `powershell`, `cmd.exe`).
+- Extended Excel formula evaluation engine (`formula_eval`) with dynamic array filtering, sorting, matrix dimension inspection, and wrapping functions:
+  - **Dynamic Array Filtering & Sorting**: Added `FILTER(array, include, [if_empty])`, `SORT(array, [sort_index], [sort_order], [by_col])`, `SORTBY(array, by_array1, [order1])`, and `UNIQUE(array, [by_col], [exactly_once])` with complete Excel-compliant row/column filtering, stable value comparison ranking, and deduplication.
+  - **Vector Wrapping & Reshaping**: Added `WRAPROWS(vector, wrap_count, [pad_with])` and `WRAPCOLS(vector, wrap_count, [pad_with])` for structured matrix folding from flat arrays.
+  - **Grid Dimension & Rounding Functions**: Added `ROWS(array)`, `COLUMNS(array)`, and `MROUND(number, multiple)`.
+- Extended container cell threat scanning (`VBA-CELL-009`) with triggers for `FILTER`, `SORT`, `SORTBY`, `UNIQUE`, `WRAPROWS`, `WRAPCOLS`, `ROWS`, `COLUMNS`, and `MROUND`.
+- Extended SARIF v2.1.0 and structured JSON exports with complete rule descriptors and locations for `VBA-CELL-018` and `VBA-CELL-019`.
+
+- Added OOXML container package security threat inspection rules:
   - **Suspicious Printer Settings (`VBA-CELL-015`, High)**: Detects printer settings (`printerSettings*.bin`) containing external UNC paths (`\\host\share` in ASCII or UTF-16LE DEVMODEW), remote URLs (`http://`, `https://`), command execution triggers (`powershell`, `cmd.exe`), or external printerSettings OPC relationships (CVE-2023-36884 / Storm-0978 vector).
   - **Custom XML Payload Smuggling (`VBA-CELL-016`, High)**: Detects base64-encoded PE executables (`TVqQAAMAAAAEAAAA...`), XML External Entity (XXE) injection (`<!ENTITY ... SYSTEM`), script/shell tags (`<script`, `WScript.Shell`), and HTML smuggling (`data:text/html;base64,`) inside `/customXml/*.xml` container parts.
   - **Suspicious Protocol Handler (`VBA-CELL-017`, Critical)**: Detects dangerous URI protocol handlers (`ms-msdt:` for Follina CVE-2022-30190, `search-ms:`, `ms-appinstaller:`, `mhtml:`, `javascript:`, `vbscript:`, remote `file:////`) across all `.rels` package relationships.

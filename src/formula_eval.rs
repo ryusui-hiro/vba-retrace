@@ -1956,10 +1956,35 @@ impl Evaluator<'_> {
                     Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
                 }
             }
-            "take" | "drop" | "chooserows" | "choosecols" | "torow" | "tocol" | "expand"
-            | "arraytotext" | "valuetotext" => {
-                self.evaluate_array_manipulation(name, arguments, depth + 1)
+            "rows" if arguments.len() == 1 => {
+                let res = match self.evaluate(&arguments[0], depth + 1)? {
+                    EvalValue::Scalar(_) => 1.0,
+                    EvalValue::Range { rows, .. } => rows as f64,
+                };
+                Ok(EvalValue::Scalar(FormulaValue::Number(res)))
             }
+            "columns" if arguments.len() == 1 => {
+                let res = match self.evaluate(&arguments[0], depth + 1)? {
+                    EvalValue::Scalar(_) => 1.0,
+                    EvalValue::Range { cols, .. } => cols as f64,
+                };
+                Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+            }
+            "mround" if arguments.len() == 2 => {
+                let num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let multiple = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                if multiple == 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Number(0.0)));
+                }
+                if (num > 0.0 && multiple < 0.0) || (num < 0.0 && multiple > 0.0) {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let res = (num / multiple).round() * multiple;
+                Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+            }
+            "take" | "drop" | "chooserows" | "choosecols" | "torow" | "tocol" | "expand"
+            | "wraprows" | "wrapcols" | "filter" | "sort" | "sortby" | "unique" | "arraytotext"
+            | "valuetotext" => self.evaluate_array_manipulation(name, arguments, depth + 1),
             "len" | "left" | "right" | "mid" | "concatenate" | "concat" | "value" | "trim"
             | "upper" | "lower" | "exact" | "rept" | "substitute" | "replace" | "char" | "code"
             | "clean" | "t" | "n" | "find" | "search" | "hyperlink" | "proper" | "unichar"
@@ -2915,6 +2940,390 @@ impl Evaluator<'_> {
                 self.check_string_size(&result)?;
                 Ok(EvalValue::Scalar(FormulaValue::String(result)))
             }
+            "wraprows" if (2..=3).contains(&arguments.len()) => {
+                let wrap_count =
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                if wrap_count <= 0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                let wrap_cols = wrap_count as usize;
+                let pad_with = if arguments.len() == 3 {
+                    self.eval_scalar(&arguments[2], depth + 1)?
+                } else {
+                    FormulaValue::Error("#N/A".into())
+                };
+                if values.is_empty() {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#CALC!".into())));
+                }
+                let num_rows = values.len().div_ceil(wrap_cols);
+                let total_cells = num_rows.saturating_mul(wrap_cols);
+                if total_cells > self.limits.max_range_cells {
+                    return Err("resource_limit");
+                }
+                let mut new_values = Vec::with_capacity(total_cells);
+                for i in 0..total_cells {
+                    if i < values.len() {
+                        new_values.push(values[i].clone());
+                    } else {
+                        new_values.push(pad_with.clone());
+                    }
+                }
+                if num_rows == 1 && wrap_cols == 1 {
+                    Ok(EvalValue::Scalar(new_values.swap_remove(0)))
+                } else {
+                    Ok(EvalValue::Range {
+                        values: new_values,
+                        rows: num_rows,
+                        cols: wrap_cols,
+                    })
+                }
+            }
+            "wrapcols" if (2..=3).contains(&arguments.len()) => {
+                let wrap_count =
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                if wrap_count <= 0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                let wrap_rows = wrap_count as usize;
+                let pad_with = if arguments.len() == 3 {
+                    self.eval_scalar(&arguments[2], depth + 1)?
+                } else {
+                    FormulaValue::Error("#N/A".into())
+                };
+                if values.is_empty() {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#CALC!".into())));
+                }
+                let num_cols = values.len().div_ceil(wrap_rows);
+                let total_cells = wrap_rows.saturating_mul(num_cols);
+                if total_cells > self.limits.max_range_cells {
+                    return Err("resource_limit");
+                }
+                let mut new_values = vec![pad_with; total_cells];
+                for (i, val) in values.into_iter().enumerate() {
+                    let col = i / wrap_rows;
+                    let row = i % wrap_rows;
+                    new_values[row * num_cols + col] = val;
+                }
+                if wrap_rows == 1 && num_cols == 1 {
+                    Ok(EvalValue::Scalar(new_values.swap_remove(0)))
+                } else {
+                    Ok(EvalValue::Range {
+                        values: new_values,
+                        rows: wrap_rows,
+                        cols: num_cols,
+                    })
+                }
+            }
+            "filter" if (2..=3).contains(&arguments.len()) => {
+                let include_eval = self.evaluate(&arguments[1], depth + 1)?;
+                let (inc_vals, _, _) = match include_eval {
+                    EvalValue::Scalar(s) => (vec![s], 1, 1),
+                    EvalValue::Range { values, rows, cols } => (values, rows, cols),
+                };
+                let filter_by_cols = orig_rows == 1 && orig_cols > 1 && inc_vals.len() == orig_cols;
+                if !filter_by_cols && inc_vals.len() != orig_rows {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+
+                let mut kept_indices = Vec::new();
+                for (idx, v) in inc_vals.iter().enumerate() {
+                    match v {
+                        FormulaValue::Boolean(b) => {
+                            if *b {
+                                kept_indices.push(idx);
+                            }
+                        }
+                        FormulaValue::Number(n) => {
+                            if *n != 0.0 {
+                                kept_indices.push(idx);
+                            }
+                        }
+                        FormulaValue::Error(err) => {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error(err.clone())));
+                        }
+                        _ => return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                    }
+                }
+
+                if kept_indices.is_empty() {
+                    if arguments.len() == 3 {
+                        let if_empty = self.eval_scalar(&arguments[2], depth + 1)?;
+                        return Ok(EvalValue::Scalar(if_empty));
+                    } else {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#CALC!".into())));
+                    }
+                }
+
+                if filter_by_cols {
+                    let new_cols = kept_indices.len();
+                    let mut new_values = Vec::with_capacity(new_cols);
+                    for c in kept_indices {
+                        new_values.push(values[c].clone());
+                    }
+                    if new_cols == 1 {
+                        Ok(EvalValue::Scalar(new_values.swap_remove(0)))
+                    } else {
+                        Ok(EvalValue::Range {
+                            values: new_values,
+                            rows: 1,
+                            cols: new_cols,
+                        })
+                    }
+                } else {
+                    let new_rows = kept_indices.len();
+                    let total_cells = new_rows.saturating_mul(orig_cols);
+                    if total_cells > self.limits.max_range_cells {
+                        return Err("resource_limit");
+                    }
+                    let mut new_values = Vec::with_capacity(total_cells);
+                    for r in kept_indices {
+                        let start = r * orig_cols;
+                        let end = start + orig_cols;
+                        new_values.extend_from_slice(&values[start..end]);
+                    }
+                    if new_rows == 1 && orig_cols == 1 {
+                        Ok(EvalValue::Scalar(new_values.swap_remove(0)))
+                    } else {
+                        Ok(EvalValue::Range {
+                            values: new_values,
+                            rows: new_rows,
+                            cols: orig_cols,
+                        })
+                    }
+                }
+            }
+            "sort" if (1..=4).contains(&arguments.len()) => {
+                if orig_rows <= 1 && orig_cols <= 1 {
+                    return Ok(EvalValue::Scalar(
+                        values.into_iter().next().unwrap_or(FormulaValue::Blank),
+                    ));
+                }
+                let by_col = if arguments.len() >= 4 {
+                    to_bool(&self.eval_scalar(&arguments[3], depth + 1)?)?
+                } else {
+                    false
+                };
+                let sort_index = if arguments.len() >= 2 {
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64
+                } else {
+                    1
+                };
+                let sort_order = if arguments.len() >= 3 {
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i64
+                } else {
+                    1
+                };
+                if sort_order != 1 && sort_order != -1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                let ascending = sort_order == 1;
+
+                if by_col {
+                    if sort_index < 1 || sort_index as usize > orig_rows {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                    let sort_row = (sort_index - 1) as usize;
+                    let mut col_indices: Vec<usize> = (0..orig_cols).collect();
+                    col_indices.sort_by(|&c1, &c2| {
+                        let v1 = &values[sort_row * orig_cols + c1];
+                        let v2 = &values[sort_row * orig_cols + c2];
+                        let ord = compare_formula_values(v1, v2);
+                        if ascending { ord } else { ord.reverse() }
+                    });
+                    let mut new_values = Vec::with_capacity(values.len());
+                    for r in 0..orig_rows {
+                        for &c in &col_indices {
+                            new_values.push(values[r * orig_cols + c].clone());
+                        }
+                    }
+                    if orig_rows == 1 && orig_cols == 1 {
+                        Ok(EvalValue::Scalar(new_values.swap_remove(0)))
+                    } else {
+                        Ok(EvalValue::Range {
+                            values: new_values,
+                            rows: orig_rows,
+                            cols: orig_cols,
+                        })
+                    }
+                } else {
+                    if sort_index < 1 || sort_index as usize > orig_cols {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                    let sort_col = (sort_index - 1) as usize;
+                    let mut row_indices: Vec<usize> = (0..orig_rows).collect();
+                    row_indices.sort_by(|&r1, &r2| {
+                        let v1 = &values[r1 * orig_cols + sort_col];
+                        let v2 = &values[r2 * orig_cols + sort_col];
+                        let ord = compare_formula_values(v1, v2);
+                        if ascending { ord } else { ord.reverse() }
+                    });
+                    let mut new_values = Vec::with_capacity(values.len());
+                    for &r in &row_indices {
+                        let start = r * orig_cols;
+                        new_values.extend_from_slice(&values[start..start + orig_cols]);
+                    }
+                    if orig_rows == 1 && orig_cols == 1 {
+                        Ok(EvalValue::Scalar(new_values.swap_remove(0)))
+                    } else {
+                        Ok(EvalValue::Range {
+                            values: new_values,
+                            rows: orig_rows,
+                            cols: orig_cols,
+                        })
+                    }
+                }
+            }
+            "sortby" if (2..=3).contains(&arguments.len()) => {
+                let by_eval = self.evaluate(&arguments[1], depth + 1)?;
+                let (by_vals, _, _) = match by_eval {
+                    EvalValue::Scalar(s) => (vec![s], 1, 1),
+                    EvalValue::Range { values, rows, cols } => (values, rows, cols),
+                };
+                let sort_order = if arguments.len() == 3 {
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i64
+                } else {
+                    1
+                };
+                if sort_order != 1 && sort_order != -1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                let ascending = sort_order == 1;
+
+                let by_cols_mode = orig_rows == 1 && orig_cols > 1 && by_vals.len() == orig_cols;
+                if !by_cols_mode && by_vals.len() != orig_rows {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+
+                if by_cols_mode {
+                    let mut col_indices: Vec<usize> = (0..orig_cols).collect();
+                    col_indices.sort_by(|&c1, &c2| {
+                        let ord = compare_formula_values(&by_vals[c1], &by_vals[c2]);
+                        if ascending { ord } else { ord.reverse() }
+                    });
+                    let mut new_values = Vec::with_capacity(values.len());
+                    for &c in &col_indices {
+                        new_values.push(values[c].clone());
+                    }
+                    if orig_cols == 1 {
+                        Ok(EvalValue::Scalar(new_values.swap_remove(0)))
+                    } else {
+                        Ok(EvalValue::Range {
+                            values: new_values,
+                            rows: 1,
+                            cols: orig_cols,
+                        })
+                    }
+                } else {
+                    let mut row_indices: Vec<usize> = (0..orig_rows).collect();
+                    row_indices.sort_by(|&r1, &r2| {
+                        let ord = compare_formula_values(&by_vals[r1], &by_vals[r2]);
+                        if ascending { ord } else { ord.reverse() }
+                    });
+                    let mut new_values = Vec::with_capacity(values.len());
+                    for &r in &row_indices {
+                        let start = r * orig_cols;
+                        new_values.extend_from_slice(&values[start..start + orig_cols]);
+                    }
+                    if orig_rows == 1 && orig_cols == 1 {
+                        Ok(EvalValue::Scalar(new_values.swap_remove(0)))
+                    } else {
+                        Ok(EvalValue::Range {
+                            values: new_values,
+                            rows: orig_rows,
+                            cols: orig_cols,
+                        })
+                    }
+                }
+            }
+            "unique" if (1..=3).contains(&arguments.len()) => {
+                let by_col = if arguments.len() >= 2 {
+                    to_bool(&self.eval_scalar(&arguments[1], depth + 1)?)?
+                } else {
+                    false
+                };
+                let exactly_once = if arguments.len() == 3 {
+                    to_bool(&self.eval_scalar(&arguments[2], depth + 1)?)?
+                } else {
+                    false
+                };
+
+                if by_col {
+                    let mut seen_cols: Vec<usize> = Vec::new();
+                    for c1 in 0..orig_cols {
+                        let total_count = (0..orig_cols)
+                            .filter(|&c2| {
+                                (0..orig_rows).all(|r| {
+                                    values[r * orig_cols + c1] == values[r * orig_cols + c2]
+                                })
+                            })
+                            .count();
+                        let already_seen = seen_cols.iter().any(|&c_prev| {
+                            (0..orig_rows).all(|r| {
+                                values[r * orig_cols + c1] == values[r * orig_cols + c_prev]
+                            })
+                        });
+                        if (!already_seen && !exactly_once) || (exactly_once && total_count == 1) {
+                            seen_cols.push(c1);
+                        }
+                    }
+                    if seen_cols.is_empty() {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#CALC!".into())));
+                    }
+                    let new_cols = seen_cols.len();
+                    let mut new_values = Vec::with_capacity(orig_rows * new_cols);
+                    for r in 0..orig_rows {
+                        for &c in &seen_cols {
+                            new_values.push(values[r * orig_cols + c].clone());
+                        }
+                    }
+                    if orig_rows == 1 && new_cols == 1 {
+                        Ok(EvalValue::Scalar(new_values.swap_remove(0)))
+                    } else {
+                        Ok(EvalValue::Range {
+                            values: new_values,
+                            rows: orig_rows,
+                            cols: new_cols,
+                        })
+                    }
+                } else {
+                    let mut seen_rows: Vec<usize> = Vec::new();
+                    for r1 in 0..orig_rows {
+                        let total_count = (0..orig_rows)
+                            .filter(|&r2| {
+                                let s1 = r1 * orig_cols;
+                                let s2 = r2 * orig_cols;
+                                values[s1..s1 + orig_cols] == values[s2..s2 + orig_cols]
+                            })
+                            .count();
+                        let already_seen = seen_rows.iter().any(|&r_prev| {
+                            let s1 = r1 * orig_cols;
+                            let sp = r_prev * orig_cols;
+                            values[s1..s1 + orig_cols] == values[sp..sp + orig_cols]
+                        });
+                        if (!already_seen && !exactly_once) || (exactly_once && total_count == 1) {
+                            seen_rows.push(r1);
+                        }
+                    }
+                    if seen_rows.is_empty() {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#CALC!".into())));
+                    }
+                    let new_rows = seen_rows.len();
+                    let mut new_values = Vec::with_capacity(new_rows * orig_cols);
+                    for &r in &seen_rows {
+                        let s = r * orig_cols;
+                        new_values.extend_from_slice(&values[s..s + orig_cols]);
+                    }
+                    if new_rows == 1 && orig_cols == 1 {
+                        Ok(EvalValue::Scalar(new_values.swap_remove(0)))
+                    } else {
+                        Ok(EvalValue::Range {
+                            values: new_values,
+                            rows: new_rows,
+                            cols: orig_cols,
+                        })
+                    }
+                }
+            }
             _ => Err("unsupported"),
         }
     }
@@ -3374,6 +3783,35 @@ fn decimal_from_base(text: &str, radix: f64) -> FormulaValue {
         }
     }
     FormulaValue::Number(acc)
+}
+
+fn compare_formula_values(a: &FormulaValue, b: &FormulaValue) -> std::cmp::Ordering {
+    fn type_rank(v: &FormulaValue) -> u8 {
+        match v {
+            FormulaValue::Number(_) => 1,
+            FormulaValue::String(_) => 2,
+            FormulaValue::Boolean(_) => 3,
+            FormulaValue::Error(_) => 4,
+            FormulaValue::Blank => 5,
+        }
+    }
+    let ra = type_rank(a);
+    let rb = type_rank(b);
+    if ra != rb {
+        return ra.cmp(&rb);
+    }
+    match (a, b) {
+        (FormulaValue::Number(x), FormulaValue::Number(y)) => {
+            x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (FormulaValue::String(x), FormulaValue::String(y)) => {
+            x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase())
+        }
+        (FormulaValue::Boolean(x), FormulaValue::Boolean(y)) => x.cmp(y),
+        (FormulaValue::Error(x), FormulaValue::Error(y)) => x.cmp(y),
+        (FormulaValue::Blank, FormulaValue::Blank) => std::cmp::Ordering::Equal,
+        _ => std::cmp::Ordering::Equal,
+    }
 }
 
 fn format_formula_value_text(value: &FormulaValue, strict: bool) -> String {
@@ -4927,6 +5365,146 @@ mod tests {
         assert_eq!(
             evaluate_formula("=VALUETOTEXT(\"hello\", 1)", None, &[], Default::default()).value,
             Some(FormulaValue::String("\"hello\"".into()))
+        );
+
+        // ROWS, COLUMNS, MROUND
+        assert_eq!(
+            evaluate_formula("=ROWS(A1:B3)", Some("G"), &grid_cells, Default::default()).value,
+            Some(FormulaValue::Number(3.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=COLUMNS(A1:B3)",
+                Some("G"),
+                &grid_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula("=MROUND(10, 3)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(9.0))
+        );
+        assert_eq!(
+            evaluate_formula("=MROUND(11, 3)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(12.0))
+        );
+
+        // WRAPROWS & WRAPCOLS
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(WRAPROWS(A1:B3, 3), 1, 3)",
+                Some("G"),
+                &grid_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(30.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(WRAPROWS(A1:B3, 4, 0), 2, 4)",
+                Some("G"),
+                &grid_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(WRAPCOLS(A1:B3, 3), 1, 2)",
+                Some("G"),
+                &grid_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(40.0))
+        );
+
+        // FILTER
+        let filter_cells = vec![
+            cell_on_sheet("F", "A1", "cmd.exe", "s"),
+            cell_on_sheet("F", "B1", "1", "n"),
+            cell_on_sheet("F", "A2", "notepad.exe", "s"),
+            cell_on_sheet("F", "B2", "0", "n"),
+            cell_on_sheet("F", "A3", "powershell.exe", "s"),
+            cell_on_sheet("F", "B3", "1", "n"),
+        ];
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(FILTER(A1:A3, B1:B3), 1, 1)",
+                Some("F"),
+                &filter_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cmd.exe".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(FILTER(A1:A3, B1:B3), 2, 1)",
+                Some("F"),
+                &filter_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("powershell.exe".into()))
+        );
+
+        // SORT
+        let sort_cells = vec![
+            cell_on_sheet("S", "A1", "banana", "s"),
+            cell_on_sheet("S", "A2", "apple", "s"),
+            cell_on_sheet("S", "A3", "cherry", "s"),
+        ];
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(SORT(A1:A3), 1, 1)",
+                Some("S"),
+                &sort_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("apple".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(SORT(A1:A3, 1, -1), 1, 1)",
+                Some("S"),
+                &sort_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cherry".into()))
+        );
+
+        // UNIQUE
+        let dup_cells = vec![
+            cell_on_sheet("U", "A1", "X", "s"),
+            cell_on_sheet("U", "A2", "Y", "s"),
+            cell_on_sheet("U", "A3", "X", "s"),
+        ];
+        assert_eq!(
+            evaluate_formula(
+                "=ROWS(UNIQUE(A1:A3))",
+                Some("U"),
+                &dup_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(UNIQUE(A1:A3, FALSE, TRUE), 1, 1)",
+                Some("U"),
+                &dup_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("Y".into()))
         );
     }
 }
