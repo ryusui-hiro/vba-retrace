@@ -431,6 +431,34 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                     defined_name.name, defined_name.formula
                 ),
             });
+        } else if f_lower.contains("rtd(") {
+            let is_dangerous_rtd = f_lower.contains("wscript")
+                || f_lower.contains("shell")
+                || f_lower.contains("scripting.filesystemobject")
+                || f_lower.contains("system.diagnostics")
+                || f_lower.contains("cmd")
+                || f_lower.contains("powershell")
+                || f_lower.contains("\\\\");
+            let sev = if is_dangerous_rtd { "Critical" } else { "High" };
+            let desc = format!(
+                "Potential COM Real-Time Data (RTD) execution formula in defined name '{}': '{}'",
+                defined_name.name, defined_name.formula
+            );
+            extracted
+                .diagnostics
+                .push(format!("Security warning: {desc}"));
+            extracted.cell_threats.push(CellThreat {
+                sheet_name: defined_name
+                    .local_sheet_name
+                    .clone()
+                    .unwrap_or_else(|| "Workbook".into()),
+                cell_ref: defined_name.name.clone(),
+                coordinate: format!("definedName:{}", defined_name.name),
+                threat_kind: "RealTimeData".into(),
+                severity: sev.into(),
+                formula: defined_name.formula.clone(),
+                description: desc,
+            });
         }
     }
 
@@ -583,6 +611,11 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("mround")
                 || f_lower.contains("arraytotext")
                 || f_lower.contains("valuetotext")
+                || f_lower.contains("formulatext")
+                || f_lower.contains("roman")
+                || f_lower.contains("arabic")
+                || f_lower.contains("type")
+                || f_lower.contains("isnontext")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -655,7 +688,17 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
             // 4. External web service request / data exfiltration
             let is_webservice = has_fn("webservice") || has_fn("filterxml");
 
-            // 5. Suspicious executable download hyperlink or protocol handler
+            // 5. COM Real-Time Data (RTD) server execution
+            let is_rtd = has_fn("rtd");
+            let is_dangerous_rtd = f_lower.contains("wscript")
+                || f_lower.contains("shell")
+                || f_lower.contains("scripting.filesystemobject")
+                || f_lower.contains("system.diagnostics")
+                || f_lower.contains("cmd")
+                || f_lower.contains("powershell")
+                || f_lower.contains("\\\\");
+
+            // 6. Suspicious executable download hyperlink or protocol handler
             let check_suspicious_hyperlink = |text: &str| -> bool {
                 let t = text.to_ascii_lowercase();
                 t.contains(".exe")
@@ -727,6 +770,7 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 && !is_xlm
                 && !is_remote_link
                 && !is_webservice
+                && !is_rtd
                 && !is_suspicious_hyperlink
             {
                 if let Some(ref ev) = evaluated_text {
@@ -846,6 +890,24 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                     coordinate: format!("'{}'!{}", cell.sheet_name, cell.cell_ref),
                     threat_kind: "WebService".into(),
                     severity: "Medium".into(),
+                    formula: formula.clone(),
+                    description: desc,
+                });
+            } else if is_rtd {
+                let sev = if is_dangerous_rtd { "Critical" } else { "High" };
+                let desc = format!(
+                    "Potential COM Real-Time Data (RTD) server execution formula in cell '{}'!{}: '{}'",
+                    cell.sheet_name, cell.cell_ref, formula
+                );
+                extracted
+                    .diagnostics
+                    .push(format!("Security warning: {}", desc));
+                extracted.cell_threats.push(CellThreat {
+                    sheet_name: cell.sheet_name.clone(),
+                    cell_ref: cell.cell_ref.clone(),
+                    coordinate: format!("'{}'!{}", cell.sheet_name, cell.cell_ref),
+                    threat_kind: "RealTimeData".into(),
+                    severity: sev.into(),
                     formula: formula.clone(),
                     description: desc,
                 });
@@ -1735,6 +1797,127 @@ pub fn scan_ooxml_package_threats(
                 }
             }
         }
+
+        // Check for embedded SVG vector graphics (/media/*.svg)
+        let is_svg = name_lower.ends_with(".svg");
+        if is_svg {
+            let Ok(data) = zip.read(entry) else { continue };
+            let s = String::from_utf8_lossy(&data);
+            let s_lower = s.to_ascii_lowercase();
+
+            let mut svg_indicator: Option<(&'static str, String)> = None;
+            if s_lower.contains("<script") {
+                svg_indicator = Some((
+                    "Critical",
+                    "SVG vector graphic contains embedded script element ('<script')".into(),
+                ));
+            } else if s_lower.contains("onload=")
+                || s_lower.contains("onerror=")
+                || s_lower.contains("onclick=")
+                || s_lower.contains("onmouseover=")
+                || s_lower.contains("onfocus=")
+                || s_lower.contains("onbegin=")
+            {
+                svg_indicator = Some((
+                    "High",
+                    "SVG vector graphic contains inline event handler (onload/onerror/onclick/onmouseover)".into(),
+                ));
+            } else if s_lower.contains("<!entity")
+                && (s_lower.contains("system") || s_lower.contains("public"))
+            {
+                svg_indicator = Some((
+                    "Critical",
+                    "SVG vector graphic contains XML External Entity (XXE) definition".into(),
+                ));
+            } else if s_lower.contains("ms-msdt:")
+                || s_lower.contains("search-ms:")
+                || s_lower.contains("ms-appinstaller:")
+                || s_lower.contains("file:////")
+                || s_lower.contains("file://\\\\")
+            {
+                svg_indicator = Some((
+                    "Critical",
+                    "SVG vector graphic targets dangerous protocol handler or remote UNC path"
+                        .into(),
+                ));
+            } else if s_lower.contains("<foreignobject") {
+                svg_indicator = Some((
+                    "High",
+                    "SVG vector graphic embeds external HTML/foreignObject elements".into(),
+                ));
+            }
+
+            if let Some((sev, details)) = svg_indicator {
+                let coord = format!("part:{}", entry.name);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Suspicious SVG vector graphic detected in part '{}': {details}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Package".into(),
+                        cell_ref: entry.name.clone(),
+                        coordinate: coord,
+                        threat_kind: "SuspiciousSvgVector".into(),
+                        severity: sev.into(),
+                        formula: entry.name.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for VBA project digital signature parts (vbaProjectSignature*.bin)
+        let is_vba_sig = (name_lower.contains("vbaprojectsignature")
+            || name_lower.starts_with("vbaprojectsignature"))
+            && name_lower.ends_with(".bin");
+        if is_vba_sig {
+            let Ok(data) = zip.read(entry) else { continue };
+            let mut sig_indicator: Option<(&'static str, String)> = None;
+            if data.is_empty() || data.len() < 16 {
+                sig_indicator = Some((
+                    "High",
+                    format!(
+                        "VBA project digital signature is truncated or empty ({} bytes)",
+                        data.len()
+                    ),
+                ));
+            } else if data[0] != 0x30 && data[0] != 0x06 && data[0] != 0x04 {
+                sig_indicator = Some((
+                    "High",
+                    format!(
+                        "VBA project signature does not have a valid ASN.1/PKCS#7 header (first byte: 0x{:02X})",
+                        data[0]
+                    ),
+                ));
+            } else if data.iter().all(|&b| b == 0x00) || data.iter().all(|&b| b == 0xFF) {
+                sig_indicator = Some((
+                    "High",
+                    "VBA project signature contains hollowed or repetitive dummy padding".into(),
+                ));
+            }
+
+            if let Some((sev, details)) = sig_indicator {
+                let coord = format!("part:{}", entry.name);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Tampered or malformed VBA project digital signature in part '{}': {details}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Package".into(),
+                        cell_ref: entry.name.clone(),
+                        coordinate: coord,
+                        threat_kind: "TamperedVbaProjectSignature".into(),
+                        severity: sev.into(),
+                        formula: entry.name.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
     }
 
     // 2. Inspect all OPC relationship parts (.rels) for external references
@@ -1938,6 +2121,37 @@ pub fn scan_ooxml_package_threats(
                             formula: rel.target.clone(),
                             description: desc,
                         });
+                    }
+                }
+
+                // Check for Dangling / Stripped VBA Project Signature relationship
+                if rel_type.contains("relationships/vbaprojectsignature")
+                    || rel_type.contains("vbaprojectsignature")
+                {
+                    let target_clean = rel.target.trim_start_matches('/').trim_start_matches("./");
+                    let target_lower = target_clean.to_ascii_lowercase();
+                    let target_found = zip.entries.iter().any(|e| {
+                        let e_name = e.name.trim_start_matches('/').to_ascii_lowercase();
+                        e_name == target_lower || e_name.ends_with(&target_lower)
+                    });
+                    if !target_found {
+                        let coord = format!("rel:{}->{}", rels_part, rel.id);
+                        if !threats.iter().any(|t| t.coordinate == coord) {
+                            let desc = format!(
+                                "Dangling VBA project signature relationship '{}' in '{}': target '{}' is missing from package (signature stripping evasion)",
+                                rel.id, rels_part, rel.target
+                            );
+                            diagnostics.push(format!("Security warning: {desc}"));
+                            threats.push(CellThreat {
+                                sheet_name: "Package".into(),
+                                cell_ref: rel.id.clone(),
+                                coordinate: coord,
+                                threat_kind: "TamperedVbaProjectSignature".into(),
+                                severity: "High".into(),
+                                formula: rel.target.clone(),
+                                description: desc,
+                            });
+                        }
                     }
                 }
             }

@@ -3050,6 +3050,9 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "SuspiciousProtocolHandler" => ("VBA-CELL-017", "error"),
         "SuspiciousDrawingAction" => ("VBA-CELL-018", "error"),
         "ExternalDataConnection" => ("VBA-CELL-019", "error"),
+        "RealTimeData" => ("VBA-CELL-020", "error"),
+        "SuspiciousSvgVector" => ("VBA-CELL-021", "error"),
+        "TamperedVbaProjectSignature" => ("VBA-CELL-022", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3156,7 +3159,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-018\",\"name\":\"SuspiciousDrawingAction\",\"shortDescription\":{\"text\":\"Suspicious Drawing or Shape Action / Macro Trigger\"},\"fullDescription\":{\"text\":\"Drawing shape, slide action, or VML form control is configured with mouse-over hover triggers, executable program launches, or auto-macro execution.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-019\",\"name\":\"ExternalDataConnection\",\"shortDescription\":{\"text\":\"External Data Connection / NTLM Coercion / Web Query\"},\"fullDescription\":{\"text\":\"Container connections, query tables, or MailMerge settings contain remote UNC paths (NTLM credential coercion), web queries, or command injection.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-019\",\"name\":\"ExternalDataConnection\",\"shortDescription\":{\"text\":\"External Data Connection / NTLM Coercion / Web Query\"},\"fullDescription\":{\"text\":\"Container connections, query tables, or MailMerge settings contain remote UNC paths (NTLM credential coercion), web queries, or command injection.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-020\",\"name\":\"RealTimeDataExecution\",\"shortDescription\":{\"text\":\"Real-Time Data (RTD) COM Automation Formula\"},\"fullDescription\":{\"text\":\"Worksheet cell or defined name contains an RTD formula to invoke COM automation servers or execute commands via external ProgIDs or remote DCOM servers.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-021\",\"name\":\"SuspiciousSvgVector\",\"shortDescription\":{\"text\":\"Suspicious SVG Vector Graphic (Embedded Script / XXE / Protocol Exploit)\"},\"fullDescription\":{\"text\":\"Container SVG vector graphic part contains embedded script tags, inline event handlers, XML external entity injection, or dangerous protocol handlers.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-022\",\"name\":\"TamperedVbaProjectSignature\",\"shortDescription\":{\"text\":\"Tampered, Corrupted, or Stripped VBA Project Digital Signature\"},\"fullDescription\":{\"text\":\"VBA project digital signature binary is truncated, missing valid PKCS#7 structures, hollowed with dummy padding, or referenced by dangling relationships.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

