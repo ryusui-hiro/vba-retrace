@@ -1,5 +1,11 @@
 # Changelog
 
+- Extended Excel formula evaluation engine (`formula_eval`) with bitwise operations, date/time calculation, modern lookups, and advanced text manipulation functions:
+  - **Bitwise Cryptographic Functions**: Added `BITAND`, `BITOR`, `BITXOR`, `BITLSHIFT`, and `BITRSHIFT` (48-bit unsigned integer range with arithmetic shifts), enabling automated de-obfuscation and decryption of XOR-encrypted shellcode and commands in worksheet cells.
+  - **Date & Time Functions**: Added `DATE`, `TIME`, `YEAR`, `MONTH`, `DAY`, `HOUR`, `MINUTE`, `SECOND`, `EDATE`, and `EOMONTH` (with Gregorian component normalization and month-end clamping).
+  - **Modern Dynamic Lookups & Inspection**: Added `XLOOKUP` (multi-mode search, reverse direction, wildcard matching, and 2D array returns), `XMATCH` (exact, approximate, wildcard, and reverse search modes), `ISERR`, `ISREF`, and `NA`.
+  - **Modern Text Functions**: Added `TEXTBEFORE` (instance selection, case sensitivity, match-end handling), `TEXTAFTER`, and `TEXTSPLIT` (2D multi-delimiter string splitting into range values).
+- Extended container cell threat scanning (`VBA-CELL-009`) with triggers for `BITXOR`, `BITAND`, `BITOR`, `BITLSHIFT`, `BITRSHIFT`, `XLOOKUP`, `XMATCH`, `TEXTBEFORE`, `TEXTAFTER`, and `TEXTSPLIT`, uncovering XOR-encrypted LOLBins, dynamic table lookups, and split DDE commands across workbook cells.
 - Extended Excel formula evaluation engine (`formula_eval`) with dynamic grid resolution and reference functions:
   - **Dynamic Reference & Grid Resolution**: Added `ADDRESS` (dynamic cell reference construction with absolute/relative modes and sheet naming), `INDIRECT` (dynamic reference string resolution to cells or ranges, with cross-sheet support), and `OFFSET` (dynamic range shifting with row/column offsets, height, and width).
   - **Reference Chaining**: Added multi-hop recursive reference origin evaluation (`eval_cell_origin`), enabling chained dynamic lookups like `CONCAT(OFFSET(A1, 0, 0, 1, 3))` and `INDIRECT(ADDRESS(1, 1))`.

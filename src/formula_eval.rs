@@ -839,11 +839,33 @@ impl Evaluator<'_> {
                     FormulaValue::Error(_)
                 ))))
             }
+            "iserr" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                let is_err = match &val {
+                    FormulaValue::Error(s) => !s.eq_ignore_ascii_case("#N/A"),
+                    _ => false,
+                };
+                Ok(EvalValue::Scalar(FormulaValue::Boolean(is_err)))
+            }
+            "isref" if arguments.len() == 1 => {
+                let is_reference =
+                    matches!(&arguments[0], Expr::Reference { .. } | Expr::Range { .. })
+                        || match &arguments[0] {
+                            Expr::Call { name, .. } => {
+                                matches!(name.as_str(), "indirect" | "offset" | "index")
+                            }
+                            _ => false,
+                        };
+                Ok(EvalValue::Scalar(FormulaValue::Boolean(is_reference)))
+            }
             "isna" if arguments.len() == 1 => {
                 let val = self.eval_scalar(&arguments[0], depth + 1)?;
                 let is_na =
                     matches!(&val, FormulaValue::Error(s) if s.eq_ignore_ascii_case("#N/A"));
                 Ok(EvalValue::Scalar(FormulaValue::Boolean(is_na)))
+            }
+            "na" if arguments.is_empty() => {
+                Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
             }
             "istext" if arguments.len() == 1 => {
                 let val = self.eval_scalar(&arguments[0], depth + 1)?;
@@ -1592,11 +1614,327 @@ impl Evaluator<'_> {
                     Ok(EvalValue::Scalar(FormulaValue::Number(y.atan2(x))))
                 }
             }
+            "bitand" if arguments.len() == 2 => {
+                let a = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
+                let b = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                const MAX_BIT_VAL: i64 = (1i64 << 48) - 1;
+                if !(0..=MAX_BIT_VAL).contains(&a) || !(0..=MAX_BIT_VAL).contains(&b) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number((a & b) as f64)))
+                }
+            }
+            "bitor" if arguments.len() == 2 => {
+                let a = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
+                let b = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                const MAX_BIT_VAL: i64 = (1i64 << 48) - 1;
+                if !(0..=MAX_BIT_VAL).contains(&a) || !(0..=MAX_BIT_VAL).contains(&b) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number((a | b) as f64)))
+                }
+            }
+            "bitxor" if arguments.len() == 2 => {
+                let a = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
+                let b = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                const MAX_BIT_VAL: i64 = (1i64 << 48) - 1;
+                if !(0..=MAX_BIT_VAL).contains(&a) || !(0..=MAX_BIT_VAL).contains(&b) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number((a ^ b) as f64)))
+                }
+            }
+            "bitlshift" if arguments.len() == 2 => {
+                let a = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
+                let shift = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                const MAX_BIT_VAL: i64 = (1i64 << 48) - 1;
+                if !(0..=MAX_BIT_VAL).contains(&a) || !(-53..=53).contains(&shift) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else if shift >= 0 {
+                    if shift >= 48 || (a << shift) > MAX_BIT_VAL {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Number((a << shift) as f64)))
+                    }
+                } else {
+                    let rshift = -shift;
+                    if rshift >= 48 {
+                        Ok(EvalValue::Scalar(FormulaValue::Number(0.0)))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Number(
+                            (a >> rshift) as f64,
+                        )))
+                    }
+                }
+            }
+            "bitrshift" if arguments.len() == 2 => {
+                let a = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
+                let shift = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                const MAX_BIT_VAL: i64 = (1i64 << 48) - 1;
+                if !(0..=MAX_BIT_VAL).contains(&a) || !(-53..=53).contains(&shift) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else if shift >= 0 {
+                    if shift >= 48 {
+                        Ok(EvalValue::Scalar(FormulaValue::Number(0.0)))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Number((a >> shift) as f64)))
+                    }
+                } else {
+                    let lshift = -shift;
+                    if lshift >= 48 || (a << lshift) > MAX_BIT_VAL {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Number(
+                            (a << lshift) as f64,
+                        )))
+                    }
+                }
+            }
+            "date" if arguments.len() == 3 => {
+                let mut y = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i32;
+                let m = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i32;
+                let d = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i32;
+                if (0..=1899).contains(&y) {
+                    y += 1900;
+                }
+                if let Some(serial) = crate::preprocessor::date_serial_from_components(y, m, d) {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(serial)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                }
+            }
+            "year" if arguments.len() == 1 => {
+                let serial = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if let Some((y, _, _, _, _, _)) =
+                    crate::preprocessor::date_components_from_serial(serial)
+                {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(y as f64)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())))
+                }
+            }
+            "month" if arguments.len() == 1 => {
+                let serial = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if let Some((_, m, _, _, _, _)) =
+                    crate::preprocessor::date_components_from_serial(serial)
+                {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(m as f64)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())))
+                }
+            }
+            "day" if arguments.len() == 1 => {
+                let serial = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if let Some((_, _, d, _, _, _)) =
+                    crate::preprocessor::date_components_from_serial(serial)
+                {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(d as f64)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())))
+                }
+            }
+            "time" if arguments.len() == 3 => {
+                let h = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
+                let m = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                let s = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i64;
+                let total_secs = h * 3600 + m * 60 + s;
+                let mut day_frac = (total_secs % 86400) as f64 / 86400.0;
+                if day_frac < 0.0 {
+                    day_frac += 1.0;
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Number(day_frac)))
+            }
+            "hour" if arguments.len() == 1 => {
+                let serial = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let frac = serial - serial.floor();
+                let secs = (frac * 86400.0).round() as i64;
+                let h = (secs / 3600) % 24;
+                Ok(EvalValue::Scalar(FormulaValue::Number(h as f64)))
+            }
+            "minute" if arguments.len() == 1 => {
+                let serial = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let frac = serial - serial.floor();
+                let secs = (frac * 86400.0).round() as i64;
+                let m = (secs % 3600) / 60;
+                Ok(EvalValue::Scalar(FormulaValue::Number(m as f64)))
+            }
+            "second" if arguments.len() == 1 => {
+                let serial = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let frac = serial - serial.floor();
+                let secs = (frac * 86400.0).round() as i64;
+                let s = secs % 60;
+                Ok(EvalValue::Scalar(FormulaValue::Number(s as f64)))
+            }
+            "edate" if arguments.len() == 2 => {
+                let serial = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let months =
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                if let Some(res) = crate::preprocessor::date_serial_add_months(serial, months) {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                }
+            }
+            "eomonth" if arguments.len() == 2 => {
+                let serial = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let months =
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                if let Some(res) = crate::preprocessor::date_serial_add_months(serial, months)
+                    && let Some((y, m, _, _, _, _)) =
+                        crate::preprocessor::date_components_from_serial(res)
+                {
+                    let last_day = crate::preprocessor::days_in_month(y, m);
+                    if let Some(eom) =
+                        crate::preprocessor::date_serial_from_components(y, m, last_day)
+                    {
+                        return Ok(EvalValue::Scalar(FormulaValue::Number(eom)));
+                    }
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+            }
+            "xlookup" => {
+                if !(3..=6).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let lookup_val = self.eval_scalar(&arguments[0], depth + 1)?;
+                let lookup_target = self.evaluate(&arguments[1], depth + 1)?;
+                let (lookup_vals, l_rows, l_cols) = match lookup_target {
+                    EvalValue::Range { values, rows, cols } => (values, rows, cols),
+                    EvalValue::Scalar(s) => (vec![s], 1, 1),
+                };
+                let return_target = self.evaluate(&arguments[2], depth + 1)?;
+                let (ret_vals, r_rows, r_cols) = match return_target {
+                    EvalValue::Range { values, rows, cols } => (values, rows, cols),
+                    EvalValue::Scalar(s) => (vec![s], 1, 1),
+                };
+                let if_not_found = if arguments.len() >= 4 {
+                    Some(self.eval_scalar(&arguments[3], depth + 1)?)
+                } else {
+                    None
+                };
+                let match_mode = if arguments.len() >= 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?.trunc() as i32
+                } else {
+                    0
+                };
+                let search_mode = if arguments.len() >= 6 {
+                    to_number(&self.eval_scalar(&arguments[5], depth + 1)?)?.trunc() as i32
+                } else {
+                    1
+                };
+
+                let mut matched_index: Option<usize> = None;
+
+                if search_mode == -1 {
+                    for (i, val) in lookup_vals.iter().enumerate().rev() {
+                        if matches_lookup(&lookup_val, val, match_mode) {
+                            matched_index = Some(i);
+                            break;
+                        }
+                    }
+                } else {
+                    for (i, val) in lookup_vals.iter().enumerate() {
+                        if matches_lookup(&lookup_val, val, match_mode) {
+                            matched_index = Some(i);
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(idx) = matched_index {
+                    if l_cols == 1 && r_rows == l_rows {
+                        if r_cols == 1 {
+                            Ok(EvalValue::Scalar(ret_vals[idx].clone()))
+                        } else {
+                            let start = idx * r_cols;
+                            let end = start + r_cols;
+                            if end <= ret_vals.len() {
+                                Ok(EvalValue::Range {
+                                    values: ret_vals[start..end].to_vec(),
+                                    rows: 1,
+                                    cols: r_cols,
+                                })
+                            } else {
+                                Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())))
+                            }
+                        }
+                    } else if l_rows == 1 && r_cols == l_cols {
+                        if r_rows == 1 {
+                            Ok(EvalValue::Scalar(ret_vals[idx].clone()))
+                        } else {
+                            let mut col_values = Vec::with_capacity(r_rows);
+                            for r in 0..r_rows {
+                                col_values.push(ret_vals[r * r_cols + idx].clone());
+                            }
+                            Ok(EvalValue::Range {
+                                values: col_values,
+                                rows: r_rows,
+                                cols: 1,
+                            })
+                        }
+                    } else if idx < ret_vals.len() {
+                        Ok(EvalValue::Scalar(ret_vals[idx].clone()))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())))
+                    }
+                } else if let Some(nf) = if_not_found {
+                    Ok(EvalValue::Scalar(nf))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                }
+            }
+            "xmatch" => {
+                if !(2..=4).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let lookup_val = self.eval_scalar(&arguments[0], depth + 1)?;
+                let lookup_target = self.evaluate(&arguments[1], depth + 1)?;
+                let lookup_vals = match lookup_target {
+                    EvalValue::Range { values, .. } => values,
+                    EvalValue::Scalar(s) => vec![s],
+                };
+                let match_mode = if arguments.len() >= 3 {
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i32
+                } else {
+                    0
+                };
+                let search_mode = if arguments.len() >= 4 {
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?.trunc() as i32
+                } else {
+                    1
+                };
+
+                let mut matched_index: Option<usize> = None;
+
+                if search_mode == -1 {
+                    for (i, val) in lookup_vals.iter().enumerate().rev() {
+                        if matches_lookup(&lookup_val, val, match_mode) {
+                            matched_index = Some(i);
+                            break;
+                        }
+                    }
+                } else {
+                    for (i, val) in lookup_vals.iter().enumerate() {
+                        if matches_lookup(&lookup_val, val, match_mode) {
+                            matched_index = Some(i);
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(idx) = matched_index {
+                    Ok(EvalValue::Scalar(FormulaValue::Number((idx + 1) as f64)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                }
+            }
             "len" | "left" | "right" | "mid" | "concatenate" | "concat" | "value" | "trim"
             | "upper" | "lower" | "exact" | "rept" | "substitute" | "replace" | "char" | "code"
             | "clean" | "t" | "n" | "find" | "search" | "hyperlink" | "proper" | "unichar"
             | "unicode" | "hex2dec" | "dec2hex" | "bin2dec" | "dec2bin" | "oct2dec" | "dec2oct"
-            | "textjoin" => self.evaluate_string_function(name, arguments, depth + 1),
+            | "textjoin" | "textbefore" | "textafter" | "textsplit" => {
+                self.evaluate_string_function(name, arguments, depth + 1)
+            }
             _ => Err("unsupported"),
         }
     }
@@ -2065,6 +2403,154 @@ impl Evaluator<'_> {
                 self.check_string_size(&result)?;
                 Ok(EvalValue::Scalar(FormulaValue::String(result)))
             }
+            "textbefore" | "textafter" => {
+                if !(2..=6).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let delim = to_string(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let instance_num = if arguments.len() >= 3 {
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i64
+                } else {
+                    1
+                };
+                if instance_num == 0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                let match_mode = if arguments.len() >= 4 {
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?.trunc() as i32
+                } else {
+                    0
+                };
+                let match_end = if arguments.len() >= 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?.trunc() as i32
+                } else {
+                    0
+                };
+                let if_not_found = if arguments.len() >= 6 {
+                    Some(self.eval_scalar(&arguments[5], depth + 1)?)
+                } else {
+                    None
+                };
+
+                let mut match_indices = Vec::new();
+                if delim.is_empty() {
+                    match_indices.push(0);
+                } else if match_mode == 1 {
+                    let text_lower = text.to_ascii_lowercase();
+                    let delim_lower = delim.to_ascii_lowercase();
+                    let mut start = 0;
+                    while let Some(idx) = text_lower[start..].find(&delim_lower) {
+                        let abs_idx = start + idx;
+                        match_indices.push(abs_idx);
+                        start = abs_idx + delim.len();
+                    }
+                } else {
+                    let mut start = 0;
+                    while let Some(idx) = text[start..].find(&delim) {
+                        let abs_idx = start + idx;
+                        match_indices.push(abs_idx);
+                        start = abs_idx + delim.len();
+                    }
+                }
+
+                if match_end == 1 && !match_indices.contains(&text.len()) {
+                    match_indices.push(text.len());
+                }
+
+                let target_match: Option<usize> = if instance_num > 0 {
+                    let idx = (instance_num - 1) as usize;
+                    match_indices.get(idx).copied()
+                } else {
+                    let rev_idx = (-instance_num) as usize;
+                    if rev_idx <= match_indices.len() {
+                        Some(match_indices[match_indices.len() - rev_idx])
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(pos) = target_match {
+                    let result_str = if name == "textbefore" {
+                        text[..pos].to_string()
+                    } else {
+                        let after_pos = (pos + delim.len()).min(text.len());
+                        text[after_pos..].to_string()
+                    };
+                    self.check_string_size(&result_str)?;
+                    Ok(EvalValue::Scalar(FormulaValue::String(result_str)))
+                } else if let Some(nf) = if_not_found {
+                    Ok(EvalValue::Scalar(nf))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                }
+            }
+            "textsplit" => {
+                if !(2..=4).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let col_delim = to_string(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let row_delim = if arguments.len() >= 3 {
+                    let s = to_string(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                    if s.is_empty() { None } else { Some(s) }
+                } else {
+                    None
+                };
+                let ignore_empty = if arguments.len() >= 4 {
+                    to_bool(&self.eval_scalar(&arguments[3], depth + 1)?)?
+                } else {
+                    false
+                };
+
+                let mut rows_list: Vec<Vec<FormulaValue>> = Vec::new();
+                let row_splits: Vec<&str> = if let Some(ref rd) = row_delim {
+                    text.split(rd).collect()
+                } else {
+                    vec![&text]
+                };
+
+                let mut max_cols = 0;
+                for r_text in row_splits {
+                    if ignore_empty && r_text.is_empty() {
+                        continue;
+                    }
+                    let col_splits: Vec<FormulaValue> = if col_delim.is_empty() {
+                        vec![FormulaValue::String(r_text.to_string())]
+                    } else {
+                        r_text
+                            .split(&col_delim)
+                            .filter(|s| !ignore_empty || !s.is_empty())
+                            .map(|s| FormulaValue::String(s.to_string()))
+                            .collect()
+                    };
+                    max_cols = max_cols.max(col_splits.len());
+                    rows_list.push(col_splits);
+                }
+
+                let num_rows = rows_list.len();
+                let num_cols = max_cols;
+                let count = num_rows.saturating_mul(num_cols);
+                if count > self.limits.max_range_cells {
+                    return Err("resource_limit");
+                }
+                let mut flat_values = Vec::with_capacity(count);
+                for mut row in rows_list {
+                    while row.len() < num_cols {
+                        row.push(FormulaValue::Error("#N/A".into()));
+                    }
+                    flat_values.extend(row);
+                }
+                if num_rows == 1 && num_cols == 1 && !flat_values.is_empty() {
+                    Ok(EvalValue::Scalar(flat_values.remove(0)))
+                } else {
+                    Ok(EvalValue::Range {
+                        values: flat_values,
+                        rows: num_rows,
+                        cols: num_cols,
+                    })
+                }
+            }
             _ => Err("unsupported"),
         }
     }
@@ -2197,6 +2683,52 @@ fn values_greater_than_or_equal(left: &FormulaValue, right: &FormulaValue) -> bo
             _ => false,
         },
     }
+}
+
+fn matches_lookup(pattern: &FormulaValue, candidate: &FormulaValue, match_mode: i32) -> bool {
+    match match_mode {
+        0 => values_equal(pattern, candidate),
+        -1 => values_less_than_or_equal(candidate, pattern),
+        1 => values_greater_than_or_equal(candidate, pattern),
+        2 => {
+            if let (Ok(pat), Ok(cand)) = (to_string(pattern), to_string(candidate)) {
+                wildcard_match(&pat.to_ascii_lowercase(), &cand.to_ascii_lowercase())
+            } else {
+                values_equal(pattern, candidate)
+            }
+        }
+        _ => false,
+    }
+}
+
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let p_bytes = pattern.as_bytes();
+    let t_bytes = text.as_bytes();
+    let mut p = 0;
+    let mut t = 0;
+    let mut star_idx = None;
+    let mut match_idx = 0;
+
+    while t < t_bytes.len() {
+        if p < p_bytes.len() && (p_bytes[p] == b'?' || p_bytes[p] == t_bytes[t]) {
+            p += 1;
+            t += 1;
+        } else if p < p_bytes.len() && p_bytes[p] == b'*' {
+            star_idx = Some(p);
+            p += 1;
+            match_idx = t;
+        } else if let Some(star) = star_idx {
+            p = star + 1;
+            match_idx += 1;
+            t = match_idx;
+        } else {
+            return false;
+        }
+    }
+    while p < p_bytes.len() && p_bytes[p] == b'*' {
+        p += 1;
+    }
+    p == p_bytes.len()
 }
 
 fn proper(text: &str) -> String {
@@ -3511,6 +4043,246 @@ mod tests {
         assert_eq!(
             evaluate_formula("=ATAN2(1, 1)", None, &[], Default::default()).value,
             Some(FormulaValue::Number(std::f64::consts::PI / 4.0))
+        );
+    }
+
+    #[test]
+    fn evaluates_bitwise_datetime_and_modern_lookup_functions() {
+        let cells = [
+            cell("A1", "101", "n"),
+            cell("A2", "116", "n"),
+            cell("A3", "116", "n"),
+            cell("A4", "112", "n"),
+            cell("B1", "cmd", "s"),
+            cell("B2", "powershell", "s"),
+            cell("B3", "mshta", "s"),
+            cell("C1", "/c calc", "s"),
+            cell("C2", "-enc evil", "s"),
+            cell("C3", "http://c2/x.hta", "s"),
+        ];
+
+        // Bitwise functions: BITAND, BITOR, BITXOR, BITLSHIFT, BITRSHIFT
+        assert_eq!(
+            evaluate_formula("=BITAND(6, 3)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula("=BITOR(6, 3)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(7.0))
+        );
+        assert_eq!(
+            evaluate_formula("=BITXOR(6, 3)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(5.0))
+        );
+        assert_eq!(
+            evaluate_formula("=BITLSHIFT(4, 2)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(16.0))
+        );
+        assert_eq!(
+            evaluate_formula("=BITRSHIFT(16, 2)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(4.0))
+        );
+
+        // Bitwise decryption de-obfuscation: CHAR(BITXOR(A1, 23))
+        // 101 ^ 23 = 114 ('r')
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(BITXOR(A1, 23))",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("r".into()))
+        );
+
+        // Date & Time: DATE, YEAR, MONTH, DAY, TIME, HOUR, MINUTE, SECOND, EDATE, EOMONTH
+        let date_eval = evaluate_formula("=DATE(2023, 10, 15)", None, &[], Default::default());
+        let date_val = match date_eval.value {
+            Some(FormulaValue::Number(n)) => n,
+            other => panic!("expected date serial, got {other:?}"),
+        };
+        assert_eq!(
+            evaluate_formula(&format!("=YEAR({date_val})"), None, &[], Default::default()).value,
+            Some(FormulaValue::Number(2023.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                &format!("=MONTH({date_val})"),
+                None,
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(10.0))
+        );
+        assert_eq!(
+            evaluate_formula(&format!("=DAY({date_val})"), None, &[], Default::default()).value,
+            Some(FormulaValue::Number(15.0))
+        );
+        assert_eq!(
+            evaluate_formula("=HOUR(TIME(14, 30, 45))", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(14.0))
+        );
+        assert_eq!(
+            evaluate_formula("=MINUTE(TIME(14, 30, 45))", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(30.0))
+        );
+        assert_eq!(
+            evaluate_formula("=SECOND(TIME(14, 30, 45))", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(45.0))
+        );
+        let edate_eval = evaluate_formula(
+            &format!("=EDATE({date_val}, 2)"),
+            None,
+            &[],
+            Default::default(),
+        );
+        let edate_val = match edate_eval.value {
+            Some(FormulaValue::Number(n)) => n,
+            other => panic!("expected edate serial, got {other:?}"),
+        };
+        assert_eq!(
+            evaluate_formula(
+                &format!("=MONTH({edate_val})"),
+                None,
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(12.0))
+        );
+        let eomonth_eval = evaluate_formula(
+            &format!("=EOMONTH({date_val}, 0)"),
+            None,
+            &[],
+            Default::default(),
+        );
+        let eomonth_val = match eomonth_eval.value {
+            Some(FormulaValue::Number(n)) => n,
+            other => panic!("expected eomonth serial, got {other:?}"),
+        };
+        assert_eq!(
+            evaluate_formula(
+                &format!("=DAY({eomonth_val})"),
+                None,
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(31.0))
+        );
+
+        // Information: ISERR, ISREF
+        assert_eq!(
+            evaluate_formula("=ISERR(1/0)", None, &[], Default::default()).value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula("=ISERR(NA())", None, &[], Default::default()).value,
+            Some(FormulaValue::Boolean(false))
+        );
+        assert_eq!(
+            evaluate_formula("=ISREF(A1)", None, &[], Default::default()).value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula("=ISREF(123)", None, &[], Default::default()).value,
+            Some(FormulaValue::Boolean(false))
+        );
+
+        // Modern Lookup: XLOOKUP, XMATCH
+        assert_eq!(
+            evaluate_formula(
+                "=XLOOKUP(\"cmd\", B1:B3, C1:C3)",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("/c calc".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=XLOOKUP(\"powershell\", B1:B3, C1:C3)",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("-enc evil".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=XLOOKUP(\"unknown\", B1:B3, C1:C3, \"clean\")",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("clean".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=XLOOKUP(\"power*\", B1:B3, C1:C3, \"none\", 2)",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("-enc evil".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=XMATCH(\"powershell\", B1:B3)",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(2.0))
+        );
+
+        // Modern Text: TEXTBEFORE, TEXTAFTER, TEXTSPLIT
+        assert_eq!(
+            evaluate_formula(
+                "=TEXTBEFORE(\"cmd.exe /c calc\", \" \")",
+                None,
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cmd.exe".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=TEXTAFTER(\"cmd.exe /c calc\", \"/c \")",
+                None,
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("calc".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(TEXTSPLIT(\"cmd,powershell,wscript\", \",\"), 1, 2)",
+                None,
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("powershell".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=CONCAT(TEXTSPLIT(\"a,b,c\", \",\"))",
+                None,
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("abc".into()))
         );
     }
 }
