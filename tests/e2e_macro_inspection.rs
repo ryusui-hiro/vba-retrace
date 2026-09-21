@@ -3379,3 +3379,177 @@ fn e2e_word_ppt_altchunk_and_let_threat_inspection() {
         "JSON missing VBA-CELL-025"
     );
 }
+
+#[test]
+fn e2e_customui_dialogsheet_contenttype_and_lambda_threat_inspection() {
+    let custom_ui_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<customUI xmlns="http://schemas.microsoft.com/office/2006/01/customui" onLoad="MaliciousAutoLoad">
+  <ribbon>
+    <tabs>
+      <tab id="customTab" label="Lure">
+        <group id="customGroup" label="Actions">
+          <button id="customBtn" label="Enable Content" onAction="LaunchPayload" />
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>"#;
+
+    let dialog_sheet_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<dialogSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+             xmlns:x="urn:schemas-microsoft-com:office:excel">
+  <sheetData/>
+  <x:FmlaMacro>LaunchAttackMacro</x:FmlaMacro>
+</dialogSheet>"#;
+
+    let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="str">
+        <f>LET(dec, LAMBDA(c, k, CHAR(BITXOR(c, k))), dec(97, 2) &amp; dec(111, 2) &amp; dec(102, 2) &amp; ".exe|'/c calc'!A0")</f>
+        <v></v>
+      </c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    let workbook_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let content_types = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Default Extension="exe" ContentType="application/x-msdownload"/>
+  <Override PartName="/xl/media/image1.png" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Override PartName="/xl/../../etc/passwd" ContentType="text/plain"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/dialogsheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.dialogsheet+xml"/>
+</Types>"#;
+
+    let root_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/ui/extensibility" Target="customUI/customUI.xml"/>
+</Relationships>"#;
+
+    let wb_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/dialogsheet" Target="dialogsheets/sheet1.xml"/>
+</Relationships>"#;
+
+    let project_bytes = synthesize_cfb_project(
+        "VBAProject",
+        &[("Module1", "Sub AutoOpen()\nEnd Sub\n", &[])],
+        &[],
+    );
+
+    let entries: Vec<(&str, &[u8])> = vec![
+        ("[Content_Types].xml", content_types),
+        ("_rels/.rels", root_rels),
+        ("xl/_rels/workbook.xml.rels", wb_rels),
+        ("customUI/customUI.xml", custom_ui_xml),
+        ("xl/dialogsheets/sheet1.xml", dialog_sheet_xml),
+        ("xl/worksheets/sheet1.xml", sheet_xml),
+        ("xl/workbook.xml", workbook_xml),
+        ("xl/vbaProject.bin", &project_bytes),
+    ];
+
+    let zip_bytes = synthesize_zip(&entries);
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("Inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify CustomUiRibbon (VBA-CELL-026)
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "CustomUiRibbon"
+            && t.coordinate.contains("onLoad:MaliciousAutoLoad")
+            && t.severity == "Critical"),
+        "Should detect customUI onLoad callback: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "CustomUiRibbon"
+            && t.coordinate.contains("onAction:LaunchPayload")
+            && t.severity == "High"),
+        "Should detect customUI onAction callback: {threats:?}"
+    );
+
+    // 2. Verify LegacyDialogSheet (VBA-CELL-027)
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "LegacyDialogSheet"
+            && t.coordinate.contains("macro:LaunchAttackMacro")),
+        "Should detect legacy dialog sheet macro binding: {threats:?}"
+    );
+
+    // 3. Verify ContentTypeAnomaly (VBA-CELL-028)
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "ContentTypeAnomaly"
+            && t.coordinate.contains("override:/xl/media/image1.png")
+            && t.severity == "Critical"),
+        "Should detect MIME extension spoofing (image1.png as vbaProject): {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "ContentTypeAnomaly"
+            && t.coordinate.contains("part:/xl/../../etc/passwd")
+            && t.severity == "Critical"),
+        "Should detect path traversal in [Content_Types].xml PartName: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "ContentTypeAnomaly"
+            && t.coordinate.contains("mime:application/x-msdownload")
+            && t.severity == "Critical"),
+        "Should detect dangerous executable MIME type in [Content_Types].xml: {threats:?}"
+    );
+
+    // 4. Verify Cell A1 resolves DDE via LAMBDA formula de-obfuscation
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("cmd.exe|'/c calc'!A0")),
+        "Cell A1 should resolve DDE through LAMBDA evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF rules VBA-CELL-026, VBA-CELL-027, VBA-CELL-028
+    let sarif = inspection_to_sarif(&inspection, "file:///test/customui_dialogsheet.xlsm");
+    assert!(
+        sarif.contains("VBA-CELL-026"),
+        "SARIF must contain VBA-CELL-026 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-027"),
+        "SARIF must contain VBA-CELL-027 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-028"),
+        "SARIF must contain VBA-CELL-028 rule"
+    );
+
+    // 6. Verify JSON output contains rule_id VBA-CELL-026, VBA-CELL-027, VBA-CELL-028
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-026\""),
+        "JSON missing VBA-CELL-026"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-027\""),
+        "JSON missing VBA-CELL-027"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-028\""),
+        "JSON missing VBA-CELL-028"
+    );
+}
