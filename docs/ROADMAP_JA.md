@@ -8,7 +8,10 @@
 - `.xlsm`、`.xlsb`、`.docm`、`.pptm`、レガシー`.xls`、生`vbaProject.bin`のZIP/OPC・CFB・MS-OVBA直接マクロ抽出。
 - 組み込み標準VBA P-code命令スキーマ（VBA6/VBA7、32-bit/64-bit、全264 opcode）および`_VBA_PROJECT`識別子テーブル解決による高精度P-code逆アセンブラ。
 - ソース非公開・隠しプロシージャ・不審な文字列・危険API呼出の乖離を自動診断するVBA Stomping・改竄検出エンジン。
-- エンドツーエンドの`inspect_macro_file`統合検査APIおよびCLIコマンド（`disasm`, `stomping`, `inspect`）。
+- ワークシート危険セル脅威スキャン（DDE数式実行、XLM/Excel 4.0マクロ、RemoteLink、WEBSERVICE/FILTERXML、不審な外部URLハイパーリンク、自動実行定義名、`xlSheetVeryHidden`不可視化、XLMマクロシート）。
+- エンドツーエンドの`inspect_macro_file`統合検査APIおよびCLIコマンド（`disasm`, `stomping`, `inspect`、`--format sarif|json|markdown|text`）。
+- OASIS SARIF v2.1.0 準拠レポート出力（`stomping_to_sarif`, `inspection_to_sarif`）による GitHub Advanced Security / Code Scanning / CI 連携。
+- Python（universal ABI3）および Node.js（N-API）向け高パフォーマンスネイティブバインディングの提供。
 - ByRef、ParamArray slot、caller/callee戻り値、配列境界、Date/文字列/数値intrinsicの安全な部分集合。
 - caller提供opcode/operand/semantic schemaによるp-code抽象stack、local slot、branch/path、Null/Empty/Error、float、known-return summary。
 - source disclosure、有限resource limits、MITライセンス、CI、security policy、最低Rust版1.88.0の検証。
