@@ -206,7 +206,7 @@ if cell_threats:
         print(f"  - [{threat['rule_id']}] {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
 
 # 3. 导出符合 OASIS SARIF v2.1.0 标准的安全报告（对接 GitHub Code Scanning / CI）
-# (包含 VBA Stomping VBA-STOMP-001..010 与 容器/单元格威胁 VBA-CELL-001..014 规则)
+# (包含 VBA Stomping VBA-STOMP-001..010 与 容器/单元格威胁 VBA-CELL-001..017 规则)
 sarif_json = vba_insight.inspect_file_sarif("suspicious.xlsm")
 with open("security_report.sarif", "w", encoding="utf-8") as f:
     f.write(sarif_json)
@@ -338,9 +338,12 @@ console.log('静态分析完成。是否执行代码:', parsedAnalysis.project.c
 | `VBA-CELL-012` | `ExternalOleObject` | **High** | 关系文件引用外部 OLE 对象（`oleObject`，HTTP/HTTPS/SMB），实现远程 Moniker 或漏洞利用。 |
 | `VBA-CELL-013` | `ActiveXControlPresent` | **Medium** | OOXML 容器包在 `/activex/` 中包含嵌入式 ActiveX 控件，可用于无宏利用。 |
 | `VBA-CELL-014` | `ExternalSubdocumentReference` | **High** | 关系文件引用外部子文档或框架（`subDocument` / `frame`，HTTP/HTTPS/SMB）。 |
+| `VBA-CELL-015` | `SuspiciousPrinterSettings` | **High** | 打印机设置（`printerSettings*.bin`）包含外部 UNC 路径（`\\host\share`）、远程 URL 或命令执行触发器（CVE-2023-36884 / Storm-0978）。 |
+| `VBA-CELL-016` | `CustomXmlPayloadSmuggling` | **High** | 自定义 XML 部件（`/customXml/*.xml`）中走私 Base64 编码 PE 可执行文件、XXE 实体注入或脚本/HTML 载荷。 |
+| `VBA-CELL-017` | `SuspiciousProtocolHandler` | **Critical** | 关系目标引用危险协议处理程序（`ms-msdt:` / Follina CVE-2022-30190、`search-ms:`、`ms-appinstaller:`、`mhtml:`、`javascript:`、`vbscript:` 等）。 |
 
-- **容器级威胁深度审查**: 即使在无宏代码的 DOCX/XLSX 攻击样本中，也能自动审查 OOXML 关系及部件，检测远程模板注入、内嵌 OLE 漏洞载荷、外部 Moniker 链接及 ActiveX 控件。
-- **动态公式反混淆求值（De-obfuscation）**: 对网格动态解析（`INDIRECT()`, `OFFSET()`, `ADDRESS()`）、位运算解密（`BITXOR()`, `BITAND()`, `BITOR()`, `BITLSHIFT()`, `BITRSHIFT()`）、现代动态检索（`XLOOKUP()`, `XMATCH()`）、文本拆解（`TEXTBEFORE()`, `TEXTAFTER()`, `TEXTSPLIT()`）、多单元格区域拼接（`CONCAT()`, `TEXTJOIN()`）、二维表格检索（`INDEX()`, `VLOOKUP()`, `HLOOKUP()`, `MATCH()`）、进制与 Unicode 转换（`HEX2DEC()`, `BIN2DEC()`, `UNICHAR()`）以及数学/字符串函数（`CHAR()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`）的复杂混淆公式执行有界求值与递归解析，自动还原并捕获规避静态匹配的异或解密与多单元格拼接 DDE 命令、LOLBins 及远程恶意下载载荷。
+- **容器级威胁深度审查**: 即使在无宏代码的 DOCX/XLSX 攻击样本中，也能自动审查 OOXML 关系及部件，检测远程模板注入、内嵌 OLE 漏洞载荷、外部 Moniker 链接、ActiveX 控件、打印机设置 UNC 诱导、自定义 XML 载荷走私及危险协议处理程序。
+- **动态公式反混淆求值（De-obfuscation）**: 对网格动态解析（`INDIRECT()`, `OFFSET()`, `ADDRESS()`）、位运算解密（`BITXOR()`, `BITAND()`, `BITOR()`, `BITLSHIFT()`, `BITRSHIFT()`）、进制转换（`BASE()`, `DECIMAL()`, `HEX2DEC()`, `BIN2DEC()`）、现代动态数组变形（`TAKE()`, `DROP()`, `CHOOSEROWS()`, `CHOOSECOLS()`, `TOROW()`, `TOCOL()`, `EXPAND()`）、现代动态检索（`XLOOKUP()`, `XMATCH()`）、文本拆解与序列化（`TEXTBEFORE()`, `TEXTAFTER()`, `TEXTSPLIT()`, `ARRAYTOTEXT()`, `VALUETOTEXT()`）、多单元格区域拼接（`CONCAT()`, `TEXTJOIN()`）、二维表格检索（`INDEX()`, `VLOOKUP()`, `HLOOKUP()`, `MATCH()`）、Unicode 转换（`UNICHAR()`, `UNICODE()`）以及数学/字符串函数（`CHAR()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`）的复杂混淆公式执行有界求值与递归解析，自动还原并捕获规避静态匹配的异或解密与多单元格拼接 DDE 命令、LOLBins 及远程恶意下载载荷。
 - **全角字符混淆逃逸防御**: 在检查公式前，自动将全角字符（`U+FF01`–`U+FF5E`、`U+3000`）规范化映射为标准 ASCII，破坏利用全角字符绕过安全检查的企图。
 
 ---

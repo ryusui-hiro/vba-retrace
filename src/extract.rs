@@ -561,6 +561,19 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("textbefore")
                 || f_lower.contains("textafter")
                 || f_lower.contains("textsplit")
+                || f_lower.contains("base")
+                || f_lower.contains("decimal")
+                || f_lower.contains("delta")
+                || f_lower.contains("gestep")
+                || f_lower.contains("take")
+                || f_lower.contains("drop")
+                || f_lower.contains("chooserows")
+                || f_lower.contains("choosecols")
+                || f_lower.contains("torow")
+                || f_lower.contains("tocol")
+                || f_lower.contains("expand")
+                || f_lower.contains("arraytotext")
+                || f_lower.contains("valuetotext")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -1271,6 +1284,9 @@ pub fn extract_macro_container(data: &[u8], limits: &Limits) -> Result<Extracted
 /// - External OLE object reference (`VBA-CELL-012`, High)
 /// - Embedded ActiveX control (`VBA-CELL-013`, Medium)
 /// - External subdocument / frame reference (`VBA-CELL-014`, High)
+/// - Suspicious printer settings with UNC path or external target (`VBA-CELL-015`, High)
+/// - Custom XML payload / executable / XXE smuggling (`VBA-CELL-016`, High)
+/// - Suspicious protocol handlers (ms-msdt, search-ms, etc.) in relationships (`VBA-CELL-017`, Critical)
 pub fn scan_ooxml_package_threats(
     zip: &ZipArchive<'_>,
     threats: &mut Vec<CellThreat>,
@@ -1293,6 +1309,176 @@ pub fn scan_ooxml_package_threats(
             || lower.starts_with("ms-msdt:")
             || lower.starts_with("search-ms:")
             || lower.starts_with("javascript:")
+    }
+
+    fn scan_printer_settings_bytes(data: &[u8]) -> Option<String> {
+        // 1. Look for ASCII UNC: "\\" or "//" followed by at least 2 characters and "\" or "/"
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || w == b"//") && i + 4 < data.len() {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'\r'
+                            || b == b'\n'
+                            || b == b'<'
+                            || b == b'>'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if end < 4 {
+                    continue;
+                }
+                if let Some(s) = std::str::from_utf8(&rest[..end])
+                    .ok()
+                    .filter(|s| s.contains('\\') || s.contains('/'))
+                {
+                    return Some(format!("UNC path '{s}'"));
+                }
+            }
+        }
+        // 2. Look for UTF-16LE UNC: &[0x5c, 0x00, 0x5c, 0x00] or &[0x2f, 0x00, 0x2f, 0x00]
+        for (i, w) in data.windows(4).enumerate() {
+            if (w == [0x5c, 0x00, 0x5c, 0x00] || w == [0x2f, 0x00, 0x2f, 0x00])
+                && i + 8 <= data.len()
+            {
+                let rest = &data[i..];
+                let mut u16s = Vec::new();
+                for chunk in rest.chunks_exact(2) {
+                    let code = u16::from_le_bytes([chunk[0], chunk[1]]);
+                    if code == 0
+                        || code == b' ' as u16
+                        || code == b'"' as u16
+                        || code == b'\'' as u16
+                        || code == b'\r' as u16
+                        || code == b'\n' as u16
+                        || code == b'<' as u16
+                        || code == b'>' as u16
+                        || u16s.len() >= 128
+                    {
+                        break;
+                    }
+                    u16s.push(code);
+                }
+                if let Some(s) = String::from_utf16(&u16s)
+                    .ok()
+                    .filter(|s| s.len() >= 4 && (s.contains('\\') || s.contains('/')))
+                {
+                    return Some(format!("UTF-16LE UNC path '{s}'"));
+                }
+            }
+        }
+        // 3. URLs in ASCII or UTF-16LE
+        let data_str_lossy = String::from_utf8_lossy(data);
+        let lower = data_str_lossy.to_ascii_lowercase();
+        if let Some(idx) = lower.find("http://").or_else(|| lower.find("https://")) {
+            let snippet = &lower[idx..lower.len().min(idx + 100)];
+            let end = snippet
+                .find(|c: char| c.is_whitespace() || c == '\0' || c == '"' || c == '\'')
+                .unwrap_or(snippet.len());
+            return Some(format!("URL '{}'", &snippet[..end]));
+        }
+        let u16_chars: Vec<u16> = data
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        if let Ok(u16_str) = String::from_utf16(&u16_chars) {
+            let u16_lower = u16_str.to_ascii_lowercase();
+            if let Some(idx) = u16_lower
+                .find("http://")
+                .or_else(|| u16_lower.find("https://"))
+            {
+                let snippet = &u16_lower[idx..u16_lower.len().min(idx + 100)];
+                let end = snippet
+                    .find(|c: char| c.is_whitespace() || c == '\0' || c == '"' || c == '\'')
+                    .unwrap_or(snippet.len());
+                return Some(format!("UTF-16LE URL '{}'", &snippet[..end]));
+            }
+        }
+        // 4. Shell / command execution keywords
+        for &kw in &[
+            "powershell",
+            "cmd.exe",
+            "mshta",
+            "rundll32",
+            "cscript",
+            "wscript",
+        ] {
+            if lower.contains(kw) {
+                return Some(format!("Command trigger '{kw}'"));
+            }
+        }
+        None
+    }
+
+    fn scan_custom_xml_content(data: &[u8]) -> Option<(&'static str, String)> {
+        let s = String::from_utf8_lossy(data);
+        let lower = s.to_ascii_lowercase();
+
+        // 1. Base64 PE DOS stub
+        for pe_sig in &["tvqqaamaaaaeaaaa", "tvoaaa", "tvpaaa", "tvpbaa"] {
+            if lower.contains(pe_sig) {
+                return Some((
+                    "Base64 PE Executable Header",
+                    format!("Matched PE DOS stub '{pe_sig}'"),
+                ));
+            }
+        }
+
+        // 2. XXE / XML External Entity
+        if lower.contains("<!entity") && (lower.contains("system") || lower.contains("public")) {
+            let start = lower.find("<!entity").unwrap_or(0);
+            let end = s[start..]
+                .find('>')
+                .map(|e| start + e + 1)
+                .unwrap_or(s.len().min(start + 80));
+            return Some((
+                "XML External Entity (XXE) Injection",
+                s[start..end].trim().to_string(),
+            ));
+        }
+
+        // 3. Script / Shell commands
+        for &kw in &[
+            "<script",
+            "wscript.shell",
+            "powershell",
+            "cmd.exe",
+            "mshta",
+            "rundll32",
+            "cscript",
+            "certutil",
+        ] {
+            if lower.contains(kw) {
+                return Some((
+                    "Smuggled Script / Shell Execution Tag",
+                    format!("Found execution trigger '{kw}'"),
+                ));
+            }
+        }
+
+        // 4. Dangerous protocol handlers in XML
+        for &proto in &["ms-msdt:", "search-ms:", "ms-appinstaller:", "mhtml:"] {
+            if lower.contains(proto) {
+                return Some((
+                    "Dangerous Protocol Handler Smuggling",
+                    format!("Found exploit scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 5. HTML Smuggling
+        if lower.contains("data:text/html;base64,") {
+            return Some((
+                "HTML Smuggling Payload",
+                "Found 'data:text/html;base64,' data URI".into(),
+            ));
+        }
+
+        None
     }
 
     // 1. Inspect package parts / entry names for embedded binaries and controls
@@ -1348,6 +1534,61 @@ pub fn scan_ooxml_package_threats(
                     formula: entry.name.clone(),
                     description: desc,
                 });
+            }
+        }
+
+        // Check for suspicious printer settings (printerSettings*.bin)
+        let is_printer = (name_lower.contains("printersettings")
+            || name_lower.contains("printer_settings"))
+            && name_lower.ends_with(".bin");
+        if is_printer {
+            let Ok(data) = zip.read(entry) else { continue };
+            if let Some(indicator) = scan_printer_settings_bytes(&data) {
+                let coord = format!("part:{}", entry.name);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Suspicious printer settings part '{}' contains dangerous external target or UNC path ({indicator})",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Package".into(),
+                        cell_ref: entry.name.clone(),
+                        coordinate: coord,
+                        threat_kind: "SuspiciousPrinterSettings".into(),
+                        severity: "High".into(),
+                        formula: entry.name.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Custom XML payload smuggling (/customXml/*.xml)
+        let is_custom_xml = (name_lower.contains("/customxml/")
+            || name_lower.starts_with("customxml/")
+            || name_lower.contains("\\customxml\\"))
+            && name_lower.ends_with(".xml");
+        if is_custom_xml {
+            let Ok(data) = zip.read(entry) else { continue };
+            if let Some((kind, details)) = scan_custom_xml_content(&data) {
+                let coord = format!("part:{}", entry.name);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Custom XML payload smuggling detected in part '{}': {kind} ({details})",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Package".into(),
+                        cell_ref: entry.name.clone(),
+                        coordinate: coord,
+                        threat_kind: "CustomXmlPayloadSmuggling".into(),
+                        severity: "High".into(),
+                        formula: entry.name.clone(),
+                        description: desc,
+                    });
+                }
             }
         }
     }
@@ -1424,6 +1665,63 @@ pub fn scan_ooxml_package_threats(
                             coordinate: coord,
                             threat_kind: "ExternalSubdocument".into(),
                             severity: "High".into(),
+                            formula: rel.target.clone(),
+                            description: desc,
+                        });
+                    }
+                }
+
+                // Check for External Printer Settings
+                if rel_type.contains("printersettings") && is_ext {
+                    let coord = format!("rel:{}->{}", rels_part, rel.id);
+                    if !threats.iter().any(|t| t.coordinate == coord) {
+                        let desc = format!(
+                            "Suspicious external printer settings relationship '{}' in '{}' targets external resource '{}'",
+                            rel.id, rels_part, rel.target
+                        );
+                        diagnostics.push(format!("Security warning: {desc}"));
+                        threats.push(CellThreat {
+                            sheet_name: "Package".into(),
+                            cell_ref: rel.id.clone(),
+                            coordinate: coord,
+                            threat_kind: "SuspiciousPrinterSettings".into(),
+                            severity: "High".into(),
+                            formula: rel.target.clone(),
+                            description: desc,
+                        });
+                    }
+                }
+
+                // Check for Suspicious Protocol Handler (ms-msdt, search-ms, ms-appinstaller, mhtml, javascript, vbscript, remote file://)
+                let target_lower = rel.target.to_ascii_lowercase();
+                let is_suspicious_proto = target_lower.starts_with("ms-msdt:")
+                    || target_lower.starts_with("search-ms:")
+                    || target_lower.starts_with("ms-appinstaller:")
+                    || target_lower.starts_with("mhtml:")
+                    || target_lower.starts_with("javascript:")
+                    || target_lower.starts_with("vbscript:")
+                    || target_lower.starts_with("file:////")
+                    || target_lower.starts_with("file://\\\\");
+
+                if is_suspicious_proto
+                    && !rel_type.contains("attachedtemplate")
+                    && !rel_type.contains("oleobject")
+                    && !rel_type.contains("subdocument")
+                    && !rel_type.contains("frame")
+                {
+                    let coord = format!("rel:{}->{}", rels_part, rel.id);
+                    if !threats.iter().any(|t| t.coordinate == coord) {
+                        let desc = format!(
+                            "Suspicious protocol handler / URI exploit target detected: relationship '{}' in '{}' targets '{}'",
+                            rel.id, rels_part, rel.target
+                        );
+                        diagnostics.push(format!("Security warning: {desc}"));
+                        threats.push(CellThreat {
+                            sheet_name: "Package".into(),
+                            cell_ref: rel.id.clone(),
+                            coordinate: coord,
+                            threat_kind: "SuspiciousProtocolHandler".into(),
+                            severity: "Critical".into(),
                             formula: rel.target.clone(),
                             description: desc,
                         });

