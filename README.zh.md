@@ -206,7 +206,7 @@ if cell_threats:
         print(f"  - [{threat['rule_id']}] {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
 
 # 3. 导出符合 OASIS SARIF v2.1.0 标准的安全报告（对接 GitHub Code Scanning / CI）
-# (包含 VBA Stomping VBA-STOMP-001..010 与 单元格威胁 VBA-CELL-001..009 规则)
+# (包含 VBA Stomping VBA-STOMP-001..010 与 容器/单元格威胁 VBA-CELL-001..014 规则)
 sarif_json = vba_insight.inspect_file_sarif("suspicious.xlsm")
 with open("security_report.sarif", "w", encoding="utf-8") as f:
     f.write(sarif_json)
@@ -318,9 +318,9 @@ console.log('静态分析完成。是否执行代码:', parsedAnalysis.project.c
 | `VBA-STOMP-009` | `ProjectLockedOrUnviewable` | **Low** | VBA 项目包含保护/锁定属性（`CMG`、`DPB`、`GC`），导致在常规 Office VBA IDE 中无法查看代码。 |
 | `VBA-STOMP-010` | `SourceCorruptedWithValidPCode` | **Critical** | 模块源代码容器在 MS-OVBA 解压时损坏，但有效的已编译 P-Code 仍可正常执行。 |
 
-### 2. 工作表单元格与工作簿威胁扫描器
+### 2. 容器包与工作表单元格威胁扫描器
 
-`vba-insight` 针对工作簿公式、定义名及工作表元数据进行 9 项专业安全规则筛查：
+`vba-insight` 针对容器包结构（OOXML 关系、内嵌 OLE 部件）、工作簿公式、定义名及工作表元数据进行 14 项专业安全规则筛查：
 
 | 规则编号 | 违规类型 | 严重程度 | 规则描述与检测逻辑 |
 |---|---|:---:|---|
@@ -333,7 +333,13 @@ console.log('静态分析完成。是否执行代码:', parsedAnalysis.project.c
 | `VBA-CELL-007` | `VeryHiddenWorksheet` | **Low** | 工作表被标记为 `state="veryHidden"`，在标准 Excel 用户界面中不可见，通常用于隐匿恶意载荷。 |
 | `VBA-CELL-008` | `XlmMacroSheetPresent` | **Critical** | 工作簿包含容易被恶意利用的传统 Excel 4.0 宏工作表。 |
 | `VBA-CELL-009` | `DeobfuscatedThreatFormula` | **Critical** | 公式混淆（`CHAR`, `CONCATENATE`, 字符串替换等）动态解析为可执行文件、命令行或 DDE 载荷。 |
+| `VBA-CELL-010` | `RemoteTemplateInjection` | **Critical** | 关系文件引用外部远程模板（`attachedTemplate`，HTTP/HTTPS/SMB），加载恶意远程 dotm 载荷。 |
+| `VBA-CELL-011` | `EmbeddedOlePackage` | **High** | OOXML 容器包在 `/embeddings/` 中包含嵌入式 OLE 二进制或包装载荷（如 CVE-2017-11882 公式编辑器利用程序）。 |
+| `VBA-CELL-012` | `ExternalOleObject` | **High** | 关系文件引用外部 OLE 对象（`oleObject`，HTTP/HTTPS/SMB），实现远程 Moniker 或漏洞利用。 |
+| `VBA-CELL-013` | `ActiveXControlPresent` | **Medium** | OOXML 容器包在 `/activex/` 中包含嵌入式 ActiveX 控件，可用于无宏利用。 |
+| `VBA-CELL-014` | `ExternalSubdocumentReference` | **High** | 关系文件引用外部子文档或框架（`subDocument` / `frame`，HTTP/HTTPS/SMB）。 |
 
+- **容器级威胁深度审查**: 即使在无宏代码的 DOCX/XLSX 攻击样本中，也能自动审查 OOXML 关系及部件，检测远程模板注入、内嵌 OLE 漏洞载荷、外部 Moniker 链接及 ActiveX 控件。
 - **动态公式反混淆求值（De-obfuscation）**: 对使用 `CHAR()`、`UNICHAR()`、`HEX2DEC()`、`BIN2DEC()`、`INDEX()`、`VLOOKUP()`、`TEXTJOIN()`、`&`、`CONCATENATE()`、`MID()`、`SUBSTITUTE()`、`CHOOSE()`、`HYPERLINK()` 等函数的复杂混淆公式执行有界求值，自动还原并捕获规避静态匹配的 LOLBins、DDE 命令及危险下载载荷。
 - **全角字符混淆逃逸防御**: 在检查公式前，自动将全角字符（`U+FF01`–`U+FF5E`、`U+3000`）规范化映射为标准 ASCII，破坏利用全角字符绕过安全检查的企图。
 

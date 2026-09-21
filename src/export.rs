@@ -3040,6 +3040,11 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "VeryHiddenSheet" => ("VBA-CELL-007", "note"),
         "XlmMacroSheet" => ("VBA-CELL-008", "error"),
         "DeobfuscatedThreat" => ("VBA-CELL-009", "error"),
+        "RemoteTemplateInjection" => ("VBA-CELL-010", "error"),
+        "EmbeddedOlePackage" => ("VBA-CELL-011", "error"),
+        "ExternalOleObject" => ("VBA-CELL-012", "error"),
+        "ActiveXControl" => ("VBA-CELL-013", "warning"),
+        "ExternalSubdocument" => ("VBA-CELL-014", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3116,7 +3121,22 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-008\",\"name\":\"XlmMacroSheetPresent\",\"shortDescription\":{\"text\":\"Excel 4.0 (XLM) Macro Sheet Present\"},\"fullDescription\":{\"text\":\"Workbook contains legacy Excel 4.0 macro sheet, frequently used in malware payloads.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-009\",\"name\":\"DeobfuscatedThreatFormula\",\"shortDescription\":{\"text\":\"De-obfuscated Threat Formula\"},\"fullDescription\":{\"text\":\"Formula obfuscation (CHAR, CONCATENATE, string substitution) resolves dynamically to an executable, command, or DDE payload.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-009\",\"name\":\"DeobfuscatedThreatFormula\",\"shortDescription\":{\"text\":\"De-obfuscated Threat Formula\"},\"fullDescription\":{\"text\":\"Formula obfuscation (CHAR, CONCATENATE, string substitution) resolves dynamically to an executable, command, or DDE payload.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-010\",\"name\":\"RemoteTemplateInjection\",\"shortDescription\":{\"text\":\"Remote Template Injection\"},\"fullDescription\":{\"text\":\"Relationship links to an external template over HTTP/HTTPS/SMB, allowing remote malicious template execution.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-011\",\"name\":\"EmbeddedOlePackage\",\"shortDescription\":{\"text\":\"Embedded OLE Object or Package\"},\"fullDescription\":{\"text\":\"Container package contains embedded OLE binary or packager payload in embeddings/.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-012\",\"name\":\"ExternalOleObject\",\"shortDescription\":{\"text\":\"External OLE Object Link\"},\"fullDescription\":{\"text\":\"Relationship links to an external OLE object over HTTP/HTTPS/SMB, enabling remote Moniker or exploit execution.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-013\",\"name\":\"ActiveXControlPresent\",\"shortDescription\":{\"text\":\"Embedded ActiveX Control Present\"},\"fullDescription\":{\"text\":\"Container package contains embedded ActiveX control binary in activex/.\"},\"defaultConfiguration\":{\"level\":\"warning\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-014\",\"name\":\"ExternalSubdocumentReference\",\"shortDescription\":{\"text\":\"External Subdocument or Frame Reference\"},\"fullDescription\":{\"text\":\"Relationship links to an external subdocument or frame over HTTP/HTTPS/SMB.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));
@@ -3164,6 +3184,10 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
             "sheet"
         } else if t.coordinate.starts_with("definedName:") {
             "definedName"
+        } else if t.coordinate.starts_with("part:") {
+            "part"
+        } else if t.coordinate.starts_with("rel:") {
+            "relationship"
         } else {
             "cell"
         };

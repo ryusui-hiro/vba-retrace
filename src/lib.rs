@@ -72,7 +72,7 @@ pub use extract::{
     CellThreat, ExtractedModule, ExtractedModulePCodeAnalysis, ExtractedProject,
     ExtractedProjectPCodeAnalysis, PCodeAnalysisOptions, detect_project_stomping,
     disassemble_extracted_module, disassemble_extracted_project, extract_macro_container,
-    extract_xlsm,
+    extract_xlsm, scan_ooxml_package_threats,
 };
 pub use formula_eval::{
     FormulaEvaluation, FormulaEvaluationLimits, FormulaValue, evaluate_formula,
