@@ -149,6 +149,16 @@ static SUSPICIOUS_PATTERNS: &[&str] = &[
     ".msc",
     ".lnk",
     ".chm",
+    "hh.exe",
+    "installutil",
+    "regasm",
+    "regsvcs",
+    "msconfig",
+    "control.exe",
+    "bash.exe",
+    "wsl.exe",
+    "tar.exe",
+    "explorer.exe",
 ];
 
 /// Known sensitive APIs or procedure names.
@@ -239,6 +249,32 @@ static SENSITIVE_CALLS: &[&str] = &[
     "IsDebuggerPresent",
     "CheckRemoteDebuggerPresent",
     "Sleep",
+    "EnumChildWindows",
+    "EnumWindows",
+    "EnumDesktopWindows",
+    "EnumFontFamiliesA",
+    "EnumFontFamiliesW",
+    "EnumFontFamiliesExA",
+    "EnumFontFamiliesExW",
+    "EnumSystemLocalesA",
+    "EnumSystemLocalesW",
+    "EnumTimeFormatsA",
+    "EnumTimeFormatsW",
+    "EnumDateFormatsA",
+    "EnumDateFormatsW",
+    "EnumLanguageGroupLocalesA",
+    "EnumLanguageGroupLocalesW",
+    "GrayStringA",
+    "GrayStringW",
+    "LineDDA",
+    "CertEnumSystemStore",
+    "CertEnumSystemStoreLocation",
+    "CryptEnumOIDInfo",
+    "SetConsoleCtrlHandler",
+    "SetWinEventHook",
+    "InitOnceExecuteOnce",
+    "FlsAlloc",
+    "ClfsScanLogContainers",
 ];
 
 /// Common auto-execution hook procedures frequently targeted in macro attacks.
@@ -766,5 +802,32 @@ End Function
             f.severity == StompingSeverity::Critical
                 && matches!(&f.kind, StompingFindingKind::ProcedureHiddenInPCode(name) if name == "Worksheet_Activate")
         }));
+    }
+
+    #[test]
+    fn detects_callback_injection_and_lolbin_stomping() {
+        let source = "Sub SafeRunner()\n    Dim n As Long\nEnd Sub\n";
+        let pcode = make_synthetic_pcode(
+            &["SafeRunner"],
+            &["EnumChildWindows", "LineDDA"],
+            &["installutil /logfile= payload.dll"],
+            8,
+        );
+        let report = detect_vba_stomping("Module1", Some(source), Some(&pcode));
+
+        assert!(report.is_stomped);
+        assert_eq!(report.severity, StompingSeverity::Critical);
+        assert!(report.findings.iter().any(|f| matches!(
+            &f.kind,
+            StompingFindingKind::SensitiveCallInPCode(call) if call == "EnumChildWindows"
+        )));
+        assert!(report.findings.iter().any(|f| matches!(
+            &f.kind,
+            StompingFindingKind::SensitiveCallInPCode(call) if call == "LineDDA"
+        )));
+        assert!(report.findings.iter().any(|f| matches!(
+            &f.kind,
+            StompingFindingKind::SuspiciousLiteralInPCode(lit) if lit.contains("installutil")
+        )));
     }
 }

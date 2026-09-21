@@ -206,7 +206,7 @@ if cell_threats:
         print(f"  - [{threat['rule_id']}] {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
 
 # 3. GitHub Advanced Security / CI 統合用の OASIS SARIF v2.1.0 レポートを出力
-# (VBA Stomping VBA-STOMP-001..010 および セル脅威 VBA-CELL-001..008 の双方を含みます)
+# (VBA Stomping VBA-STOMP-001..010 および セル脅威 VBA-CELL-001..009 の双方を含みます)
 sarif_json = vba_insight.inspect_file_sarif("suspicious.xlsm")
 with open("security_report.sarif", "w", encoding="utf-8") as f:
     f.write(sarif_json)
@@ -320,7 +320,7 @@ console.log('解析完了。コード実行の有無:', parsedAnalysis.project.c
 
 ### 2. ワークシート・セル & ブック脅威スキャナー
 
-`vba-insight` は、ワークシート数式、定義名、シートメタデータを以下の 8 つの専用セキュリティルールで検査します：
+`vba-insight` は、ワークシート数式、定義名、シートメタデータを以下の 9 つの専用セキュリティルールで検査します：
 
 | ルール ID | 検知種別 | 重要度 | 検出ロジックと概要 |
 |---|---|:---:|---|
@@ -332,7 +332,9 @@ console.log('解析完了。コード実行の有無:', parsedAnalysis.project.c
 | `VBA-CELL-006` | `AutoExecDefinedName` | **High** | ブック定義名（`Auto_Open`、`_xlnm.Auto_Open`、`Auto_Close` 等）がマクロ自動実行をトリガーする。 |
 | `VBA-CELL-007` | `VeryHiddenWorksheet` | **Low** | ワークシートが `state="veryHidden"` に設定されており、Excel 通常 UI から悪意あるシートが隠蔽されている。 |
 | `VBA-CELL-008` | `XlmMacroSheetPresent` | **Critical** | マルウェアの攻撃ペイロードとして多用される、旧形式の Excel 4.0 マクロシートが存在する。 |
+| `VBA-CELL-009` | `DeobfuscatedThreatFormula` | **Critical** | 数式難読化（`CHAR`, `CONCATENATE`, 文字列置換等）が動的に評価され、実行可能ファイル、コマンド、または DDE ペイロードに解決される。 |
 
+- **動的数式難読化解除（De-obfuscation）**: `CHAR()`、`&`、`CONCATENATE()`、`MID()`、`SUBSTITUTE()`、`CHOOSE()`、`HYPERLINK()` 等を用いた難読化数式を有界評価し、静的文字列検索をすり抜ける LOLBins、DDE 実行、悪意あるダウンロード URL を自動復元・検知。
 - **全角文字難読化回避の正規化**: 数式検査前に全角英数字・記号（`U+FF01`〜`U+FF5E`、`U+3000`）を標準 ASCII に正規化し、難読化による検知回避を無力化。
 
 ---

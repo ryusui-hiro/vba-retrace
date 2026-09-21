@@ -809,8 +809,109 @@ impl Evaluator<'_> {
                 let p = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
                 Ok(EvalValue::Scalar(FormulaValue::Number(n.powf(p))))
             }
+            "pi" if arguments.is_empty() => Ok(EvalValue::Scalar(FormulaValue::Number(
+                std::f64::consts::PI,
+            ))),
+            "exp" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let res = n.exp();
+                if res.is_finite() {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                }
+            }
+            "ln" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if n <= 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(n.ln())))
+                }
+            }
+            "log10" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if n <= 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(n.log10())))
+                }
+            }
+            "isnontext" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                Ok(EvalValue::Scalar(FormulaValue::Boolean(!matches!(
+                    val,
+                    FormulaValue::String(_)
+                ))))
+            }
+            "type" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                let code = match val {
+                    FormulaValue::Number(_) | FormulaValue::Blank => 1.0,
+                    FormulaValue::String(_) => 2.0,
+                    FormulaValue::Boolean(_) => 4.0,
+                    FormulaValue::Error(_) => 16.0,
+                };
+                Ok(EvalValue::Scalar(FormulaValue::Number(code)))
+            }
+            "choose" => {
+                if arguments.is_empty() {
+                    return Err("unsupported");
+                }
+                let index_val = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let index = index_val.floor() as i64;
+                if index < 1 || (index as usize) >= arguments.len() {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())))
+                } else {
+                    self.evaluate(&arguments[index as usize], depth + 1)
+                }
+            }
+            "ifna" if arguments.len() == 2 => match self.eval_scalar(&arguments[0], depth + 1) {
+                Ok(FormulaValue::Error(ref s)) if s.eq_ignore_ascii_case("#N/A") => {
+                    self.evaluate(&arguments[1], depth + 1)
+                }
+                Ok(scalar) => Ok(EvalValue::Scalar(scalar)),
+                Err(_) => self.evaluate(&arguments[1], depth + 1),
+            },
+            "ifs" => {
+                if arguments.len() < 2 || !arguments.len().is_multiple_of(2) {
+                    return Err("unsupported");
+                }
+                for chunk in arguments.chunks_exact(2) {
+                    let cond = to_bool(&self.eval_scalar(&chunk[0], depth + 1)?)?;
+                    if cond {
+                        return self.evaluate(&chunk[1], depth + 1);
+                    }
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+            }
+            "switch" => {
+                if arguments.len() < 3 {
+                    return Err("unsupported");
+                }
+                let target = self.eval_scalar(&arguments[0], depth + 1)?;
+                let remaining = &arguments[1..];
+                let has_default = !remaining.len().is_multiple_of(2);
+                let pairs_len = if has_default {
+                    remaining.len() - 1
+                } else {
+                    remaining.len()
+                };
+                for i in (0..pairs_len).step_by(2) {
+                    let val = self.eval_scalar(&remaining[i], depth + 1)?;
+                    if values_equal(&target, &val) {
+                        return self.evaluate(&remaining[i + 1], depth + 1);
+                    }
+                }
+                if has_default {
+                    self.evaluate(&remaining[remaining.len() - 1], depth + 1)
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                }
+            }
             "len" | "left" | "right" | "mid" | "concatenate" | "concat" | "value" | "trim"
-            | "upper" | "lower" | "exact" | "rept" | "substitute" | "replace" => {
+            | "upper" | "lower" | "exact" | "rept" | "substitute" | "replace" | "char" | "code"
+            | "clean" | "t" | "n" | "find" | "search" | "hyperlink" => {
                 self.evaluate_string_function(name, arguments, depth + 1)
             }
             _ => Err("unsupported"),
@@ -1023,6 +1124,142 @@ impl Evaluator<'_> {
                 self.check_string_size(&value)?;
                 Ok(EvalValue::Scalar(FormulaValue::String(value)))
             }
+            "char" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let code = n.floor() as i64;
+                if !(1..=255).contains(&code) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())))
+                } else {
+                    let ch = (code as u8) as char;
+                    let mut s = String::with_capacity(1);
+                    s.push(ch);
+                    Ok(EvalValue::Scalar(FormulaValue::String(s)))
+                }
+            }
+            "code" if arguments.len() == 1 => {
+                let s = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if let Some(ch) = s.chars().next() {
+                    let code = (ch as u32) as f64;
+                    Ok(EvalValue::Scalar(FormulaValue::Number(code)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())))
+                }
+            }
+            "clean" if arguments.len() == 1 => {
+                let s = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let cleaned: String = s
+                    .chars()
+                    .filter(|&c| (c as u32) >= 32 && (c as u32) != 127)
+                    .collect();
+                self.check_string_size(&cleaned)?;
+                Ok(EvalValue::Scalar(FormulaValue::String(cleaned)))
+            }
+            "t" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                match val {
+                    FormulaValue::String(s) => Ok(EvalValue::Scalar(FormulaValue::String(s))),
+                    FormulaValue::Error(err) => Ok(EvalValue::Scalar(FormulaValue::Error(err))),
+                    _ => Ok(EvalValue::Scalar(FormulaValue::String(String::new()))),
+                }
+            }
+            "n" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                match val {
+                    FormulaValue::Number(n) => Ok(EvalValue::Scalar(FormulaValue::Number(n))),
+                    FormulaValue::Boolean(b) => Ok(EvalValue::Scalar(FormulaValue::Number(if b {
+                        1.0
+                    } else {
+                        0.0
+                    }))),
+                    FormulaValue::Error(err) => Ok(EvalValue::Scalar(FormulaValue::Error(err))),
+                    _ => Ok(EvalValue::Scalar(FormulaValue::Number(0.0))),
+                }
+            }
+            "find" if arguments.len() == 2 || arguments.len() == 3 => {
+                let find_text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let within_text = to_string(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let start_num = if arguments.len() == 3 {
+                    let num = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                    let count = num.floor() as i64;
+                    if count <= 0 {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                    count as usize
+                } else {
+                    1
+                };
+                let within_chars: Vec<char> = within_text.chars().collect();
+                let find_chars: Vec<char> = find_text.chars().collect();
+                if start_num > within_chars.len() + 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                if find_chars.is_empty() {
+                    return Ok(EvalValue::Scalar(FormulaValue::Number(start_num as f64)));
+                }
+                let start_idx = start_num - 1;
+                let mut found = None;
+                if start_idx + find_chars.len() <= within_chars.len() {
+                    for i in start_idx..=(within_chars.len() - find_chars.len()) {
+                        if within_chars[i..i + find_chars.len()] == find_chars[..] {
+                            found = Some(i + 1);
+                            break;
+                        }
+                    }
+                }
+                match found {
+                    Some(pos) => Ok(EvalValue::Scalar(FormulaValue::Number(pos as f64))),
+                    None => Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                }
+            }
+            "search" if arguments.len() == 2 || arguments.len() == 3 => {
+                let find_text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let within_text = to_string(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let start_num = if arguments.len() == 3 {
+                    let num = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                    let count = num.floor() as i64;
+                    if count <= 0 {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                    count as usize
+                } else {
+                    1
+                };
+                let within_chars: Vec<char> = within_text.chars().collect();
+                let find_chars: Vec<char> = find_text.chars().collect();
+                if start_num > within_chars.len() + 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                if find_chars.is_empty() {
+                    return Ok(EvalValue::Scalar(FormulaValue::Number(start_num as f64)));
+                }
+                let start_idx = start_num - 1;
+                let mut found = None;
+                if start_idx + find_chars.len() <= within_chars.len() {
+                    for i in start_idx..=(within_chars.len() - find_chars.len()) {
+                        let slice = &within_chars[i..i + find_chars.len()];
+                        let matches = slice.iter().zip(find_chars.iter()).all(|(a, b)| {
+                            a.to_lowercase().collect::<Vec<_>>()
+                                == b.to_lowercase().collect::<Vec<_>>()
+                        });
+                        if matches {
+                            found = Some(i + 1);
+                            break;
+                        }
+                    }
+                }
+                match found {
+                    Some(pos) => Ok(EvalValue::Scalar(FormulaValue::Number(pos as f64))),
+                    None => Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                }
+            }
+            "hyperlink" if arguments.len() == 1 || arguments.len() == 2 => {
+                let target = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if arguments.len() == 2 {
+                    let _ = self.eval_scalar(&arguments[1], depth + 1)?;
+                }
+                self.check_string_size(&target)?;
+                Ok(EvalValue::Scalar(FormulaValue::String(target)))
+            }
             _ => Err("unsupported"),
         }
     }
@@ -1114,6 +1351,25 @@ fn nonnegative_count(value: &FormulaValue) -> Result<usize, &'static str> {
         return Err("unsupported");
     }
     Ok(value as usize)
+}
+
+fn values_equal(left: &FormulaValue, right: &FormulaValue) -> bool {
+    match (left, right) {
+        (FormulaValue::Number(a), FormulaValue::Number(b)) => (a - b).abs() < f64::EPSILON,
+        (FormulaValue::String(a), FormulaValue::String(b)) => a.eq_ignore_ascii_case(b),
+        (FormulaValue::Boolean(a), FormulaValue::Boolean(b)) => a == b,
+        (FormulaValue::Blank, FormulaValue::Blank) => true,
+        (FormulaValue::Error(a), FormulaValue::Error(b)) => a.eq_ignore_ascii_case(b),
+        (FormulaValue::String(s), FormulaValue::Number(n))
+        | (FormulaValue::Number(n), FormulaValue::String(s)) => {
+            if let Ok(parsed) = s.trim().parse::<f64>() {
+                (parsed - n).abs() < f64::EPSILON
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
 }
 
 fn evaluate_binary(
@@ -1486,6 +1742,251 @@ mod tests {
             )
             .value,
             Some(FormulaValue::String("AB123EF".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_advanced_control_string_and_information_functions() {
+        let cells = [cell("A1", "65", "n"), cell("A2", "powershell", "str")];
+
+        // Math: PI, EXP, LN, LOG10
+        let pi_val = evaluate_formula("=PI()", Some("Data"), &[], Default::default()).value;
+        if let Some(FormulaValue::Number(n)) = pi_val {
+            assert!((n - std::f64::consts::PI).abs() < 1e-10);
+        } else {
+            panic!("Expected PI number, got {:?}", pi_val);
+        }
+        assert_eq!(
+            evaluate_formula("=EXP(0)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=LN(1)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=LN(0)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Error("#NUM!".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=LOG10(100)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula("=LOG10(-5)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Error("#NUM!".into()))
+        );
+
+        // Information: ISNONTEXT, TYPE
+        assert_eq!(
+            evaluate_formula("=ISNONTEXT(123)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ISNONTEXT(\"hello\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Boolean(false))
+        );
+        assert_eq!(
+            evaluate_formula("=TYPE(123)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=TYPE(\"hello\")", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula("=TYPE(TRUE())", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(4.0))
+        );
+        assert_eq!(
+            evaluate_formula("=TYPE(1/0)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(16.0))
+        );
+
+        // Control: CHOOSE, IFNA, IFS, SWITCH
+        assert_eq!(
+            evaluate_formula(
+                "=CHOOSE(2, \"apple\", \"banana\", \"cherry\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("banana".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=CHOOSE(4, \"apple\", \"banana\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Error("#VALUE!".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=IFNA(#N/A, \"alt\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("alt".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=IFNA(1/0, \"alt\")", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Error("#DIV/0!".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=IFS(1=2, \"first\", 2=2, \"second\", 3=3, \"third\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("second".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=IFS(1=2, \"first\", 2=3, \"second\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Error("#N/A".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=SWITCH(2, 1, \"one\", 2, \"two\", \"none\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("two".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=SWITCH(9, 1, \"one\", 2, \"two\", \"none\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("none".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=SWITCH(9, 1, \"one\", 2, \"two\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Error("#N/A".into()))
+        );
+
+        // String: CHAR, CODE, CLEAN, T, N, FIND, SEARCH
+        assert_eq!(
+            evaluate_formula("=CHAR(A1)", Some("Data"), &cells, Default::default()).value,
+            Some(FormulaValue::String("A".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=CODE(\"Apple\")", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(65.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=CLEAN(\"A\"&CHAR(7)&\"B\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("AB".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=T(\"text\")", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("text".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=T(123)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=N(42)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(42.0))
+        );
+        assert_eq!(
+            evaluate_formula("=N(TRUE())", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=N(\"hello\")", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=FIND(\"bar\", \"foobarbaz\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(4.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=FIND(\"BAR\", \"foobarbaz\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Error("#VALUE!".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=SEARCH(\"BAR\", \"foobarbaz\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(4.0))
+        );
+
+        // De-obfuscation sample: CHAR concatenation creating "cmd.exe"
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(99)&CHAR(109)&CHAR(100)&CHAR(46)&CHAR(101)&CHAR(120)&CHAR(101)",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cmd.exe".into()))
+        );
+
+        // HYPERLINK function
+        assert_eq!(
+            evaluate_formula(
+                "=HYPERLINK(\"http://example.com/test.exe\", \"Click\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("http://example.com/test.exe".into()))
         );
     }
 }

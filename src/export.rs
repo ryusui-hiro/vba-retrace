@@ -3039,6 +3039,7 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "AutoExecDefinedName" => ("VBA-CELL-006", "warning"),
         "VeryHiddenSheet" => ("VBA-CELL-007", "note"),
         "XlmMacroSheet" => ("VBA-CELL-008", "error"),
+        "DeobfuscatedThreat" => ("VBA-CELL-009", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3112,7 +3113,10 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-007\",\"name\":\"VeryHiddenWorksheet\",\"shortDescription\":{\"text\":\"VeryHidden Worksheet Cloaking\"},\"fullDescription\":{\"text\":\"Worksheet visibility is set to veryHidden to cloak malicious content from standard Excel UI.\"},\"defaultConfiguration\":{\"level\":\"note\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-008\",\"name\":\"XlmMacroSheetPresent\",\"shortDescription\":{\"text\":\"Excel 4.0 (XLM) Macro Sheet Present\"},\"fullDescription\":{\"text\":\"Workbook contains legacy Excel 4.0 macro sheet, frequently used in malware payloads.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-008\",\"name\":\"XlmMacroSheetPresent\",\"shortDescription\":{\"text\":\"Excel 4.0 (XLM) Macro Sheet Present\"},\"fullDescription\":{\"text\":\"Workbook contains legacy Excel 4.0 macro sheet, frequently used in malware payloads.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-009\",\"name\":\"DeobfuscatedThreatFormula\",\"shortDescription\":{\"text\":\"De-obfuscated Threat Formula\"},\"fullDescription\":{\"text\":\"Formula obfuscation (CHAR, CONCATENATE, string substitution) resolves dynamically to an executable, command, or DDE payload.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));
