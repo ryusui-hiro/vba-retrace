@@ -511,6 +511,45 @@ fn parse_cell_address(input: &str) -> Option<CellAddress> {
     (row <= 1_048_576 && column > 0 && column <= 16_384).then_some(CellAddress { row, column })
 }
 
+fn parse_sheet_and_cell_str(input: &str) -> (Option<String>, String) {
+    let trimmed = input.trim();
+    if let Some(pos) = trimmed.rfind('!') {
+        let sheet_part = &trimmed[..pos];
+        let cell_part = &trimmed[pos + 1..];
+        let sheet = if sheet_part.starts_with('\'')
+            && sheet_part.ends_with('\'')
+            && sheet_part.len() >= 2
+        {
+            sheet_part[1..sheet_part.len() - 1].replace("''", "'")
+        } else {
+            sheet_part.to_string()
+        };
+        (Some(sheet), cell_part.to_string())
+    } else {
+        (None, trimmed.to_string())
+    }
+}
+
+fn column_to_letters(mut col: u32) -> String {
+    let mut s = String::new();
+    while col > 0 {
+        col -= 1;
+        let rem = (col % 26) as u8;
+        s.push((b'A' + rem) as char);
+        col /= 26;
+    }
+    s.chars().rev().collect()
+}
+
+fn gcd_pair(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum EvalValue {
     Scalar(FormulaValue),
@@ -614,6 +653,49 @@ impl Evaluator<'_> {
     ) -> Result<FormulaValue, &'static str> {
         let value = self.evaluate(expression, depth)?;
         self.scalar(value)
+    }
+
+    fn eval_cell_origin(
+        &mut self,
+        expr: &Expr,
+        depth: usize,
+    ) -> Result<(Option<String>, CellAddress), &'static str> {
+        match expr {
+            Expr::Reference { sheet, cell, .. } => Ok((sheet.clone(), *cell)),
+            Expr::Range { sheet, first, .. } => Ok((sheet.clone(), *first)),
+            Expr::Call { name, arguments } if name == "offset" => {
+                if !(3..=5).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let (sheet, origin) = self.eval_cell_origin(&arguments[0], depth + 1)?;
+                let row_offset =
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                let col_offset =
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i64;
+                let target_row = origin.row as i64 + row_offset;
+                let target_col = origin.column as i64 + col_offset;
+                if !(1..=1_048_576).contains(&target_row) || !(1..=16_384).contains(&target_col) {
+                    return Err("unsupported");
+                }
+                Ok((
+                    sheet,
+                    CellAddress {
+                        row: target_row as u32,
+                        column: target_col as u32,
+                    },
+                ))
+            }
+            Expr::Call { name, arguments } if name == "indirect" => {
+                if !(1..=2).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let ref_text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let (sheet, cell_str) = parse_sheet_and_cell_str(&ref_text);
+                let address = parse_cell_address(&cell_str).ok_or("unsupported")?;
+                Ok((sheet, address))
+            }
+            _ => Err("unsupported"),
+        }
     }
 
     fn evaluate_call(
@@ -1182,6 +1264,334 @@ impl Evaluator<'_> {
                     }
                 }
             }
+            "indirect" => {
+                if !(1..=2).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let ref_text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let (sheet, cell_str) = parse_sheet_and_cell_str(&ref_text);
+                if cell_str.contains(':') {
+                    if let Some((first_s, last_s)) = cell_str.split_once(':')
+                        && let (Some(first), Some(last)) =
+                            (parse_cell_address(first_s), parse_cell_address(last_s))
+                    {
+                        self.record_reference(&ref_text);
+                        let row_range = first.row.min(last.row)..=first.row.max(last.row);
+                        let col_range =
+                            first.column.min(last.column)..=first.column.max(last.column);
+                        let rows = row_range.clone().count();
+                        let cols = col_range.clone().count();
+                        let count = rows.saturating_mul(cols);
+                        if count > self.limits.max_range_cells {
+                            return Err("resource_limit");
+                        }
+                        let mut values = Vec::with_capacity(count);
+                        for row in row_range {
+                            for column in col_range.clone() {
+                                values.push(
+                                    self.lookup(sheet.as_deref(), CellAddress { row, column })?,
+                                );
+                            }
+                        }
+                        return Ok(EvalValue::Range { values, rows, cols });
+                    }
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())))
+                } else if let Some(cell) = parse_cell_address(&cell_str) {
+                    self.record_reference(&ref_text);
+                    Ok(EvalValue::Scalar(self.lookup(sheet.as_deref(), cell)?))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())))
+                }
+            }
+            "offset" => {
+                if !(3..=5).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let (sheet, origin) = match self.eval_cell_origin(&arguments[0], depth + 1) {
+                    Ok(res) => res,
+                    Err(_) => {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())));
+                    }
+                };
+                let row_offset =
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                let col_offset =
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i64;
+                let target_row = origin.row as i64 + row_offset;
+                let target_col = origin.column as i64 + col_offset;
+                if !(1..=1_048_576).contains(&target_row) || !(1..=16_384).contains(&target_col) {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())));
+                }
+                let height = if arguments.len() >= 4 {
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?.trunc() as i64
+                } else {
+                    1
+                };
+                let width = if arguments.len() == 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?.trunc() as i64
+                } else {
+                    1
+                };
+                if height <= 0 || width <= 0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())));
+                }
+                let end_row = target_row + height - 1;
+                let end_col = target_col + width - 1;
+                if end_row > 1_048_576 || end_col > 16_384 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())));
+                }
+                if height == 1 && width == 1 {
+                    let addr = CellAddress {
+                        row: target_row as u32,
+                        column: target_col as u32,
+                    };
+                    self.record_reference(&format!(
+                        "{}{}",
+                        sheet
+                            .as_deref()
+                            .map(|s| format!("{s}!"))
+                            .unwrap_or_default(),
+                        column_to_letters(addr.column) + &addr.row.to_string()
+                    ));
+                    Ok(EvalValue::Scalar(self.lookup(sheet.as_deref(), addr)?))
+                } else {
+                    let rows = height as usize;
+                    let cols = width as usize;
+                    let count = rows.saturating_mul(cols);
+                    if count > self.limits.max_range_cells {
+                        return Err("resource_limit");
+                    }
+                    let mut values = Vec::with_capacity(count);
+                    for r in target_row..=end_row {
+                        for c in target_col..=end_col {
+                            values.push(self.lookup(
+                                sheet.as_deref(),
+                                CellAddress {
+                                    row: r as u32,
+                                    column: c as u32,
+                                },
+                            )?);
+                        }
+                    }
+                    Ok(EvalValue::Range { values, rows, cols })
+                }
+            }
+            "address" => {
+                if !(2..=5).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let row_num =
+                    to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
+                let col_num =
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                if !(1..=1_048_576).contains(&row_num) || !(1..=16_384).contains(&col_num) {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                let abs_num = if arguments.len() >= 3 {
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i32
+                } else {
+                    1
+                };
+                if !(1..=4).contains(&abs_num) {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                let a1 = if arguments.len() >= 4 {
+                    to_bool(&self.eval_scalar(&arguments[3], depth + 1)?)?
+                } else {
+                    true
+                };
+                if !a1 {
+                    return Err("unsupported");
+                }
+                let sheet_text = if arguments.len() == 5 {
+                    let s = to_string(&self.eval_scalar(&arguments[4], depth + 1)?)?;
+                    if s.is_empty() { None } else { Some(s) }
+                } else {
+                    None
+                };
+                let col_letters = column_to_letters(col_num as u32);
+                let cell_coord = match abs_num {
+                    1 => format!("${col_letters}${row_num}"),
+                    2 => format!("{col_letters}${row_num}"),
+                    3 => format!("${col_letters}{row_num}"),
+                    4 => format!("{col_letters}{row_num}"),
+                    _ => unreachable!(),
+                };
+                let full_addr = if let Some(sheet) = sheet_text {
+                    if sheet.contains(' ') || sheet.contains('\'') {
+                        let escaped = sheet.replace('\'', "''");
+                        format!("'{escaped}'!{cell_coord}")
+                    } else {
+                        format!("{sheet}!{cell_coord}")
+                    }
+                } else {
+                    cell_coord
+                };
+                self.check_string_size(&full_addr)?;
+                Ok(EvalValue::Scalar(FormulaValue::String(full_addr)))
+            }
+            "ceiling" | "ceiling.math" => {
+                if !(1..=2).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let sig = if arguments.len() == 2 {
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?
+                } else if n >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                if sig == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(0.0)))
+                } else {
+                    let ratio = n / sig;
+                    Ok(EvalValue::Scalar(FormulaValue::Number(ratio.ceil() * sig)))
+                }
+            }
+            "floor" | "floor.math" => {
+                if !(1..=2).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let sig = if arguments.len() == 2 {
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?
+                } else if n >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                if sig == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())))
+                } else {
+                    let ratio = n / sig;
+                    Ok(EvalValue::Scalar(FormulaValue::Number(ratio.floor() * sig)))
+                }
+            }
+            "even" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let abs_ceil = n.abs().ceil() as i64;
+                let even = if abs_ceil % 2 == 0 {
+                    abs_ceil
+                } else {
+                    abs_ceil + 1
+                };
+                let res = if n < 0.0 { -even } else { even };
+                Ok(EvalValue::Scalar(FormulaValue::Number(res as f64)))
+            }
+            "odd" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let abs_ceil = n.abs().ceil() as i64;
+                let odd = if abs_ceil % 2 != 0 {
+                    abs_ceil
+                } else {
+                    abs_ceil + 1
+                };
+                let res = if n < 0.0 { -odd } else { odd };
+                Ok(EvalValue::Scalar(FormulaValue::Number(res as f64)))
+            }
+            "fact" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if !(0.0..=170.0).contains(&n) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    let count = n.floor() as u64;
+                    let mut res = 1.0f64;
+                    for i in 2..=count {
+                        res *= i as f64;
+                    }
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                }
+            }
+            "gcd" if !arguments.is_empty() => {
+                let mut current = 0u64;
+                for arg in arguments {
+                    let n = to_number(&self.eval_scalar(arg, depth + 1)?)?;
+                    if n < 0.0 {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                    }
+                    let val = n.floor() as u64;
+                    current = if current == 0 {
+                        val
+                    } else {
+                        gcd_pair(current, val)
+                    };
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Number(current as f64)))
+            }
+            "lcm" if !arguments.is_empty() => {
+                let mut current = 1u64;
+                for arg in arguments {
+                    let n = to_number(&self.eval_scalar(arg, depth + 1)?)?;
+                    if n < 0.0 {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                    }
+                    let val = n.floor() as u64;
+                    if val == 0 {
+                        return Ok(EvalValue::Scalar(FormulaValue::Number(0.0)));
+                    }
+                    let g = gcd_pair(current, val);
+                    if let Some(next) = (current / g).checked_mul(val) {
+                        current = next;
+                    } else {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                    }
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Number(current as f64)))
+            }
+            "degrees" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(FormulaValue::Number(
+                    n * 180.0 / std::f64::consts::PI,
+                )))
+            }
+            "radians" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(FormulaValue::Number(
+                    n * std::f64::consts::PI / 180.0,
+                )))
+            }
+            "sin" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(FormulaValue::Number(n.sin())))
+            }
+            "cos" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(FormulaValue::Number(n.cos())))
+            }
+            "tan" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(FormulaValue::Number(n.tan())))
+            }
+            "asin" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if !(-1.0..=1.0).contains(&n) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(n.asin())))
+                }
+            }
+            "acos" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if !(-1.0..=1.0).contains(&n) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(n.acos())))
+                }
+            }
+            "atan" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(FormulaValue::Number(n.atan())))
+            }
+            "atan2" if arguments.len() == 2 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let y = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                if x == 0.0 && y == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(y.atan2(x))))
+                }
+            }
             "len" | "left" | "right" | "mid" | "concatenate" | "concat" | "value" | "trim"
             | "upper" | "lower" | "exact" | "rept" | "substitute" | "replace" | "char" | "code"
             | "clean" | "t" | "n" | "find" | "search" | "hyperlink" | "proper" | "unichar"
@@ -1300,8 +1710,18 @@ impl Evaluator<'_> {
             "concatenate" | "concat" if !arguments.is_empty() => {
                 let mut value = String::new();
                 for argument in arguments {
-                    value.push_str(&to_string(&self.eval_scalar(argument, depth + 1)?)?);
-                    self.check_string_size(&value)?;
+                    match self.evaluate(argument, depth + 1)? {
+                        EvalValue::Scalar(val) => {
+                            value.push_str(&to_string(&val)?);
+                            self.check_string_size(&value)?;
+                        }
+                        EvalValue::Range { values, .. } => {
+                            for val in values {
+                                value.push_str(&to_string(&val)?);
+                                self.check_string_size(&value)?;
+                            }
+                        }
+                    }
                 }
                 Ok(EvalValue::Scalar(FormulaValue::String(value)))
             }
@@ -1673,7 +2093,9 @@ impl Evaluator<'_> {
             "b" | "boolean" => Ok(FormulaValue::Boolean(
                 value.eq_ignore_ascii_case("1") || value.eq_ignore_ascii_case("true"),
             )),
-            "s" | "str" | "inline_str" | "string" => Ok(FormulaValue::String(value.to_owned())),
+            "s" | "str" | "inlinestr" | "inline_str" | "inline_string" | "string" => {
+                Ok(FormulaValue::String(value.to_owned()))
+            }
             "e" | "error" => Ok(FormulaValue::Error(value.to_owned())),
             _ => value
                 .parse::<f64>()
@@ -2110,7 +2532,7 @@ mod tests {
             evaluate_formula("=A1+1", Some("Data"), &[formula_cell], Default::default());
         assert_eq!(reference.status, "unresolved_reference");
         let unsupported =
-            evaluate_formula("=INDIRECT(\"A1\")", Some("Data"), &[], Default::default());
+            evaluate_formula("=FORECAST(1, 2, 3)", Some("Data"), &[], Default::default());
         assert_eq!(unsupported.status, "unsupported");
     }
 
@@ -2865,6 +3287,230 @@ mod tests {
             )
             .value,
             Some(FormulaValue::String("cmd.exe".into()))
+        );
+    }
+
+    fn cell_on_sheet(
+        sheet: &str,
+        reference: &str,
+        value: &str,
+        cell_type: &str,
+    ) -> WorkbookCellInfo {
+        let address = parse_cell_address(reference).unwrap();
+        WorkbookCellInfo {
+            sheet_index: 0,
+            sheet_name: sheet.into(),
+            cell_ref: reference.into(),
+            row: Some(address.row),
+            column: Some(address.column),
+            cell_type: cell_type.into(),
+            value: Some(value.into()),
+            ..WorkbookCellInfo::default()
+        }
+    }
+
+    #[test]
+    fn evaluates_dynamic_grid_resolution_and_math_functions() {
+        let cells = vec![
+            cell("A1", "cmd", "s"),
+            cell("B1", ".", "s"),
+            cell("C1", "exe", "s"),
+            cell("A2", "powershell", "s"),
+            cell("B2", " -c ", "s"),
+            cell("C2", "calc", "s"),
+            cell_on_sheet("Sheet2", "B5", "payload_url", "s"),
+        ];
+
+        // ADDRESS tests
+        assert_eq!(
+            evaluate_formula("=ADDRESS(1, 1)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("$A$1".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=ADDRESS(2, 3, 4)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("C2".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=ADDRESS(2, 3, 2)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("C$2".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=ADDRESS(2, 3, 3)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("$C2".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ADDRESS(5, 2, 1, TRUE, \"Sheet2\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("Sheet2!$B$5".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ADDRESS(1, 1, 1, TRUE, \"Space Sheet\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("'Space Sheet'!$A$1".into()))
+        );
+
+        // INDIRECT tests
+        assert_eq!(
+            evaluate_formula(
+                "=INDIRECT(\"A1\")",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cmd".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDIRECT(ADDRESS(1, 1))",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cmd".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDIRECT(\"Sheet2!B5\")",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("payload_url".into()))
+        );
+
+        // Dynamic Chained Formula Deobfuscation: INDIRECT(ADDRESS(...)) + CONCAT(range)
+        assert_eq!(
+            evaluate_formula("=CONCAT(A1:C1)", Some("Data"), &cells, Default::default()).value,
+            Some(FormulaValue::String("cmd.exe".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDIRECT(ADDRESS(1, 1)) & INDIRECT(ADDRESS(1, 2)) & INDIRECT(ADDRESS(1, 3))",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cmd.exe".into()))
+        );
+
+        // OFFSET tests
+        assert_eq!(
+            evaluate_formula(
+                "=OFFSET(A1, 1, 0)",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("powershell".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=OFFSET(A1, 1, 2)",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("calc".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=TEXTJOIN(\"\", TRUE, OFFSET(A1, 1, 0, 1, 3))",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("powershell -c calc".into()))
+        );
+
+        // Math & Trig tests
+        assert_eq!(
+            evaluate_formula("=CEILING(2.5, 1)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(3.0))
+        );
+        assert_eq!(
+            evaluate_formula("=FLOOR(2.5, 1)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula("=EVEN(1.5)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula("=EVEN(3)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(4.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ODD(2)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(3.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ODD(0)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=FACT(5)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(120.0))
+        );
+        assert_eq!(
+            evaluate_formula("=GCD(24, 36, 60)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(12.0))
+        );
+        assert_eq!(
+            evaluate_formula("=LCM(4, 6, 8)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(24.0))
+        );
+        assert_eq!(
+            evaluate_formula("=DEGREES(PI())", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(180.0))
+        );
+        assert_eq!(
+            evaluate_formula("=RADIANS(180)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(std::f64::consts::PI))
+        );
+        assert_eq!(
+            evaluate_formula("=SIN(0)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=COS(0)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=TAN(0)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ASIN(0)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ACOS(1)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ATAN(0)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ATAN2(1, 1)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(std::f64::consts::PI / 4.0))
         );
     }
 }

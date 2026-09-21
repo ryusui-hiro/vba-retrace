@@ -548,6 +548,9 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("vlookup")
                 || f_lower.contains("hlookup")
                 || f_lower.contains("match")
+                || f_lower.contains("indirect")
+                || f_lower.contains("offset")
+                || f_lower.contains("address")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
