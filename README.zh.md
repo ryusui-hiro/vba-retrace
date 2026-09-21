@@ -340,7 +340,7 @@ console.log('静态分析完成。是否执行代码:', parsedAnalysis.project.c
 | `VBA-CELL-014` | `ExternalSubdocumentReference` | **High** | 关系文件引用外部子文档或框架（`subDocument` / `frame`，HTTP/HTTPS/SMB）。 |
 
 - **容器级威胁深度审查**: 即使在无宏代码的 DOCX/XLSX 攻击样本中，也能自动审查 OOXML 关系及部件，检测远程模板注入、内嵌 OLE 漏洞载荷、外部 Moniker 链接及 ActiveX 控件。
-- **动态公式反混淆求值（De-obfuscation）**: 对使用 `CHAR()`、`UNICHAR()`、`HEX2DEC()`、`BIN2DEC()`、`INDEX()`、`VLOOKUP()`、`TEXTJOIN()`、`&`、`CONCATENATE()`、`MID()`、`SUBSTITUTE()`、`CHOOSE()`、`HYPERLINK()` 等函数的复杂混淆公式执行有界求值，自动还原并捕获规避静态匹配的 LOLBins、DDE 命令及危险下载载荷。
+- **动态公式反混淆求值（De-obfuscation）**: 对网格动态解析（`INDIRECT()`, `OFFSET()`, `ADDRESS()`）、多单元格区域拼接（`CONCAT()`, `TEXTJOIN()`）、二维表格检索（`INDEX()`, `VLOOKUP()`, `HLOOKUP()`, `MATCH()`）、进制与 Unicode 转换（`HEX2DEC()`, `BIN2DEC()`, `UNICHAR()`）以及数学/字符串函数（`CHAR()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`）的复杂混淆公式执行有界求值与递归解析，自动还原并捕获规避静态匹配的多单元格拼接 DDE 命令、LOLBins 及远程恶意下载载荷。
 - **全角字符混淆逃逸防御**: 在检查公式前，自动将全角字符（`U+FF01`–`U+FF5E`、`U+3000`）规范化映射为标准 ASCII，破坏利用全角字符绕过安全检查的企图。
 
 ---

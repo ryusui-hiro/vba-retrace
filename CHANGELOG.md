@@ -1,5 +1,13 @@
 # Changelog
 
+- Extended Excel formula evaluation engine (`formula_eval`) with dynamic grid resolution and reference functions:
+  - **Dynamic Reference & Grid Resolution**: Added `ADDRESS` (dynamic cell reference construction with absolute/relative modes and sheet naming), `INDIRECT` (dynamic reference string resolution to cells or ranges, with cross-sheet support), and `OFFSET` (dynamic range shifting with row/column offsets, height, and width).
+  - **Reference Chaining**: Added multi-hop recursive reference origin evaluation (`eval_cell_origin`), enabling chained dynamic lookups like `CONCAT(OFFSET(A1, 0, 0, 1, 3))` and `INDIRECT(ADDRESS(1, 1))`.
+  - **Multi-Cell Range Aggregation in `CONCAT`**: Extended `CONCAT` to evaluate `EvalValue::Range` arguments across contiguous multi-cell rows and columns.
+  - **Advanced Math & Rounding**: Added `CEILING`, `CEILING.MATH`, `FLOOR`, `FLOOR.MATH`, `EVEN`, `ODD`, `FACT` (bounded factorial), `GCD` (greatest common divisor), and `LCM` (least common multiple).
+  - **Trigonometry**: Added `DEGREES`, `RADIANS`, `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, and `ATAN2`.
+- Enhanced cell type handling in formula evaluation lookup to support `inlinestr` and `inline_string` cell types alongside shared strings and numeric values.
+- Extended container cell threat scanning (`VBA-CELL-009`) with triggers for `INDIRECT`, `OFFSET`, and `ADDRESS` expressions, de-obfuscating dynamic multi-cell DDE commands and cross-sheet payload URLs.
 - Added container-level OOXML package threat scanning (`scan_ooxml_package_threats`) across `.xlsm`, `.docm`, `.pptm`, and macro-less OOXML containers (`.docx`, `.xlsx`), detecting Remote Template Injection (`VBA-CELL-010`), Embedded OLE Packages / Equation Editor droppers (`VBA-CELL-011`), External OLE Object links (`VBA-CELL-012`), Embedded ActiveX controls (`VBA-CELL-013`), and External Subdocument references (`VBA-CELL-014`).
 - Enhanced `extract_macro_container` and `inspect_macro_container` with graceful fallback for weaponized macro-less containers (such as Word documents with external template injection or Excel documents with embedded OLE packages without VBA modules), extracting and reporting package threats in JSON and SARIF.
 - Extended SARIF v2.1.0 and JSON exports with complete rule definitions, descriptors, and results for `VBA-CELL-010` through `VBA-CELL-014` with logical location mapping for package parts and OPC relationships.
