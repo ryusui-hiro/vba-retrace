@@ -466,9 +466,8 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 false
             };
 
-            // 1. DDE binary and execution detection
-            let is_dde_func = has_fn("dde") || has_fn("dde.execute");
-            let is_dde_pipe = if let Some((target, _)) = f_clean.split_once('|') {
+            // Helper to check DDE executable target
+            let check_dde_target = |target: &str| -> bool {
                 let target_clean = target
                     .trim()
                     .trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
@@ -522,11 +521,57 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                         | "sc"
                         | "net"
                         | "net1"
-                ) || f_lower.contains("|'")
+                )
+            };
+
+            // Attempt bounded evaluation of formula to detect de-obfuscated payload strings
+            let evaluated_text: Option<String> = if f_lower.contains("char")
+                || f_lower.contains('&')
+                || f_lower.contains("concat")
+                || f_lower.contains("substitute")
+                || f_lower.contains("replace")
+                || f_lower.contains("mid")
+                || f_lower.contains("left")
+                || f_lower.contains("right")
+                || f_lower.contains("choose")
+                || has_fn("hyperlink")
+            {
+                let eval_res = crate::formula_eval::evaluate_formula(
+                    formula,
+                    Some(&cell.sheet_name),
+                    &extracted.workbook_cells,
+                    crate::formula_eval::FormulaEvaluationLimits::default(),
+                );
+                if eval_res.status == "resolved" {
+                    if let Some(crate::formula_eval::FormulaValue::String(s)) = eval_res.value {
+                        Some(s)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // 1. DDE binary and execution detection
+            let is_dde_func = has_fn("dde") || has_fn("dde.execute");
+            let is_raw_dde_pipe = if let Some((target, _)) = f_clean.split_once('|') {
+                check_dde_target(target) || f_lower.contains("|'")
             } else {
                 false
             };
-            let is_dde = is_dde_func || is_dde_pipe;
+            let is_deobfuscated_dde = if let Some(ref ev) = evaluated_text {
+                if let Some((target, _)) = ev.split_once('|') {
+                    check_dde_target(target) || ev.contains("|'")
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            let is_dde = is_dde_func || is_raw_dde_pipe || is_deobfuscated_dde;
 
             // 2. Excel 4.0 (XLM) macro functions
             let is_xlm = has_fn("exec")
@@ -562,49 +607,132 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
             let is_webservice = has_fn("webservice") || has_fn("filterxml");
 
             // 5. Suspicious executable download hyperlink or protocol handler
-            let is_suspicious_hyperlink = has_fn("hyperlink")
-                && (f_lower.contains(".exe")
-                    || f_lower.contains(".scr")
-                    || f_lower.contains(".vbs")
-                    || f_lower.contains(".vbe")
-                    || f_lower.contains(".js")
-                    || f_lower.contains(".jse")
-                    || f_lower.contains(".wsf")
-                    || f_lower.contains(".wsh")
-                    || f_lower.contains(".hta")
-                    || f_lower.contains(".bat")
-                    || f_lower.contains(".cmd")
-                    || f_lower.contains(".ps1")
-                    || f_lower.contains(".iso")
-                    || f_lower.contains(".img")
-                    || f_lower.contains(".vhd")
-                    || f_lower.contains(".vhdx")
-                    || f_lower.contains(".zip")
-                    || f_lower.contains(".dll")
-                    || f_lower.contains(".com")
-                    || f_lower.contains(".pif")
-                    || f_lower.contains(".cpl")
-                    || f_lower.contains(".msc")
-                    || f_lower.contains(".inf")
-                    || f_lower.contains(".reg")
-                    || f_lower.contains(".lnk")
-                    || f_lower.contains(".chm")
-                    || f_lower.contains(".jar")
-                    || f_lower.contains("ms-appinstaller:")
-                    || f_lower.contains("search-ms:")
-                    || f_lower.contains("ms-officecmd:")
-                    || f_lower.contains("ms-excel:")
-                    || f_lower.contains("ms-word:")
-                    || f_lower.contains("ms-powerpoint:")
-                    || f_lower.contains("shell:")
-                    || f_lower.contains("file://")
-                    || f_lower.contains("file:\\\\"));
+            let check_suspicious_hyperlink = |text: &str| -> bool {
+                let t = text.to_ascii_lowercase();
+                t.contains(".exe")
+                    || t.contains(".scr")
+                    || t.contains(".vbs")
+                    || t.contains(".vbe")
+                    || t.contains(".js")
+                    || t.contains(".jse")
+                    || t.contains(".wsf")
+                    || t.contains(".wsh")
+                    || t.contains(".hta")
+                    || t.contains(".bat")
+                    || t.contains(".cmd")
+                    || t.contains(".ps1")
+                    || t.contains(".iso")
+                    || t.contains(".img")
+                    || t.contains(".vhd")
+                    || t.contains(".vhdx")
+                    || t.contains(".zip")
+                    || t.contains(".dll")
+                    || {
+                        let mut pos = 0;
+                        let mut found = false;
+                        while let Some(idx) = t[pos..].find(".com") {
+                            let abs = pos + idx;
+                            let after = &t[abs + 4..];
+                            if !after.starts_with('/')
+                                && !after.starts_with('.')
+                                && !after
+                                    .chars()
+                                    .next()
+                                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
+                            {
+                                found = true;
+                                break;
+                            }
+                            pos = abs + 4;
+                        }
+                        found
+                    }
+                    || t.contains(".pif")
+                    || t.contains(".cpl")
+                    || t.contains(".msc")
+                    || t.contains(".inf")
+                    || t.contains(".reg")
+                    || t.contains(".lnk")
+                    || t.contains(".chm")
+                    || t.contains(".jar")
+                    || t.contains("ms-appinstaller:")
+                    || t.contains("search-ms:")
+                    || t.contains("ms-officecmd:")
+                    || t.contains("ms-excel:")
+                    || t.contains("ms-word:")
+                    || t.contains("ms-powerpoint:")
+                    || t.contains("shell:")
+                    || t.contains("file://")
+                    || t.contains("file:\\\\")
+            };
+
+            let is_raw_hyperlink = has_fn("hyperlink") && check_suspicious_hyperlink(&f_lower);
+            let is_deobfuscated_hyperlink = !is_raw_hyperlink
+                && has_fn("hyperlink")
+                && evaluated_text
+                    .as_ref()
+                    .is_some_and(|s| check_suspicious_hyperlink(s));
+            let is_suspicious_hyperlink = is_raw_hyperlink || is_deobfuscated_hyperlink;
+
+            let is_deobfuscated_threat = if !is_dde
+                && !is_xlm
+                && !is_remote_link
+                && !is_webservice
+                && !is_suspicious_hyperlink
+            {
+                if let Some(ref ev) = evaluated_text {
+                    let ev_lower = ev.to_ascii_lowercase();
+                    let has_cmd = ev_lower.contains("powershell")
+                        || ev_lower.contains("cmd.exe")
+                        || ev_lower.contains("mshta")
+                        || ev_lower.contains("cscript")
+                        || ev_lower.contains("wscript")
+                        || ev_lower.contains("rundll32")
+                        || ev_lower.contains("regsvr32")
+                        || ev_lower.contains("certutil")
+                        || ev_lower.contains("bitsadmin")
+                        || ev_lower.contains("wmic")
+                        || ev_lower.contains("curl ")
+                        || ev_lower.contains("msdt ")
+                        || ev_lower.contains("hh.exe")
+                        || ev_lower.contains("installutil")
+                        || ev_lower.contains("regasm")
+                        || ev_lower.contains("msconfig");
+                    let has_payload_url = (ev_lower.contains("http://")
+                        || ev_lower.contains("https://"))
+                        && (ev_lower.ends_with(".exe")
+                            || ev_lower.ends_with(".ps1")
+                            || ev_lower.ends_with(".bat")
+                            || ev_lower.ends_with(".vbs")
+                            || ev_lower.ends_with(".dll"));
+                    has_cmd || has_payload_url
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
 
             if is_dde {
-                let desc = format!(
-                    "Potential DDE execution formula in cell '{}'!{}: '{}'",
-                    cell.sheet_name, cell.cell_ref, formula
-                );
+                let is_raw_target_clean = f_clean
+                    .split_once('|')
+                    .is_some_and(|(t, _)| check_dde_target(t));
+                let is_deobfuscated = is_deobfuscated_dde
+                    && (!is_raw_target_clean || evaluated_text.as_deref() != Some(formula));
+                let desc = if is_deobfuscated {
+                    format!(
+                        "De-obfuscated DDE execution formula in cell '{}'!{}: '{}' resolves to '{}'",
+                        cell.sheet_name,
+                        cell.cell_ref,
+                        formula,
+                        evaluated_text.as_deref().unwrap_or("")
+                    )
+                } else {
+                    format!(
+                        "Potential DDE execution formula in cell '{}'!{}: '{}'",
+                        cell.sheet_name, cell.cell_ref, formula
+                    )
+                };
                 extracted
                     .diagnostics
                     .push(format!("Security warning: {}", desc));
@@ -669,10 +797,20 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                     description: desc,
                 });
             } else if is_suspicious_hyperlink {
-                let desc = format!(
-                    "Suspicious executable download hyperlink in cell '{}'!{}: '{}'",
-                    cell.sheet_name, cell.cell_ref, formula
-                );
+                let desc = if is_deobfuscated_hyperlink {
+                    format!(
+                        "Suspicious executable download hyperlink de-obfuscated in cell '{}'!{}: '{}' resolves to '{}'",
+                        cell.sheet_name,
+                        cell.cell_ref,
+                        formula,
+                        evaluated_text.as_deref().unwrap_or("")
+                    )
+                } else {
+                    format!(
+                        "Suspicious executable download hyperlink in cell '{}'!{}: '{}'",
+                        cell.sheet_name, cell.cell_ref, formula
+                    )
+                };
                 extracted
                     .diagnostics
                     .push(format!("Security warning: {}", desc));
@@ -682,6 +820,24 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                     coordinate: format!("'{}'!{}", cell.sheet_name, cell.cell_ref),
                     threat_kind: "SuspiciousHyperlink".into(),
                     severity: "High".into(),
+                    formula: formula.clone(),
+                    description: desc,
+                });
+            } else if is_deobfuscated_threat {
+                let resolved = evaluated_text.as_deref().unwrap_or("");
+                let desc = format!(
+                    "De-obfuscated threat formula in cell '{}'!{}: '{}' resolves to malicious payload '{}'",
+                    cell.sheet_name, cell.cell_ref, formula, resolved
+                );
+                extracted
+                    .diagnostics
+                    .push(format!("Security warning: {}", desc));
+                extracted.cell_threats.push(CellThreat {
+                    sheet_name: cell.sheet_name.clone(),
+                    cell_ref: cell.cell_ref.clone(),
+                    coordinate: format!("'{}'!{}", cell.sheet_name, cell.cell_ref),
+                    threat_kind: "DeobfuscatedThreat".into(),
+                    severity: "Critical".into(),
                     formula: formula.clone(),
                     description: desc,
                 });
