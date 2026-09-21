@@ -114,7 +114,9 @@ pub fn evaluate_formula(
             output.status = "resolved".into();
             output.value = Some(values.swap_remove(0));
         }
-        Ok(EvalValue::Range { .. }) => output.status = "unsupported".into(),
+        Ok(EvalValue::Range { .. }) | Ok(EvalValue::Lambda { .. }) => {
+            output.status = "unsupported".into()
+        }
         Err(status) => output.status = status.into(),
     }
     output.references = evaluator.references;
@@ -401,6 +403,47 @@ impl Parser<'_> {
                 return Err("invalid_formula");
             }
             self.position += 1;
+            let is_lambda = matches!(&value, Expr::Call { name, .. } if name == "lambda");
+            if is_lambda && matches!(self.tokens.get(self.position), Some(Token::LParen)) {
+                self.position += 1;
+                let mut invoke_args = Vec::new();
+                if !matches!(self.tokens.get(self.position), Some(Token::RParen)) {
+                    loop {
+                        invoke_args.push(self.parse_expression(0, depth + 1)?);
+                        if !matches!(self.tokens.get(self.position), Some(Token::Comma)) {
+                            break;
+                        }
+                        self.position += 1;
+                    }
+                }
+                if !matches!(self.tokens.get(self.position), Some(Token::RParen)) {
+                    return Err("invalid_formula");
+                }
+                self.position += 1;
+                if let Expr::Call {
+                    arguments: mut call_args,
+                    ..
+                } = value
+                {
+                    if !call_args.is_empty() && call_args.len() - 1 == invoke_args.len() {
+                        let body = call_args.pop().unwrap();
+                        let mut let_args = Vec::new();
+                        for (param, val) in call_args.into_iter().zip(invoke_args) {
+                            let_args.push(param);
+                            let_args.push(val);
+                        }
+                        let_args.push(body);
+                        return Ok(Expr::Call {
+                            name: "let".into(),
+                            arguments: let_args,
+                        });
+                    }
+                    return Ok(Expr::Call {
+                        name: "lambda".into(),
+                        arguments: call_args,
+                    });
+                }
+            }
             return Ok(value);
         }
         let token = self
@@ -429,9 +472,43 @@ impl Parser<'_> {
                         return Err("invalid_formula");
                     }
                     self.position += 1;
+                    let call_name = name.to_ascii_lowercase();
+                    let mut call_args = arguments;
+                    if call_name == "lambda"
+                        && matches!(self.tokens.get(self.position), Some(Token::LParen))
+                    {
+                        self.position += 1;
+                        let mut invoke_args = Vec::new();
+                        if !matches!(self.tokens.get(self.position), Some(Token::RParen)) {
+                            loop {
+                                invoke_args.push(self.parse_expression(0, depth + 1)?);
+                                if !matches!(self.tokens.get(self.position), Some(Token::Comma)) {
+                                    break;
+                                }
+                                self.position += 1;
+                            }
+                        }
+                        if !matches!(self.tokens.get(self.position), Some(Token::RParen)) {
+                            return Err("invalid_formula");
+                        }
+                        self.position += 1;
+                        if !call_args.is_empty() && call_args.len() - 1 == invoke_args.len() {
+                            let body = call_args.pop().unwrap();
+                            let mut let_args = Vec::new();
+                            for (param, val) in call_args.into_iter().zip(invoke_args) {
+                                let_args.push(param);
+                                let_args.push(val);
+                            }
+                            let_args.push(body);
+                            return Ok(Expr::Call {
+                                name: "let".into(),
+                                arguments: let_args,
+                            });
+                        }
+                    }
                     return Ok(Expr::Call {
-                        name: name.to_ascii_lowercase(),
-                        arguments,
+                        name: call_name,
+                        arguments: call_args,
                     });
                 }
                 if name.eq_ignore_ascii_case("true") {
@@ -592,13 +669,17 @@ enum EvalValue {
         rows: usize,
         cols: usize,
     },
+    Lambda {
+        parameters: Vec<String>,
+        body: Box<Expr>,
+    },
 }
 
 impl EvalValue {
     fn into_scalar(self) -> Option<FormulaValue> {
         match self {
             Self::Scalar(value) => Some(value),
-            Self::Range { .. } => None,
+            Self::Range { .. } | Self::Lambda { .. } => None,
         }
     }
 }
@@ -759,6 +840,34 @@ impl Evaluator<'_> {
         arguments: &[Expr],
         depth: usize,
     ) -> Result<EvalValue, &'static str> {
+        let lambda_match = self.variables.iter().rev().find_map(|(k, v)| {
+            if k == name {
+                if let EvalValue::Lambda { parameters, body } = v {
+                    Some((parameters.clone(), body.as_ref().clone()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+        if let Some((parameters, body)) = lambda_match {
+            if parameters.len() != arguments.len() {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
+            let mut evaled_args = Vec::with_capacity(arguments.len());
+            for arg in arguments {
+                evaled_args.push(self.evaluate(arg, depth + 1)?);
+            }
+            let prev_len = self.variables.len();
+            for (param, val) in parameters.into_iter().zip(evaled_args) {
+                self.variables.push((param, val));
+            }
+            let res = self.evaluate(&body, depth + 1);
+            self.variables.truncate(prev_len);
+            return res;
+        }
+
         match name {
             "if" => {
                 if !(2..=3).contains(&arguments.len()) {
@@ -784,6 +893,9 @@ impl Evaluator<'_> {
                     let values = match value {
                         EvalValue::Scalar(value) => vec![value],
                         EvalValue::Range { values, .. } => values,
+                        EvalValue::Lambda { .. } => {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                        }
                     };
                     for value in values {
                         let boolean = to_bool(&value)?;
@@ -897,6 +1009,27 @@ impl Evaluator<'_> {
                 self.variables.truncate(prev_len);
                 res
             }
+            "lambda" if !arguments.is_empty() => {
+                let mut parameters = Vec::new();
+                for arg in &arguments[..arguments.len() - 1] {
+                    let param_name = match arg {
+                        Expr::Variable(n) => n.clone(),
+                        Expr::Value(FormulaValue::String(n)) => n.clone(),
+                        Expr::Reference {
+                            source,
+                            sheet: None,
+                            ..
+                        } => source.clone(),
+                        _ => return Err("invalid_formula"),
+                    };
+                    parameters.push(param_name.to_ascii_lowercase());
+                }
+                let body = arguments.last().unwrap().clone();
+                Ok(EvalValue::Lambda {
+                    parameters,
+                    body: Box::new(body),
+                })
+            }
             "iferror" if arguments.len() == 2 => match self.eval_scalar(&arguments[0], depth + 1) {
                 Ok(FormulaValue::Error(_)) => self.evaluate(&arguments[1], depth + 1),
                 Ok(scalar) => Ok(EvalValue::Scalar(scalar)),
@@ -975,7 +1108,7 @@ impl Evaluator<'_> {
             "type" if arguments.len() == 1 => {
                 let eval_res = self.evaluate(&arguments[0], depth + 1)?;
                 let type_code = match eval_res {
-                    EvalValue::Range { .. } => 64.0,
+                    EvalValue::Range { .. } | EvalValue::Lambda { .. } => 64.0,
                     EvalValue::Scalar(s) => match s {
                         FormulaValue::Number(_) | FormulaValue::Blank => 1.0,
                         FormulaValue::String(_) => 2.0,
@@ -1203,6 +1336,9 @@ impl Evaluator<'_> {
                     let values = match val {
                         EvalValue::Scalar(s) => vec![s],
                         EvalValue::Range { values, .. } => values,
+                        EvalValue::Lambda { .. } => {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                        }
                     };
                     for v in values {
                         if let FormulaValue::Error(err) = v {
@@ -1307,6 +1443,9 @@ impl Evaluator<'_> {
                             }
                         }
                     }
+                    EvalValue::Lambda { .. } => {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())))
+                    }
                 }
             }
             "match" => {
@@ -1318,6 +1457,9 @@ impl Evaluator<'_> {
                 let values = match target {
                     EvalValue::Scalar(s) => vec![s],
                     EvalValue::Range { values, .. } => values,
+                    EvalValue::Lambda { .. } => {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
                 };
                 let match_type = if arguments.len() == 3 {
                     to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i32
@@ -1974,11 +2116,17 @@ impl Evaluator<'_> {
                 let (lookup_vals, l_rows, l_cols) = match lookup_target {
                     EvalValue::Range { values, rows, cols } => (values, rows, cols),
                     EvalValue::Scalar(s) => (vec![s], 1, 1),
+                    EvalValue::Lambda { .. } => {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
                 };
                 let return_target = self.evaluate(&arguments[2], depth + 1)?;
                 let (ret_vals, r_rows, r_cols) = match return_target {
                     EvalValue::Range { values, rows, cols } => (values, rows, cols),
                     EvalValue::Scalar(s) => (vec![s], 1, 1),
+                    EvalValue::Lambda { .. } => {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
                 };
                 let if_not_found = if arguments.len() >= 4 {
                     Some(self.eval_scalar(&arguments[3], depth + 1)?)
@@ -2019,17 +2167,15 @@ impl Evaluator<'_> {
                         if r_cols == 1 {
                             Ok(EvalValue::Scalar(ret_vals[idx].clone()))
                         } else {
-                            let start = idx * r_cols;
-                            let end = start + r_cols;
-                            if end <= ret_vals.len() {
-                                Ok(EvalValue::Range {
-                                    values: ret_vals[start..end].to_vec(),
-                                    rows: 1,
-                                    cols: r_cols,
-                                })
-                            } else {
-                                Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())))
+                            let mut row_vals = Vec::with_capacity(r_cols);
+                            for c in 0..r_cols {
+                                row_vals.push(ret_vals[idx * r_cols + c].clone());
                             }
+                            Ok(EvalValue::Range {
+                                values: row_vals,
+                                rows: 1,
+                                cols: r_cols,
+                            })
                         }
                     } else if l_rows == 1 && r_cols == l_cols {
                         if r_rows == 1 {
@@ -2065,6 +2211,9 @@ impl Evaluator<'_> {
                 let lookup_vals = match lookup_target {
                     EvalValue::Range { values, .. } => values,
                     EvalValue::Scalar(s) => vec![s],
+                    EvalValue::Lambda { .. } => {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
                 };
                 let match_mode = if arguments.len() >= 3 {
                     to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i32
@@ -2103,14 +2252,14 @@ impl Evaluator<'_> {
             }
             "rows" if arguments.len() == 1 => {
                 let res = match self.evaluate(&arguments[0], depth + 1)? {
-                    EvalValue::Scalar(_) => 1.0,
+                    EvalValue::Scalar(_) | EvalValue::Lambda { .. } => 1.0,
                     EvalValue::Range { rows, .. } => rows as f64,
                 };
                 Ok(EvalValue::Scalar(FormulaValue::Number(res)))
             }
             "columns" if arguments.len() == 1 => {
                 let res = match self.evaluate(&arguments[0], depth + 1)? {
-                    EvalValue::Scalar(_) => 1.0,
+                    EvalValue::Scalar(_) | EvalValue::Lambda { .. } => 1.0,
                     EvalValue::Range { cols, .. } => cols as f64,
                 };
                 Ok(EvalValue::Scalar(FormulaValue::Number(res)))
@@ -2135,7 +2284,9 @@ impl Evaluator<'_> {
             | "clean" | "t" | "n" | "find" | "search" | "hyperlink" | "proper" | "unichar"
             | "unicode" | "hex2dec" | "dec2hex" | "bin2dec" | "dec2bin" | "oct2dec" | "dec2oct"
             | "textjoin" | "textbefore" | "textafter" | "textsplit" | "base" | "decimal"
-            | "encodeurl" => self.evaluate_string_function(name, arguments, depth + 1),
+            | "encodeurl" | "bin2hex" | "hex2bin" | "oct2hex" | "hex2oct" | "numbervalue" => {
+                self.evaluate_string_function(name, arguments, depth + 1)
+            }
             _ => Err("unsupported"),
         }
     }
@@ -2153,6 +2304,9 @@ impl Evaluator<'_> {
                 EvalValue::Range {
                     values: range_vals, ..
                 } => values.extend(range_vals),
+                EvalValue::Lambda { .. } => {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
             }
         }
         if name == "counta" {
@@ -2259,6 +2413,9 @@ impl Evaluator<'_> {
                                 value.push_str(&to_string(&val)?);
                                 self.check_string_size(&value)?;
                             }
+                        }
+                        EvalValue::Lambda { .. } => {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
                         }
                     }
                 }
@@ -2617,6 +2774,9 @@ impl Evaluator<'_> {
                                 }
                             }
                         }
+                        EvalValue::Lambda { .. } => {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                        }
                     }
                 }
                 let result = parts.join(&delim);
@@ -2788,6 +2948,73 @@ impl Evaluator<'_> {
                 }
                 Ok(EvalValue::Scalar(FormulaValue::String(out)))
             }
+            "bin2hex" if arguments.len() == 1 || arguments.len() == 2 => {
+                let s = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let places = if arguments.len() == 2 {
+                    Some(to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?)
+                } else {
+                    None
+                };
+                let val = bin_to_hex(&s, places);
+                if let FormulaValue::String(ref out_s) = val {
+                    self.check_string_size(out_s)?;
+                }
+                Ok(EvalValue::Scalar(val))
+            }
+            "hex2bin" if arguments.len() == 1 || arguments.len() == 2 => {
+                let s = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let places = if arguments.len() == 2 {
+                    Some(to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?)
+                } else {
+                    None
+                };
+                let val = hex_to_bin(&s, places);
+                if let FormulaValue::String(ref out_s) = val {
+                    self.check_string_size(out_s)?;
+                }
+                Ok(EvalValue::Scalar(val))
+            }
+            "oct2hex" if arguments.len() == 1 || arguments.len() == 2 => {
+                let s = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let places = if arguments.len() == 2 {
+                    Some(to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?)
+                } else {
+                    None
+                };
+                let val = oct_to_hex(&s, places);
+                if let FormulaValue::String(ref out_s) = val {
+                    self.check_string_size(out_s)?;
+                }
+                Ok(EvalValue::Scalar(val))
+            }
+            "hex2oct" if arguments.len() == 1 || arguments.len() == 2 => {
+                let s = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let places = if arguments.len() == 2 {
+                    Some(to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?)
+                } else {
+                    None
+                };
+                let val = hex_to_oct(&s, places);
+                if let FormulaValue::String(ref out_s) = val {
+                    self.check_string_size(out_s)?;
+                }
+                Ok(EvalValue::Scalar(val))
+            }
+            "numbervalue" if (1..=3).contains(&arguments.len()) => {
+                let text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let dec_sep = if arguments.len() >= 2 {
+                    Some(to_string(&self.eval_scalar(&arguments[1], depth + 1)?)?)
+                } else {
+                    None
+                };
+                let grp_sep = if arguments.len() == 3 {
+                    Some(to_string(&self.eval_scalar(&arguments[2], depth + 1)?)?)
+                } else {
+                    None
+                };
+                let val = number_value(&text, dec_sep.as_deref(), grp_sep.as_deref());
+                Ok(EvalValue::Scalar(val))
+            }
             _ => Err("unsupported"),
         }
     }
@@ -2804,6 +3031,9 @@ impl Evaluator<'_> {
         let (values, orig_rows, orig_cols) = match self.evaluate(&arguments[0], depth + 1)? {
             EvalValue::Scalar(s) => (vec![s], 1, 1),
             EvalValue::Range { values, rows, cols } => (values, rows, cols),
+            EvalValue::Lambda { .. } => {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
         };
 
         match name {
@@ -3180,6 +3410,9 @@ impl Evaluator<'_> {
                 let (inc_vals, _, _) = match include_eval {
                     EvalValue::Scalar(s) => (vec![s], 1, 1),
                     EvalValue::Range { values, rows, cols } => (values, rows, cols),
+                    EvalValue::Lambda { .. } => {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
                 };
                 let filter_by_cols = orig_rows == 1 && orig_cols > 1 && inc_vals.len() == orig_cols;
                 if !filter_by_cols && inc_vals.len() != orig_rows {
@@ -3339,6 +3572,9 @@ impl Evaluator<'_> {
                 let (by_vals, _, _) = match by_eval {
                     EvalValue::Scalar(s) => (vec![s], 1, 1),
                     EvalValue::Range { values, rows, cols } => (values, rows, cols),
+                    EvalValue::Lambda { .. } => {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
                 };
                 let sort_order = if arguments.len() == 3 {
                     to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i64
@@ -3944,6 +4180,68 @@ fn decimal_from_base(text: &str, radix: f64) -> FormulaValue {
         }
     }
     FormulaValue::Number(acc)
+}
+
+fn bin_to_hex(s: &str, places: Option<f64>) -> FormulaValue {
+    let dec_val = bin_to_dec(s);
+    match dec_val {
+        FormulaValue::Number(n) => dec_to_hex(n, places),
+        err => err,
+    }
+}
+
+fn hex_to_bin(s: &str, places: Option<f64>) -> FormulaValue {
+    let dec_val = hex_to_dec(s);
+    match dec_val {
+        FormulaValue::Number(n) => dec_to_bin(n, places),
+        err => err,
+    }
+}
+
+fn oct_to_hex(s: &str, places: Option<f64>) -> FormulaValue {
+    let dec_val = oct_to_dec(s);
+    match dec_val {
+        FormulaValue::Number(n) => dec_to_hex(n, places),
+        err => err,
+    }
+}
+
+fn hex_to_oct(s: &str, places: Option<f64>) -> FormulaValue {
+    let dec_val = hex_to_dec(s);
+    match dec_val {
+        FormulaValue::Number(n) => dec_to_oct(n, places),
+        err => err,
+    }
+}
+
+fn number_value(text: &str, decimal_sep: Option<&str>, group_sep: Option<&str>) -> FormulaValue {
+    let mut trimmed = text.trim();
+    if trimmed.is_empty() {
+        return FormulaValue::Number(0.0);
+    }
+    let mut is_percent = false;
+    if let Some(s) = trimmed.strip_suffix('%') {
+        trimmed = s.trim();
+        is_percent = true;
+    }
+    let dec = decimal_sep.unwrap_or(".");
+    let grp = group_sep.unwrap_or(if dec == "," { "." } else { "," });
+    if dec == grp || dec.is_empty() {
+        return FormulaValue::Error("#VALUE!".into());
+    }
+    let without_grp = trimmed.replace(grp, "");
+    let normalized = if dec != "." {
+        without_grp.replace(dec, ".")
+    } else {
+        without_grp
+    };
+    match normalized.trim().parse::<f64>() {
+        Ok(val) if val.is_finite() => {
+            let res = if is_percent { val / 100.0 } else { val };
+            FormulaValue::Number(res)
+        }
+        _ => FormulaValue::Error("#VALUE!".into()),
+    }
 }
 
 fn compare_formula_values(a: &FormulaValue, b: &FormulaValue) -> std::cmp::Ordering {
@@ -5964,6 +6262,122 @@ mod tests {
             Some(FormulaValue::String(
                 "https%3A%2F%2Fexample.com%2Fapi%3Fq%3Dtest%26id%3D1".into()
             ))
+        );
+
+        // LAMBDA in LET and immediate invocation
+        assert_eq!(
+            evaluate_formula(
+                "=LET(joiner, LAMBDA(a, b, a & b), joiner(\"cmd\", \".exe\"))",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cmd.exe".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=LAMBDA(x, y, x + y)(15, 27)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(42.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=(LAMBDA(x, x * 3))(7)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(21.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=LET(dec, LAMBDA(c, k, CHAR(BITXOR(c, k))), dec(97, 2) & dec(111, 2) & dec(102, 2))",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cmd".into()))
+        );
+
+        // Radix conversion functions: BIN2HEX, HEX2BIN, OCT2HEX, HEX2OCT
+        assert_eq!(
+            evaluate_formula(
+                "=BIN2HEX(\"11111111\", 4)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("00FF".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=HEX2BIN(\"FF\", 10)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("0011111111".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=OCT2HEX(\"77\", 4)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("003F".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=HEX2OCT(\"3F\", 4)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("0077".into()))
+        );
+
+        // NUMBERVALUE locale-independent parsing
+        assert_eq!(
+            evaluate_formula(
+                "=NUMBERVALUE(\"1,234.56\")",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(1234.56))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=NUMBERVALUE(\"1.234,56\", \",\", \".\")",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(1234.56))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=NUMBERVALUE(\"25%\")",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(0.25))
         );
     }
 }

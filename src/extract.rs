@@ -617,7 +617,13 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("type")
                 || f_lower.contains("isnontext")
                 || f_lower.contains("let")
+                || f_lower.contains("lambda")
                 || f_lower.contains("encodeurl")
+                || f_lower.contains("bin2hex")
+                || f_lower.contains("hex2bin")
+                || f_lower.contains("oct2hex")
+                || f_lower.contains("hex2oct")
+                || f_lower.contains("numbervalue")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -1362,6 +1368,15 @@ pub fn extract_macro_container(data: &[u8], limits: &Limits) -> Result<Extracted
 /// - Suspicious protocol handlers (ms-msdt, search-ms, etc.) in relationships (`VBA-CELL-017`, Critical)
 /// - Suspicious drawing/shape action, hover trigger, or VML macro (`VBA-CELL-018`, High)
 /// - External data connection, web query, or NTLM coercion (`VBA-CELL-019`, High)
+/// - Real-Time Data (RTD) COM automation formula (`VBA-CELL-020`, High)
+/// - Suspicious SVG vector graphic with scripts/XXE/protocols (`VBA-CELL-021`, Critical)
+/// - Tampered, corrupted, or stripped VBA project signature (`VBA-CELL-022`, High)
+/// - Word field code execution via DDE/INCLUDETEXT/MACROBUTTON (`VBA-CELL-023`, Critical)
+/// - PowerPoint slide action or mouse-over hover trigger (`VBA-CELL-024`, Critical)
+/// - Suspicious Alternative Format Chunk (AltChunk) payload (`VBA-CELL-025`, Critical)
+/// - Custom UI Ribbon onLoad auto-execution and onAction callbacks (`VBA-CELL-026`, Critical)
+/// - Legacy Excel 5.0/95 Dialog Sheet macro bindings (`VBA-CELL-027`, High)
+/// - Content Types package anomaly, path traversal, and MIME spoofing (`VBA-CELL-028`, Critical)
 pub fn scan_ooxml_package_threats(
     zip: &ZipArchive<'_>,
     threats: &mut Vec<CellThreat>,
@@ -1911,6 +1926,351 @@ pub fn scan_ooxml_package_threats(
         None
     }
 
+    fn extract_attribute_value(tag_str: &str, attr_name: &str) -> Option<String> {
+        let tag_lower = tag_str.to_ascii_lowercase();
+        let target = attr_name.to_ascii_lowercase();
+        let mut search_idx = 0;
+        while let Some(pos) = tag_lower[search_idx..].find(&target) {
+            let abs_pos = search_idx + pos;
+            if abs_pos > 0 {
+                let prev = tag_str.as_bytes()[abs_pos - 1];
+                if !prev.is_ascii_whitespace() && prev != b'<' {
+                    search_idx = abs_pos + target.len();
+                    continue;
+                }
+            }
+            let rest = tag_str[abs_pos + target.len()..].trim_start();
+            if let Some(after_eq) = rest.strip_prefix('=') {
+                let after_eq_trimmed = after_eq.trim_start();
+                if let Some(quote @ ('"' | '\'')) = after_eq_trimmed.chars().next() {
+                    let after_quote = &after_eq_trimmed[1..];
+                    if let Some(end) = after_quote.find(quote) {
+                        return Some(decode_xml_entities(&after_quote[..end]));
+                    }
+                }
+            }
+            search_idx = abs_pos + target.len();
+        }
+        None
+    }
+
+    fn scan_customui_content(xml_str: &str) -> Vec<(&'static str, &'static str, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = xml_str.to_ascii_lowercase();
+
+        // 1. Scan tags for onLoad and onAction callbacks
+        let mut cursor = 0;
+        while cursor < xml_str.len() {
+            if let Some(tag_open) = xml_str[cursor..].find('<') {
+                let tag_start = cursor + tag_open;
+                let Some(tag_close) = xml_str[tag_start..].find('>') else {
+                    break;
+                };
+                let tag_end = tag_start + tag_close + 1;
+                let tag_str = &xml_str[tag_start..tag_end];
+
+                if let Some(onload_val) = extract_attribute_value(tag_str, "onload") {
+                    let trimmed = onload_val.trim();
+                    if !trimmed.is_empty() {
+                        results.push((
+                            "onLoad",
+                            "Critical",
+                            trimmed.to_string(),
+                            format!("Custom UI Ribbon registers 'onLoad' automatic execution callback ('{trimmed}')"),
+                        ));
+                    }
+                }
+
+                if let Some(onaction_val) = extract_attribute_value(tag_str, "onaction") {
+                    let trimmed = onaction_val.trim();
+                    if !trimmed.is_empty() {
+                        results.push((
+                            "onAction",
+                            "High",
+                            trimmed.to_string(),
+                            format!("Custom UI Ribbon binds control action to macro callback ('{trimmed}')"),
+                        ));
+                    }
+                }
+
+                cursor = tag_end;
+            } else {
+                break;
+            }
+        }
+
+        // 2. Check for shell keywords in customUI XML
+        for &kw in &[
+            "powershell",
+            "cmd.exe",
+            "mshta",
+            "rundll32",
+            "cscript",
+            "wscript",
+        ] {
+            if s_lower.contains(kw) {
+                results.push((
+                    "ShellCommand",
+                    "Critical",
+                    kw.to_string(),
+                    format!("Custom UI Ribbon contains shell command trigger '{kw}'"),
+                ));
+            }
+        }
+
+        // 3. Check for exploit protocol handlers
+        for &proto in &["ms-msdt:", "search-ms:", "ms-appinstaller:", "mhtml:"] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "ExploitProtocol",
+                    "Critical",
+                    proto.to_string(),
+                    format!("Custom UI Ribbon contains exploit protocol handler '{proto}'"),
+                ));
+            }
+        }
+
+        results
+    }
+
+    fn scan_legacy_dialogsheet_content(xml_str: &str) -> Vec<(&'static str, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = xml_str.to_ascii_lowercase();
+
+        let mut fmla_cursor = 0;
+        let mut found_macro = false;
+        while let Some(start) = s_lower[fmla_cursor..].find("fmlamacro>") {
+            let abs_start = fmla_cursor + start + 10;
+            let end = xml_str[abs_start..]
+                .find("</")
+                .map(|e| abs_start + e)
+                .unwrap_or(xml_str.len().min(abs_start + 120));
+            let macro_name = decode_xml_entities(&xml_str[abs_start..end])
+                .trim()
+                .to_string();
+            if !macro_name.is_empty() {
+                let macro_lower = macro_name.to_ascii_lowercase();
+                let is_suspicious = macro_lower.contains("auto_open")
+                    || macro_lower.contains("autoexec")
+                    || macro_lower.contains("workbook_open")
+                    || macro_lower.contains("shell")
+                    || macro_lower.contains("cmd")
+                    || macro_lower.contains("powershell");
+                let sev = if is_suspicious { "Critical" } else { "High" };
+                results.push((
+                    sev,
+                    macro_name.clone(),
+                    format!("Legacy Excel 5.0/95 Dialog Sheet binds control to macro execution ('{macro_name}')"),
+                ));
+                found_macro = true;
+            }
+            fmla_cursor = end;
+        }
+
+        if !found_macro && (s_lower.contains("<dialogsheet") || s_lower.contains("<x:dialogsheet"))
+        {
+            results.push((
+                "Medium",
+                String::new(),
+                "Legacy Excel 5.0/95 Dialog Sheet present in container".into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_content_types_content(xml_str: &str) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let mut cursor = 0;
+
+        while cursor < xml_str.len() {
+            if let Some(tag_open) = xml_str[cursor..].find('<') {
+                let tag_start = cursor + tag_open;
+                let Some(tag_close) = xml_str[tag_start..].find('>') else {
+                    break;
+                };
+                let tag_end = tag_start + tag_close + 1;
+                let tag_str = &xml_str[tag_start..tag_end];
+                let tag_lower = tag_str.to_ascii_lowercase();
+
+                let is_default = tag_lower.starts_with("<default");
+                let is_override = tag_lower.starts_with("<override");
+
+                if is_default {
+                    let ext_opt = extract_attribute_value(tag_str, "extension");
+                    let ct_opt = extract_attribute_value(tag_str, "contenttype");
+
+                    if let Some(ref ext) = ext_opt {
+                        // 1. Path traversal in extension
+                        if ext.contains("..")
+                            || ext.contains('/')
+                            || ext.contains('\\')
+                            || ext.contains("%2e%2e")
+                            || ext.contains("%2E%2E")
+                        {
+                            results.push((
+                                "Critical",
+                                ext.clone(),
+                                format!("ext:{}", ext),
+                                format!("Path traversal anomaly in [Content_Types].xml Extension '{ext}'"),
+                            ));
+                        }
+                    }
+
+                    if let (Some(ref ext), Some(ref ct)) = (ext_opt, ct_opt) {
+                        let ct_lower = ct.to_ascii_lowercase();
+                        let ext_lower = ext.to_ascii_lowercase();
+
+                        // 2. Dangerous executable MIME type
+                        for &dang_ct in &[
+                            "application/x-msdownload",
+                            "application/x-msdos-program",
+                            "application/hta",
+                            "application/x-bat",
+                            "application/x-executable",
+                            "application/x-sh",
+                            "application/x-csh",
+                            "application/x-powershell",
+                        ] {
+                            if ct_lower == dang_ct {
+                                results.push((
+                                    "Critical",
+                                    ext.clone(),
+                                    format!("mime:{}", ct),
+                                    format!("Dangerous executable MIME content type '{ct}' declared in [Content_Types].xml for extension '{ext}'"),
+                                ));
+                            }
+                        }
+
+                        // 3. MIME extension spoofing
+                        let is_sensitive_macro_type = ct_lower
+                            == "application/vnd.ms-office.vbaproject"
+                            || ct_lower == "application/vnd.ms-office.vbaprojectsignature"
+                            || ct_lower.contains("application/vnd.ms-excel.macrosheet");
+                        if is_sensitive_macro_type {
+                            let is_innocuous_ext = matches!(
+                                ext_lower.as_str(),
+                                "png"
+                                    | "jpg"
+                                    | "jpeg"
+                                    | "gif"
+                                    | "bmp"
+                                    | "ico"
+                                    | "svg"
+                                    | "txt"
+                                    | "xml"
+                                    | "rels"
+                                    | "dat"
+                                    | "htm"
+                                    | "html"
+                                    | "pdf"
+                                    | "wav"
+                                    | "mp3"
+                            );
+                            if is_innocuous_ext
+                                || (ct_lower.contains("vbaproject") && ext_lower != "bin")
+                            {
+                                results.push((
+                                    "Critical",
+                                    ext.clone(),
+                                    format!("default:{}", ext),
+                                    format!("MIME extension spoofing in [Content_Types].xml: extension '.{ext}' is mapped to sensitive type '{ct}'"),
+                                ));
+                            }
+                        }
+                    }
+                } else if is_override {
+                    let part_opt = extract_attribute_value(tag_str, "partname");
+                    let ct_opt = extract_attribute_value(tag_str, "contenttype");
+
+                    if let Some(ref part_name) = part_opt {
+                        // 1. Path traversal in PartName
+                        if part_name.contains("..")
+                            || part_name.contains('\\')
+                            || part_name.contains("%2e%2e")
+                            || part_name.contains("%2E%2E")
+                        {
+                            results.push((
+                                "Critical",
+                                part_name.clone(),
+                                format!("part:{}", part_name),
+                                format!("Path traversal anomaly in [Content_Types].xml PartName '{part_name}'"),
+                            ));
+                        }
+                    }
+
+                    if let (Some(ref part_name), Some(ref ct)) = (part_opt, ct_opt) {
+                        let ct_lower = ct.to_ascii_lowercase();
+
+                        // 2. Dangerous executable MIME type
+                        for &dang_ct in &[
+                            "application/x-msdownload",
+                            "application/x-msdos-program",
+                            "application/hta",
+                            "application/x-bat",
+                            "application/x-executable",
+                            "application/x-sh",
+                            "application/x-csh",
+                            "application/x-powershell",
+                        ] {
+                            if ct_lower == dang_ct {
+                                results.push((
+                                    "Critical",
+                                    part_name.clone(),
+                                    format!("mime:{}", ct),
+                                    format!("Dangerous executable MIME content type '{ct}' declared in [Content_Types].xml for PartName '{part_name}'"),
+                                ));
+                            }
+                        }
+
+                        // 3. MIME extension spoofing
+                        let is_sensitive_macro_type = ct_lower
+                            == "application/vnd.ms-office.vbaproject"
+                            || ct_lower == "application/vnd.ms-office.vbaprojectsignature"
+                            || ct_lower.contains("application/vnd.ms-excel.macrosheet");
+                        if is_sensitive_macro_type {
+                            let ext_lower = part_name
+                                .rsplit('.')
+                                .next()
+                                .unwrap_or("")
+                                .to_ascii_lowercase();
+                            let is_innocuous_ext = matches!(
+                                ext_lower.as_str(),
+                                "png"
+                                    | "jpg"
+                                    | "jpeg"
+                                    | "gif"
+                                    | "bmp"
+                                    | "ico"
+                                    | "svg"
+                                    | "txt"
+                                    | "pdf"
+                                    | "wav"
+                                    | "mp3"
+                            );
+                            if is_innocuous_ext
+                                || (ct_lower.contains("vbaproject") && ext_lower != "bin")
+                            {
+                                results.push((
+                                    "Critical",
+                                    part_name.clone(),
+                                    format!("override:{}", part_name),
+                                    format!("MIME extension spoofing in [Content_Types].xml: part '{part_name}' with non-macro extension is declared as '{ct}'"),
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                cursor = tag_end;
+            } else {
+                break;
+            }
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -2375,6 +2735,85 @@ pub fn scan_ooxml_package_threats(
                 }
             }
         }
+
+        // Check for Custom UI Ribbon XML (customUI/customUI*.xml)
+        let is_custom_ui = (name_lower.contains("customui/")
+            || name_lower.starts_with("customui/")
+            || name_lower.contains("\\customui\\"))
+            && name_lower.ends_with(".xml");
+        if is_custom_ui {
+            let Ok(data) = zip.read(entry) else { continue };
+            let xml_str = String::from_utf8_lossy(&data);
+            for (sub_type, sev, trigger, desc) in scan_customui_content(&xml_str) {
+                let coord = format!("part:{}:{}:{}", entry.name, sub_type, trigger);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Ribbon".into(),
+                        cell_ref: trigger.clone(),
+                        coordinate: coord,
+                        threat_kind: "CustomUiRibbon".into(),
+                        severity: sev.into(),
+                        formula: trigger,
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for legacy Excel 5.0/95 Dialog Sheets (xl/dialogsheets/sheet*.xml)
+        let is_dialog_sheet = (name_lower.contains("dialogsheet")
+            || name_lower.contains("/dialogsheets/"))
+            && name_lower.ends_with(".xml");
+        if is_dialog_sheet {
+            let Ok(data) = zip.read(entry) else { continue };
+            let xml_str = String::from_utf8_lossy(&data);
+            for (sev, macro_name, desc) in scan_legacy_dialogsheet_content(&xml_str) {
+                let coord = if macro_name.is_empty() {
+                    format!("part:{}", entry.name)
+                } else {
+                    format!("part:{}:macro:{}", entry.name, macro_name)
+                };
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "DialogSheet".into(),
+                        cell_ref: if macro_name.is_empty() {
+                            entry.name.clone()
+                        } else {
+                            macro_name.clone()
+                        },
+                        coordinate: coord,
+                        threat_kind: "LegacyDialogSheet".into(),
+                        severity: sev.into(),
+                        formula: macro_name,
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Content Types anomalies, path traversal, and MIME spoofing ([Content_Types].xml)
+        let is_content_types = name_lower.trim_start_matches('/') == "[content_types].xml";
+        if is_content_types {
+            let Ok(data) = zip.read(entry) else { continue };
+            let xml_str = String::from_utf8_lossy(&data);
+            for (sev, cell_ref, coord_key, desc) in scan_content_types_content(&xml_str) {
+                let coord = format!("part:[Content_Types].xml:{}", coord_key);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Package".into(),
+                        cell_ref: cell_ref.clone(),
+                        coordinate: coord,
+                        threat_kind: "ContentTypeAnomaly".into(),
+                        severity: sev.into(),
+                        formula: cell_ref,
+                        description: desc,
+                    });
+                }
+            }
+        }
     }
 
     // 2. Inspect all OPC relationship parts (.rels) for external references
@@ -2505,6 +2944,29 @@ pub fn scan_ooxml_package_threats(
                     }
                 }
 
+                // Check for External Custom UI Ribbon relationship
+                if (rel_type.contains("ui/extensibility") || rel_type.contains("customui"))
+                    && is_ext
+                {
+                    let coord = format!("rel:{}->{}", rels_part, rel.id);
+                    if !threats.iter().any(|t| t.coordinate == coord) {
+                        let desc = format!(
+                            "External Custom UI Ribbon relationship '{}' in '{}' targets external specification '{}'",
+                            rel.id, rels_part, rel.target
+                        );
+                        diagnostics.push(format!("Security warning: {desc}"));
+                        threats.push(CellThreat {
+                            sheet_name: "Package".into(),
+                            cell_ref: rel.id.clone(),
+                            coordinate: coord,
+                            threat_kind: "CustomUiRibbon".into(),
+                            severity: "Critical".into(),
+                            formula: rel.target.clone(),
+                            description: desc,
+                        });
+                    }
+                }
+
                 // Check for Suspicious Protocol Handler (ms-msdt, search-ms, ms-appinstaller, mhtml, javascript, vbscript, remote file://)
                 let is_suspicious_proto = target_lower.starts_with("ms-msdt:")
                     || target_lower.starts_with("search-ms:")
@@ -2522,6 +2984,8 @@ pub fn scan_ooxml_package_threats(
                     && !rel_type.contains("frame")
                     && !rel_type.contains("afchunk")
                     && !rel_type.contains("altchunk")
+                    && !rel_type.contains("ui/extensibility")
+                    && !rel_type.contains("customui")
                 {
                     let coord = format!("rel:{}->{}", rels_part, rel.id);
                     if !threats.iter().any(|t| t.coordinate == coord) {

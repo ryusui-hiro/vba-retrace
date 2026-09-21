@@ -320,7 +320,7 @@ console.log('解析完了。コード実行の有無:', parsedAnalysis.project.c
 
 ### 2. コンテナパッケージ & ワークシート・セル脅威スキャナー
 
-`vba-insight` は、コンテナパッケージ（OOXML リレーションシップ、埋め込み OLE パッケージ）、ワークシート数式、定義名、シートメタデータを以下の 25 の専用セキュリティルールで検査します：
+`vba-insight` は、コンテナパッケージ（OOXML リレーションシップ、埋め込み OLE パッケージ）、ワークシート数式、定義名、シートメタデータを以下の 28 の専用セキュリティルールで検査します：
 
 | ルール ID | 検知種別 | 重要度 | 検出ロジックと概要 |
 |---|---|:---:|---|
@@ -349,9 +349,12 @@ console.log('解析完了。コード実行の有無:', parsedAnalysis.project.c
 | `VBA-CELL-023` | `WordFieldCodeExecution` | **Critical** | Word ドキュメントパーツ（`word/document.xml`、ヘッダー、フッター等）に DDE/DDEAUTO によるコマンド実行、INCLUDETEXT/LINK による遠隔文書取得、UNC 認証詐取を仕組む不審なフィールドコード（`w:fldSimple`、`w:instrText`）が含まれている。 |
 | `VBA-CELL-024` | `PowerPointSlideAction` | **Critical** | PowerPoint プレゼンテーションパーツ（`ppt/slides/slide*.xml`、レイアウト、マスター）に外部プログラム起動、マクロ実行、または実行可能ファイルへのリンクを仕組むクリック・ホバーアクション（`ppaction://program`、`<a:hlinkHover>`）が設定されている。 |
 | `VBA-CELL-025` | `SuspiciousAltChunkPayload` | **Critical** | Word の代替フォーマットインポートチャンク（`aFChunk`）リレーションシップまたはパーツ（HTML、MHT、RTF、BIN）が外部リモートテンプレートを参照しているか、HTML Smuggling スクリプト、RTF 脆弱性悪用コード、または PE 実行可能バイナリを含んでいる。 |
+| `VBA-CELL-026` | `CustomUiRibbonCallback` | **Critical** | Custom UI リボン XML（`customUI/customUI*.xml`）で文書読み込み時の自動実行コールバック（`onLoad`）やコントロールマクロトリガー（`onAction`）が設定されている。 |
+| `VBA-CELL-027` | `LegacyDialogSheetMacro` | **High** | レガシー Excel 5.0/95 ダイアログシート（`xl/dialogsheets/sheet*.xml`）にコントロールマクロ連携（`<x:FmlaMacro>`）や自動ポップアップ偽装ダイアログが含まれている。 |
+| `VBA-CELL-028` | `ContentTypeAnomaly` | **Critical** | パッケージ `[Content_Types].xml` にパストラバーサル（`/../`）、危険な実行可能 MIME（`application/x-msdownload`, `application/hta`）、または拡張子偽装（`vbaProject` を画像や無害な拡張子に偽装）が含まれている。 |
 
-- **コンテナレベル脅威検査**: マクロが存在しない DOCX/XLSX コンテナであっても、OOXML リレーションシップ、描画オブジェクト、外部データ接続、埋め込み SVG ベクター画像、デジタル署名、Word フィールドコード（`w:fldSimple`、`w:instrText`）、PowerPoint スライドアクション、AltChunk ペイロード密輸パーツ構造からリモートテンプレートインジェクション、埋め込み OLE パッケージ、外部 Moniker リンク、ActiveX コントロール、プリンター設定 UNC 誘導、カスタム XML ペイロード密輸、描画ホバー/マクロアクション、外部データ接続 / NTLM 誘導、SVG スクリプト、署名改竄/剥奪、および危険なプロトコルハンドラーを自動検出。
-- **動的数式難読化解除**: ワークブック全体のセルグリッドにまたがる難読化数式を、スコープ変数定義評価（`LET()`）、動的 URL エンコード（`ENCODEURL()`）、動的セル参照解決（`INDIRECT()`、`OFFSET()`、`ADDRESS()`）、セル間数式検査（`FORMULATEXT()`）、動的配列フィルタリング・ソート（`FILTER()`、`SORT()`、`SORTBY()`、`UNIQUE()`、`WRAPROWS()`、`WRAPCOLS()`）、ビット演算復号（`BITXOR()`、`BITAND()`、`BITOR()`、`BITLSHIFT()`、`BITRSHIFT()`）、基数変換・ローマ数字変換（`BASE()`、`DECIMAL()`、`ROMAN()`、`ARABIC()`、`HEX2DEC()`、`BIN2DEC()`）、最新動的配列変形（`TAKE()`、`DROP()`、`CHOOSEROWS()`、`CHOOSECOLS()`、`TOROW()`、`TOCOL()`、`EXPAND()`）、最新動的検索（`XLOOKUP()`、`XMATCH()`）、テキスト分解・シリアライズ（`TEXTBEFORE()`、`TEXTAFTER()`、`TEXTSPLIT()`、`ARRAYTOTEXT()`、`VALUETOTEXT()`）、複数セル範囲結合（`CONCAT()`、`TEXTJOIN()`）、2D テーブル参照（`INDEX()`、`VLOOKUP()`、`HLOOKUP()`、`MATCH()`）、Unicode 変換（`UNICHAR()`、`UNICODE()`）、および文字列・数学・型検査関数（`CHAR()`、`MID()`、`SUBSTITUTE()`、`CHOOSE()`、`HYPERLINK()`、`ROWS()`、`COLUMNS()`、`MROUND()`、`TYPE()`、`ISNONTEXT()`）を有界評価することで、静的パターン照合を回避する隠蔽 LOLBins、セル連携 DDE 実行、RTD COM オートメーション、遠隔ダウンロードペイロードを動的に復元検知。
+- **コンテナレベル脅威検査**: マクロが存在しない DOCX/XLSX コンテナであっても、OOXML リレーションシップ、描画オブジェクト、外部データ接続、埋め込み SVG ベクター画像、デジタル署名、Word フィールドコード（`w:fldSimple`、`w:instrText`）、PowerPoint スライドアクション、AltChunk ペイロード密輸パーツ構造、Custom UI リボン XML コールバック、レガシーダイアログシート、および `[Content_Types].xml` MIME 宣言からリモートテンプレートインジェクション、埋め込み OLE パッケージ、外部 Moniker リンク、ActiveX コントロール、プリンター設定 UNC 誘導、カスタム XML ペイロード密輸、描画ホバー/マクロアクション、外部データ接続 / NTLM 誘導、SVG スクリプト、署名改竄/剥奪、および危険なプロトコルハンドラーを自動検出。
+- **動的数式難読化解除**: ワークブック全体のセルグリッドにまたがる難読化数式を、カスタムラムダ関数評価（`LAMBDA()`）、スコープ変数定義評価（`LET()`）、動的 URL エンコード（`ENCODEURL()`）、基数変換（`BIN2HEX()`、`HEX2BIN()`、`OCT2HEX()`、`HEX2OCT()`、`BASE()`、`DECIMAL()`、`HEX2DEC()`、`BIN2DEC()`）、ロケール非依存数値解析（`NUMBERVALUE()`）、動的セル参照解決（`INDIRECT()`、`OFFSET()`、`ADDRESS()`）、セル間数式検査（`FORMULATEXT()`）、動的配列フィルタリング・ソート（`FILTER()`、`SORT()`、`SORTBY()`、`UNIQUE()`、`WRAPROWS()`、`WRAPCOLS()`）、ビット演算復号（`BITXOR()`、`BITAND()`、`BITOR()`、`BITLSHIFT()`、`BITRSHIFT()`）、ローマ数字変換（`ROMAN()`、`ARABIC()`）、最新動的配列変形（`TAKE()`、`DROP()`、`CHOOSEROWS()`、`CHOOSECOLS()`、`TOROW()`、`TOCOL()`、`EXPAND()`）、最新動的検索（`XLOOKUP()`、`XMATCH()`）、テキスト分解・シリアライズ（`TEXTBEFORE()`、`TEXTAFTER()`、`TEXTSPLIT()`、`ARRAYTOTEXT()`、`VALUETOTEXT()`）、複数セル範囲結合（`CONCAT()`、`TEXTJOIN()`）、2D テーブル参照（`INDEX()`、`VLOOKUP()`、`HLOOKUP()`、`MATCH()`）、Unicode 変換（`UNICHAR()`、`UNICODE()`）、および文字列・数学・型検査関数（`CHAR()`、`MID()`、`SUBSTITUTE()`、`CHOOSE()`、`HYPERLINK()`、`ROWS()`、`COLUMNS()`、`MROUND()`、`TYPE()`、`ISNONTEXT()`）を有界評価することで、静的パターン照合を回避する隠蔽 LOLBins、セル連携 DDE 実行、RTD COM オートメーション、遠隔ダウンロードペイロードを動的に復元検知。
 - **全角文字難読化回避の正規化**: 数式検査前に全角英数字・記号（`U+FF01`〜`U+FF5E`、`U+3000`）を標準 ASCII に正規化し、難読化による検知回避を無力化。
 
 ---

@@ -3056,6 +3056,9 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "WordFieldCode" => ("VBA-CELL-023", "error"),
         "PowerPointSlideAction" => ("VBA-CELL-024", "error"),
         "SuspiciousAltChunk" => ("VBA-CELL-025", "error"),
+        "CustomUiRibbon" => ("VBA-CELL-026", "error"),
+        "LegacyDialogSheet" => ("VBA-CELL-027", "error"),
+        "ContentTypeAnomaly" => ("VBA-CELL-028", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3180,7 +3183,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-024\",\"name\":\"PowerPointSlideAction\",\"shortDescription\":{\"text\":\"Suspicious PowerPoint Slide Action or Hover Trigger\"},\"fullDescription\":{\"text\":\"PowerPoint slide or layout contains clickable or mouse-over hover action triggers executing programs, macros, or linking to executable files.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-025\",\"name\":\"SuspiciousAltChunkPayload\",\"shortDescription\":{\"text\":\"Suspicious Alternative Format Chunk (AltChunk / HTML Smuggling)\"},\"fullDescription\":{\"text\":\"Word alternative format import chunk (AltChunk) references external remote templates or contains smuggled HTML, scripts, RTF exploits, or PE headers.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-025\",\"name\":\"SuspiciousAltChunkPayload\",\"shortDescription\":{\"text\":\"Suspicious Alternative Format Chunk (AltChunk / HTML Smuggling)\"},\"fullDescription\":{\"text\":\"Word alternative format import chunk (AltChunk) references external remote templates or contains smuggled HTML, scripts, RTF exploits, or PE headers.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-026\",\"name\":\"CustomUiRibbonCallback\",\"shortDescription\":{\"text\":\"Custom UI Ribbon Callback Auto-Execution\"},\"fullDescription\":{\"text\":\"Office Custom UI Ribbon XML (customUI.xml) contains onLoad automatic execution callback or onAction macro controls triggered upon document open or UI interaction.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-027\",\"name\":\"LegacyDialogSheetMacro\",\"shortDescription\":{\"text\":\"Legacy Excel 5.0/95 Dialog Sheet Macro\"},\"fullDescription\":{\"text\":\"Workbook contains legacy Excel 5.0/95 dialog sheet (xl/dialogsheets/sheet*.xml) with embedded macro bindings (<x:FmlaMacro>) or dialog controls.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-028\",\"name\":\"ContentTypeAnomaly\",\"shortDescription\":{\"text\":\"Content Types Package Anomaly or MIME Spoofing\"},\"fullDescription\":{\"text\":\"[Content_Types].xml contains dangerous executable MIME types, path traversal part names, or extension spoofing (cloaking vbaProject or macrosheets under image/innocuous extensions).\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));
