@@ -534,6 +534,20 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("left")
                 || f_lower.contains("right")
                 || f_lower.contains("choose")
+                || f_lower.contains("proper")
+                || f_lower.contains("unichar")
+                || f_lower.contains("unicode")
+                || f_lower.contains("hex2dec")
+                || f_lower.contains("dec2hex")
+                || f_lower.contains("bin2dec")
+                || f_lower.contains("dec2bin")
+                || f_lower.contains("oct2dec")
+                || f_lower.contains("dec2oct")
+                || f_lower.contains("textjoin")
+                || f_lower.contains("index")
+                || f_lower.contains("vlookup")
+                || f_lower.contains("hlookup")
+                || f_lower.contains("match")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -697,7 +711,11 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                         || ev_lower.contains("hh.exe")
                         || ev_lower.contains("installutil")
                         || ev_lower.contains("regasm")
-                        || ev_lower.contains("msconfig");
+                        || ev_lower.contains("regsvcs")
+                        || ev_lower.contains("msconfig")
+                        || ev_lower.contains("control.exe")
+                        || ev_lower.contains("bash.exe")
+                        || ev_lower.contains("wsl.exe");
                     let has_payload_url = (ev_lower.contains("http://")
                         || ev_lower.contains("https://"))
                         && (ev_lower.ends_with(".exe")

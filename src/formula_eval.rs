@@ -105,7 +105,7 @@ pub fn evaluate_formula(
             output.status = "resolved".into();
             output.value = Some(value);
         }
-        Ok(EvalValue::Range(_)) => output.status = "unsupported".into(),
+        Ok(EvalValue::Range { .. }) => output.status = "unsupported".into(),
         Err(status) => output.status = status.into(),
     }
     output.references = evaluator.references;
@@ -514,14 +514,18 @@ fn parse_cell_address(input: &str) -> Option<CellAddress> {
 #[derive(Clone, Debug, PartialEq)]
 enum EvalValue {
     Scalar(FormulaValue),
-    Range(Vec<FormulaValue>),
+    Range {
+        values: Vec<FormulaValue>,
+        rows: usize,
+        cols: usize,
+    },
 }
 
 impl EvalValue {
     fn into_scalar(self) -> Option<FormulaValue> {
         match self {
             Self::Scalar(value) => Some(value),
-            Self::Range(_) => None,
+            Self::Range { .. } => None,
         }
     }
 }
@@ -558,19 +562,21 @@ impl Evaluator<'_> {
                 source,
             } => {
                 self.record_reference(source);
-                let rows = first.row.min(last.row)..=first.row.max(last.row);
-                let columns = first.column.min(last.column)..=first.column.max(last.column);
-                let count = rows.clone().count().saturating_mul(columns.clone().count());
+                let row_range = first.row.min(last.row)..=first.row.max(last.row);
+                let col_range = first.column.min(last.column)..=first.column.max(last.column);
+                let rows = row_range.clone().count();
+                let cols = col_range.clone().count();
+                let count = rows.saturating_mul(cols);
                 if count > self.limits.max_range_cells {
                     return Err("resource_limit");
                 }
                 let mut values = Vec::with_capacity(count);
-                for row in rows {
-                    for column in columns.clone() {
+                for row in row_range {
+                    for column in col_range.clone() {
                         values.push(self.lookup(sheet.as_deref(), CellAddress { row, column })?);
                     }
                 }
-                Ok(EvalValue::Range(values))
+                Ok(EvalValue::Range { values, rows, cols })
             }
             Expr::Unary { operator, value } => {
                 let value = self.eval_scalar(value, depth + 1)?;
@@ -640,7 +646,7 @@ impl Evaluator<'_> {
                     let value = self.evaluate(argument, depth + 1)?;
                     let values = match value {
                         EvalValue::Scalar(value) => vec![value],
-                        EvalValue::Range(values) => values,
+                        EvalValue::Range { values, .. } => values,
                     };
                     for value in values {
                         let boolean = to_bool(&value)?;
@@ -661,7 +667,7 @@ impl Evaluator<'_> {
                     &self.eval_scalar(&arguments[0], depth + 1)?,
                 )?)))
             }
-            "sum" | "average" | "min" | "max" | "count" | "counta" => {
+            "sum" | "average" | "min" | "max" | "count" | "counta" | "product" => {
                 self.evaluate_aggregate(name, arguments, depth + 1)
             }
             "abs" => {
@@ -909,11 +915,278 @@ impl Evaluator<'_> {
                     Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
                 }
             }
+            "xor" => {
+                if arguments.is_empty() {
+                    return Err("unsupported");
+                }
+                let mut true_count = 0usize;
+                let mut total_count = 0usize;
+                for arg in arguments {
+                    let val = self.evaluate(arg, depth + 1)?;
+                    let values = match val {
+                        EvalValue::Scalar(s) => vec![s],
+                        EvalValue::Range { values, .. } => values,
+                    };
+                    for v in values {
+                        if let FormulaValue::Error(err) = v {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error(err)));
+                        }
+                        if matches!(v, FormulaValue::Blank) {
+                            continue;
+                        }
+                        if let Ok(b) = to_bool(&v) {
+                            total_count += 1;
+                            if b {
+                                true_count += 1;
+                            }
+                        }
+                    }
+                }
+                if total_count == 0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Boolean(
+                    !true_count.is_multiple_of(2),
+                )))
+            }
+            "quotient" if arguments.len() == 2 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let d = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                if d == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number((n / d).trunc())))
+                }
+            }
+            "log" if (1..=2).contains(&arguments.len()) => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if n <= 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let base = if arguments.len() == 2 {
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?
+                } else {
+                    10.0
+                };
+                if base <= 0.0 || (base - 1.0).abs() < f64::EPSILON {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let res = n.ln() / base.ln();
+                if res.is_finite() {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                }
+            }
+            "index" => {
+                if !(2..=3).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let target = self.evaluate(&arguments[0], depth + 1)?;
+                match target {
+                    EvalValue::Scalar(scalar) => {
+                        let row_num =
+                            to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                        let col_num = if arguments.len() == 3 {
+                            to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i64
+                        } else {
+                            1
+                        };
+                        if row_num == 1 && col_num == 1 {
+                            Ok(EvalValue::Scalar(scalar))
+                        } else {
+                            Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())))
+                        }
+                    }
+                    EvalValue::Range { values, rows, cols } => {
+                        let row_num =
+                            to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                        if arguments.len() == 2 {
+                            if rows == 1 {
+                                if (1..=cols as i64).contains(&row_num) {
+                                    Ok(EvalValue::Scalar(values[(row_num - 1) as usize].clone()))
+                                } else {
+                                    Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())))
+                                }
+                            } else if cols == 1 {
+                                if (1..=rows as i64).contains(&row_num) {
+                                    Ok(EvalValue::Scalar(values[(row_num - 1) as usize].clone()))
+                                } else {
+                                    Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())))
+                                }
+                            } else {
+                                Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())))
+                            }
+                        } else {
+                            let col_num = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?
+                                .trunc() as i64;
+                            if (1..=rows as i64).contains(&row_num)
+                                && (1..=cols as i64).contains(&col_num)
+                            {
+                                let idx = (row_num - 1) as usize * cols + (col_num - 1) as usize;
+                                Ok(EvalValue::Scalar(values[idx].clone()))
+                            } else {
+                                Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())))
+                            }
+                        }
+                    }
+                }
+            }
+            "match" => {
+                if !(2..=3).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let lookup_val = self.eval_scalar(&arguments[0], depth + 1)?;
+                let target = self.evaluate(&arguments[1], depth + 1)?;
+                let values = match target {
+                    EvalValue::Scalar(s) => vec![s],
+                    EvalValue::Range { values, .. } => values,
+                };
+                let match_type = if arguments.len() == 3 {
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i32
+                } else {
+                    1
+                };
+                if match_type == 0 {
+                    for (idx, val) in values.iter().enumerate() {
+                        if values_equal(&lookup_val, val) {
+                            return Ok(EvalValue::Scalar(FormulaValue::Number((idx + 1) as f64)));
+                        }
+                    }
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                } else if match_type == 1 {
+                    let mut best: Option<usize> = None;
+                    for (idx, val) in values.iter().enumerate() {
+                        if values_less_than_or_equal(val, &lookup_val) {
+                            best = Some(idx);
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Some(idx) = best {
+                        Ok(EvalValue::Scalar(FormulaValue::Number((idx + 1) as f64)))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                    }
+                } else if match_type == -1 {
+                    let mut best: Option<usize> = None;
+                    for (idx, val) in values.iter().enumerate() {
+                        if values_greater_than_or_equal(val, &lookup_val) {
+                            best = Some(idx);
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Some(idx) = best {
+                        Ok(EvalValue::Scalar(FormulaValue::Number((idx + 1) as f64)))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                    }
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())))
+                }
+            }
+            "vlookup" => {
+                if !(3..=4).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let lookup_val = self.eval_scalar(&arguments[0], depth + 1)?;
+                let target = self.evaluate(&arguments[1], depth + 1)?;
+                let (values, rows, cols) = match target {
+                    EvalValue::Range { values, rows, cols } => (values, rows, cols),
+                    _ => return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                };
+                let col_index =
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i64;
+                let range_lookup = if arguments.len() == 4 {
+                    to_bool(&self.eval_scalar(&arguments[3], depth + 1)?)?
+                } else {
+                    true
+                };
+                if col_index < 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                if col_index > cols as i64 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())));
+                }
+                let target_col = (col_index - 1) as usize;
+                if !range_lookup {
+                    for r in 0..rows {
+                        let first_val = &values[r * cols];
+                        if values_equal(&lookup_val, first_val) {
+                            return Ok(EvalValue::Scalar(values[r * cols + target_col].clone()));
+                        }
+                    }
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                } else {
+                    let mut best_row: Option<usize> = None;
+                    for r in 0..rows {
+                        let first_val = &values[r * cols];
+                        if values_less_than_or_equal(first_val, &lookup_val) {
+                            best_row = Some(r);
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Some(r) = best_row {
+                        Ok(EvalValue::Scalar(values[r * cols + target_col].clone()))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                    }
+                }
+            }
+            "hlookup" => {
+                if !(3..=4).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let lookup_val = self.eval_scalar(&arguments[0], depth + 1)?;
+                let target = self.evaluate(&arguments[1], depth + 1)?;
+                let (values, rows, cols) = match target {
+                    EvalValue::Range { values, rows, cols } => (values, rows, cols),
+                    _ => return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                };
+                let row_index =
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i64;
+                let range_lookup = if arguments.len() == 4 {
+                    to_bool(&self.eval_scalar(&arguments[3], depth + 1)?)?
+                } else {
+                    true
+                };
+                if row_index < 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                if row_index > rows as i64 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())));
+                }
+                let target_row = (row_index - 1) as usize;
+                if !range_lookup {
+                    for (c, first_val) in values.iter().take(cols).enumerate() {
+                        if values_equal(&lookup_val, first_val) {
+                            return Ok(EvalValue::Scalar(values[target_row * cols + c].clone()));
+                        }
+                    }
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                } else {
+                    let mut best_col: Option<usize> = None;
+                    for (c, first_val) in values.iter().take(cols).enumerate() {
+                        if values_less_than_or_equal(first_val, &lookup_val) {
+                            best_col = Some(c);
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Some(c) = best_col {
+                        Ok(EvalValue::Scalar(values[target_row * cols + c].clone()))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                    }
+                }
+            }
             "len" | "left" | "right" | "mid" | "concatenate" | "concat" | "value" | "trim"
             | "upper" | "lower" | "exact" | "rept" | "substitute" | "replace" | "char" | "code"
-            | "clean" | "t" | "n" | "find" | "search" | "hyperlink" => {
-                self.evaluate_string_function(name, arguments, depth + 1)
-            }
+            | "clean" | "t" | "n" | "find" | "search" | "hyperlink" | "proper" | "unichar"
+            | "unicode" | "hex2dec" | "dec2hex" | "bin2dec" | "dec2bin" | "oct2dec" | "dec2oct"
+            | "textjoin" => self.evaluate_string_function(name, arguments, depth + 1),
             _ => Err("unsupported"),
         }
     }
@@ -928,7 +1201,9 @@ impl Evaluator<'_> {
         for argument in arguments {
             match self.evaluate(argument, depth + 1)? {
                 EvalValue::Scalar(value) => values.push(value),
-                EvalValue::Range(range) => values.extend(range),
+                EvalValue::Range {
+                    values: range_vals, ..
+                } => values.extend(range_vals),
             }
         }
         if name == "counta" {
@@ -965,6 +1240,7 @@ impl Evaluator<'_> {
             "average" => numbers.iter().sum::<f64>() / numbers.len() as f64,
             "min" => numbers.iter().copied().fold(f64::INFINITY, f64::min),
             "max" => numbers.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            "product" => numbers.iter().product(),
             _ => return Err("unsupported"),
         };
         Ok(EvalValue::Scalar(FormulaValue::Number(result)))
@@ -1260,6 +1536,115 @@ impl Evaluator<'_> {
                 self.check_string_size(&target)?;
                 Ok(EvalValue::Scalar(FormulaValue::String(target)))
             }
+            "proper" if arguments.len() == 1 => {
+                let s = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let val = proper(&s);
+                self.check_string_size(&val)?;
+                Ok(EvalValue::Scalar(FormulaValue::String(val)))
+            }
+            "unichar" if arguments.len() == 1 => {
+                let code = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(unichar(code)))
+            }
+            "unicode" if arguments.len() == 1 => {
+                let s = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(unicode(&s)))
+            }
+            "hex2dec" if arguments.len() == 1 => {
+                let s = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(hex_to_dec(&s)))
+            }
+            "dec2hex" if arguments.len() == 1 || arguments.len() == 2 => {
+                let num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let places = if arguments.len() == 2 {
+                    Some(to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?)
+                } else {
+                    None
+                };
+                let val = dec_to_hex(num, places);
+                if let FormulaValue::String(ref s) = val {
+                    self.check_string_size(s)?;
+                }
+                Ok(EvalValue::Scalar(val))
+            }
+            "bin2dec" if arguments.len() == 1 => {
+                let s = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(bin_to_dec(&s)))
+            }
+            "dec2bin" if arguments.len() == 1 || arguments.len() == 2 => {
+                let num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let places = if arguments.len() == 2 {
+                    Some(to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?)
+                } else {
+                    None
+                };
+                let val = dec_to_bin(num, places);
+                if let FormulaValue::String(ref s) = val {
+                    self.check_string_size(s)?;
+                }
+                Ok(EvalValue::Scalar(val))
+            }
+            "oct2dec" if arguments.len() == 1 => {
+                let s = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(oct_to_dec(&s)))
+            }
+            "dec2oct" if arguments.len() == 1 || arguments.len() == 2 => {
+                let num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let places = if arguments.len() == 2 {
+                    Some(to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?)
+                } else {
+                    None
+                };
+                let val = dec_to_oct(num, places);
+                if let FormulaValue::String(ref s) = val {
+                    self.check_string_size(s)?;
+                }
+                Ok(EvalValue::Scalar(val))
+            }
+            "textjoin" if arguments.len() >= 3 => {
+                let delim = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let ignore_empty = to_bool(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let mut parts: Vec<String> = Vec::new();
+                for arg in &arguments[2..] {
+                    match self.evaluate(arg, depth + 1)? {
+                        EvalValue::Scalar(val) => {
+                            if let FormulaValue::Error(err) = val {
+                                return Ok(EvalValue::Scalar(FormulaValue::Error(err)));
+                            }
+                            if matches!(val, FormulaValue::Blank) {
+                                if !ignore_empty {
+                                    parts.push(String::new());
+                                }
+                            } else {
+                                let s = to_string(&val)?;
+                                if !(ignore_empty && s.is_empty()) {
+                                    parts.push(s);
+                                }
+                            }
+                        }
+                        EvalValue::Range { values, .. } => {
+                            for val in values {
+                                if let FormulaValue::Error(err) = val {
+                                    return Ok(EvalValue::Scalar(FormulaValue::Error(err)));
+                                }
+                                if matches!(val, FormulaValue::Blank) {
+                                    if !ignore_empty {
+                                        parts.push(String::new());
+                                    }
+                                } else {
+                                    let s = to_string(&val)?;
+                                    if !(ignore_empty && s.is_empty()) {
+                                        parts.push(s);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let result = parts.join(&delim);
+                self.check_string_size(&result)?;
+                Ok(EvalValue::Scalar(FormulaValue::String(result)))
+            }
             _ => Err("unsupported"),
         }
     }
@@ -1369,6 +1754,232 @@ fn values_equal(left: &FormulaValue, right: &FormulaValue) -> bool {
             }
         }
         _ => false,
+    }
+}
+
+fn values_less_than_or_equal(left: &FormulaValue, right: &FormulaValue) -> bool {
+    match (to_number(left), to_number(right)) {
+        (Ok(a), Ok(b)) => a <= b,
+        _ => match (to_string(left), to_string(right)) {
+            (Ok(a), Ok(b)) => a.to_ascii_lowercase() <= b.to_ascii_lowercase(),
+            _ => false,
+        },
+    }
+}
+
+fn values_greater_than_or_equal(left: &FormulaValue, right: &FormulaValue) -> bool {
+    match (to_number(left), to_number(right)) {
+        (Ok(a), Ok(b)) => a >= b,
+        _ => match (to_string(left), to_string(right)) {
+            (Ok(a), Ok(b)) => a.to_ascii_lowercase() >= b.to_ascii_lowercase(),
+            _ => false,
+        },
+    }
+}
+
+fn proper(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut capitalize_next = true;
+    for c in text.chars() {
+        if c.is_alphabetic() {
+            if capitalize_next {
+                for upper in c.to_uppercase() {
+                    result.push(upper);
+                }
+                capitalize_next = false;
+            } else {
+                for lower in c.to_lowercase() {
+                    result.push(lower);
+                }
+            }
+        } else {
+            capitalize_next = true;
+            result.push(c);
+        }
+    }
+    result
+}
+
+fn unichar(code: f64) -> FormulaValue {
+    if !code.is_finite() || code.fract() != 0.0 {
+        return FormulaValue::Error("#VALUE!".into());
+    }
+    let n = code as i64;
+    if !(1..=0x10FFFF).contains(&n) || (0xD800..=0xDFFF).contains(&n) {
+        return FormulaValue::Error("#VALUE!".into());
+    }
+    match char::from_u32(n as u32) {
+        Some(c) => FormulaValue::String(c.to_string()),
+        None => FormulaValue::Error("#VALUE!".into()),
+    }
+}
+
+fn unicode(s: &str) -> FormulaValue {
+    match s.chars().next() {
+        Some(c) => FormulaValue::Number((c as u32) as f64),
+        None => FormulaValue::Error("#VALUE!".into()),
+    }
+}
+
+fn hex_to_dec(s: &str) -> FormulaValue {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 10 {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    if !s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    let val = match u64::from_str_radix(s, 16) {
+        Ok(v) => v,
+        Err(_) => return FormulaValue::Error("#NUM!".into()),
+    };
+    if s.len() == 10 && (val & (1u64 << 39)) != 0 {
+        let res = (val as f64) - ((1u64 << 40) as f64);
+        FormulaValue::Number(res)
+    } else {
+        FormulaValue::Number(val as f64)
+    }
+}
+
+fn dec_to_hex(number: f64, places: Option<f64>) -> FormulaValue {
+    if !number.is_finite() || number.fract() != 0.0 {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    let n = number as i64;
+    if !(-549_755_813_888..=549_755_813_887).contains(&n) {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    if n < 0 {
+        let val = ((1i64 << 40) + n) as u64;
+        let s = format!("{:010X}", val);
+        FormulaValue::String(s)
+    } else {
+        let s = format!("{:X}", n);
+        if let Some(p) = places {
+            if !p.is_finite() || p.fract() != 0.0 {
+                return FormulaValue::Error("#NUM!".into());
+            }
+            let p = p as i64;
+            if !(1..=10).contains(&p) {
+                return FormulaValue::Error("#NUM!".into());
+            }
+            let p = p as usize;
+            if s.len() > p {
+                return FormulaValue::Error("#NUM!".into());
+            }
+            let padded = format!("{:0>width$}", s, width = p);
+            FormulaValue::String(padded)
+        } else {
+            FormulaValue::String(s)
+        }
+    }
+}
+
+fn bin_to_dec(s: &str) -> FormulaValue {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 10 {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    if !s.chars().all(|c| c == '0' || c == '1') {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    let val = match u64::from_str_radix(s, 2) {
+        Ok(v) => v,
+        Err(_) => return FormulaValue::Error("#NUM!".into()),
+    };
+    if s.len() == 10 && (val & (1u64 << 9)) != 0 {
+        let res = (val as f64) - 1024.0;
+        FormulaValue::Number(res)
+    } else {
+        FormulaValue::Number(val as f64)
+    }
+}
+
+fn dec_to_bin(number: f64, places: Option<f64>) -> FormulaValue {
+    if !number.is_finite() || number.fract() != 0.0 {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    let n = number as i64;
+    if !(-512..=511).contains(&n) {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    if n < 0 {
+        let val = ((1i64 << 10) + n) as u64;
+        let s = format!("{:010b}", val);
+        FormulaValue::String(s)
+    } else {
+        let s = format!("{:b}", n);
+        if let Some(p) = places {
+            if !p.is_finite() || p.fract() != 0.0 {
+                return FormulaValue::Error("#NUM!".into());
+            }
+            let p = p as i64;
+            if !(1..=10).contains(&p) {
+                return FormulaValue::Error("#NUM!".into());
+            }
+            let p = p as usize;
+            if s.len() > p {
+                return FormulaValue::Error("#NUM!".into());
+            }
+            let padded = format!("{:0>width$}", s, width = p);
+            FormulaValue::String(padded)
+        } else {
+            FormulaValue::String(s)
+        }
+    }
+}
+
+fn oct_to_dec(s: &str) -> FormulaValue {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 10 {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    if !s.chars().all(|c| ('0'..='7').contains(&c)) {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    let val = match u64::from_str_radix(s, 8) {
+        Ok(v) => v,
+        Err(_) => return FormulaValue::Error("#NUM!".into()),
+    };
+    if s.len() == 10 && (val & (1u64 << 29)) != 0 {
+        let res = (val as f64) - ((1u64 << 30) as f64);
+        FormulaValue::Number(res)
+    } else {
+        FormulaValue::Number(val as f64)
+    }
+}
+
+fn dec_to_oct(number: f64, places: Option<f64>) -> FormulaValue {
+    if !number.is_finite() || number.fract() != 0.0 {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    let n = number as i64;
+    if !(-536_870_912..=536_870_911).contains(&n) {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    if n < 0 {
+        let val = ((1i64 << 30) + n) as u64;
+        let s = format!("{:010o}", val);
+        FormulaValue::String(s)
+    } else {
+        let s = format!("{:o}", n);
+        if let Some(p) = places {
+            if !p.is_finite() || p.fract() != 0.0 {
+                return FormulaValue::Error("#NUM!".into());
+            }
+            let p = p as i64;
+            if !(1..=10).contains(&p) {
+                return FormulaValue::Error("#NUM!".into());
+            }
+            let p = p as usize;
+            if s.len() > p {
+                return FormulaValue::Error("#NUM!".into());
+            }
+            let padded = format!("{:0>width$}", s, width = p);
+            FormulaValue::String(padded)
+        } else {
+            FormulaValue::String(s)
+        }
     }
 }
 
@@ -1987,6 +2598,273 @@ mod tests {
             )
             .value,
             Some(FormulaValue::String("http://example.com/test.exe".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_radix_unicode_lookup_and_data_functions() {
+        let cells = vec![
+            cell("A1", "10", "n"),
+            cell("B1", "20", "n"),
+            cell("C1", "30", "n"),
+            cell("A2", "40", "n"),
+            cell("B2", "50", "n"),
+            cell("C2", "60", "n"),
+            cell("A3", "cmd", "s"),
+            cell("B3", "powershell", "s"),
+            cell("C3", "calc", "s"),
+        ];
+
+        // Radix conversions
+        assert_eq!(
+            evaluate_formula("=HEX2DEC(\"FF\")", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(255.0))
+        );
+        assert_eq!(
+            evaluate_formula("=HEX2DEC(\"A\")", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(10.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=HEX2DEC(\"FFFFFFFFFF\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(-1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=DEC2HEX(255)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("FF".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=DEC2HEX(10, 4)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("000A".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=DEC2HEX(-1)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("FFFFFFFFFF".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=BIN2DEC(\"1101\")", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(13.0))
+        );
+        assert_eq!(
+            evaluate_formula("=DEC2BIN(13)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("1101".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=DEC2BIN(5, 4)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("0101".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=OCT2DEC(\"77\")", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(63.0))
+        );
+        assert_eq!(
+            evaluate_formula("=DEC2OCT(63)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("77".into()))
+        );
+
+        // Unicode functions
+        assert_eq!(
+            evaluate_formula("=UNICHAR(65)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("A".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=UNICHAR(12354)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::String("あ".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=UNICHAR(0)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Error("#VALUE!".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=UNICODE(\"Apple\")", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(65.0))
+        );
+        assert_eq!(
+            evaluate_formula("=UNICODE(\"あ\")", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(12354.0))
+        );
+
+        // String: PROPER, TEXTJOIN
+        assert_eq!(
+            evaluate_formula(
+                "=PROPER(\"hello world-wide\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("Hello World-Wide".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=TEXTJOIN(\";\", TRUE, \"a\", \"\", \"b\", \"c\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("a;b;c".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=TEXTJOIN(\"-\", FALSE, \"a\", \"\", \"b\")",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("a--b".into()))
+        );
+
+        // Logic & Math: XOR, PRODUCT, QUOTIENT, LOG
+        assert_eq!(
+            evaluate_formula("=XOR(TRUE, FALSE)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula("=XOR(TRUE, TRUE)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Boolean(false))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=XOR(TRUE, TRUE, TRUE)",
+                Some("Data"),
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula("=PRODUCT(2, 3, 4)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(24.0))
+        );
+        assert_eq!(
+            evaluate_formula("=PRODUCT(A1:B1)", Some("Data"), &cells, Default::default()).value,
+            Some(FormulaValue::Number(200.0))
+        );
+        assert_eq!(
+            evaluate_formula("=QUOTIENT(10, 3)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(3.0))
+        );
+        assert_eq!(
+            evaluate_formula("=QUOTIENT(10, 0)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Error("#DIV/0!".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=LOG(100)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula("=LOG(8, 2)", Some("Data"), &[], Default::default()).value,
+            Some(FormulaValue::Number(3.0))
+        );
+
+        // Lookup: INDEX, MATCH, VLOOKUP, HLOOKUP
+        assert_eq!(
+            evaluate_formula("=INDEX(A1:C1, 2)", Some("Data"), &cells, Default::default()).value,
+            Some(FormulaValue::Number(20.0))
+        );
+        assert_eq!(
+            evaluate_formula("=INDEX(A1:A3, 3)", Some("Data"), &cells, Default::default()).value,
+            Some(FormulaValue::String("cmd".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(A1:C2, 2, 3)",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(60.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(A1:C2, 5, 1)",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Error("#REF!".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=MATCH(20, A1:C1, 0)",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=MATCH(\"powershell\", A3:C3, 0)",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=MATCH(\"unknown\", A3:C3, 0)",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Error("#N/A".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=VLOOKUP(40, A1:C2, 2, FALSE)",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(50.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=VLOOKUP(40, A1:C2, 9, FALSE)",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Error("#REF!".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=HLOOKUP(\"powershell\", A3:C3, 1, FALSE)",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("powershell".into()))
+        );
+
+        // Obfuscation evasion sample: radix + unichar + lookup
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(A3:C3, 1) & \".\" & UNICHAR(HEX2DEC(\"65\")) & UNICHAR(HEX2DEC(\"78\")) & UNICHAR(HEX2DEC(\"65\"))",
+                Some("Data"),
+                &cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cmd.exe".into()))
         );
     }
 }

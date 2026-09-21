@@ -334,7 +334,7 @@ console.log('静态分析完成。是否执行代码:', parsedAnalysis.project.c
 | `VBA-CELL-008` | `XlmMacroSheetPresent` | **Critical** | 工作簿包含容易被恶意利用的传统 Excel 4.0 宏工作表。 |
 | `VBA-CELL-009` | `DeobfuscatedThreatFormula` | **Critical** | 公式混淆（`CHAR`, `CONCATENATE`, 字符串替换等）动态解析为可执行文件、命令行或 DDE 载荷。 |
 
-- **动态公式反混淆求值（De-obfuscation）**: 对使用 `CHAR()`、`&`、`CONCATENATE()`、`MID()`、`SUBSTITUTE()`、`CHOOSE()`、`HYPERLINK()` 等函数的复杂混淆公式执行有界求值，自动还原并捕获规避静态匹配的 LOLBins、DDE 命令及危险下载载荷。
+- **动态公式反混淆求值（De-obfuscation）**: 对使用 `CHAR()`、`UNICHAR()`、`HEX2DEC()`、`BIN2DEC()`、`INDEX()`、`VLOOKUP()`、`TEXTJOIN()`、`&`、`CONCATENATE()`、`MID()`、`SUBSTITUTE()`、`CHOOSE()`、`HYPERLINK()` 等函数的复杂混淆公式执行有界求值，自动还原并捕获规避静态匹配的 LOLBins、DDE 命令及危险下载载荷。
 - **全角字符混淆逃逸防御**: 在检查公式前，自动将全角字符（`U+FF01`–`U+FF5E`、`U+3000`）规范化映射为标准 ASCII，破坏利用全角字符绕过安全检查的企图。
 
 ---
