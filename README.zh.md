@@ -70,21 +70,21 @@ vba-insight analyze examples/approval.bas --format dot > cfg.dot
 
 ```rust
 use vba_insight::{
-    inspect_macro_file, inspect_to_markdown, stomping_to_sarif, AnalysisOptions,
+    inspect_macro_file, inspect_to_markdown, inspection_to_sarif, AnalysisOptions,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let container_bytes = std::fs::read("suspicious.xlsm")?;
     let options = AnalysisOptions::default();
 
-    // 综合检查：直接解包、构建 AST、反汇编 P-Code、全面执行 Stomping 检测
+    // 综合检查：直接解包、构建 AST、反汇编 P-Code、全面执行 Stomping 与单元格威胁检测
     let inspection = inspect_macro_file(&container_bytes, &options)?;
 
     println!("提取模块数量: {}", inspection.extracted.modules.len());
-    println!("是否存在 Stomping: {}", inspection.stomping_report.is_stomped);
+    println!("是否存在 Stomping: {}", inspection.stomping_report.has_stomping);
 
-    // 导出用于 GitHub Code Scanning 的 SARIF v2.1.0 报告
-    let sarif = stomping_to_sarif(&inspection.stomping_report, "suspicious.xlsm");
+    // 导出用于 GitHub Code Scanning 的 SARIF v2.1.0 报告（包含 Stomping 与单元格威胁）
+    let sarif = inspection_to_sarif(&inspection, "suspicious.xlsm");
     std::fs::write("audit.sarif", sarif)?;
 
     // 导出 Markdown 报告
@@ -107,10 +107,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let extracted = extract_macro_container(&bytes, &Limits::bounded())?;
     let report = detect_project_stomping(&extracted)?;
 
-    if report.is_stomped {
-        eprintln!("警告: 发现 VBA Stomping 篡改！违规项数量: {}", report.findings.len());
-        for finding in &report.findings {
-            eprintln!(" - [{:?}] {}: {}", finding.severity, finding.rule_id, finding.description);
+    if report.has_stomping {
+        eprintln!("警告: 发现 VBA Stomping 篡改！总体严重级别: {:?}", report.overall_severity);
+        for m in &report.modules {
+            if m.is_stomped {
+                eprintln!(" 模块 {}: 违规项数量 {}", m.module_name, m.findings.len());
+                for finding in &m.findings {
+                    eprintln!("  - [{:?}] {}", finding.severity, finding.description);
+                }
+            }
+        }
+        for finding in &report.project_findings {
+            eprintln!(" - [{:?}] {}", finding.severity, finding.description);
         }
     }
 
@@ -182,6 +190,11 @@ if stomping.get("has_stomping"):
     print(f"[!] 发现 VBA Stomping！威胁级别: {stomping.get('overall_severity')}")
     for finding in stomping.get("project_findings", []):
         print(f"  - [{finding['rule_id']}] {finding['description']}")
+    for mod in stomping.get("modules", []):
+        if mod.get("is_stomped"):
+            print(f"  模块 {mod.get('module_name')}:")
+            for finding in mod.get("findings", []):
+                print(f"    - [{finding['rule_id']}] {finding['description']}")
 
 # 2. 检查工作表中的危险单元格公式（DDE、XLM、WEBSERVICE 等）
 analysis = report.get("analysis", {})
@@ -190,7 +203,7 @@ cell_threats = workbook.get("cell_threats", [])
 if cell_threats:
     print(f"[!] 发现 {len(cell_threats)} 处危险单元格公式:")
     for threat in cell_threats:
-        print(f"  - {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
+        print(f"  - [{threat['rule_id']}] {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
 
 # 3. 导出符合 OASIS SARIF v2.1.0 标准的安全报告（对接 GitHub Code Scanning / CI）
 # (包含 VBA Stomping VBA-STOMP-001..010 与 单元格威胁 VBA-CELL-001..008 规则)
@@ -241,15 +254,23 @@ const report = JSON.parse(rawJson);
 console.log('项目名称:', report.project_name);
 if (report.stomping?.has_stomping) {
   console.error(`[!] 检测到 VBA Stomping！级别: ${report.stomping.overall_severity}`);
-  for (const finding of report.stomping.project_findings) {
+  for (const finding of report.stomping.project_findings ?? []) {
     console.error(`  - [${finding.rule_id}] ${finding.description}`);
+  }
+  for (const mod of report.stomping.modules ?? []) {
+    if (mod.is_stomped) {
+      console.error(`  模块 ${mod.module_name}:`);
+      for (const finding of mod.findings ?? []) {
+        console.error(`    - [${finding.rule_id}] ${finding.description}`);
+      }
+    }
   }
 }
 
 // 检查危险的工作表单元格威胁（DDE, XLM, WEBSERVICE 等）
 const cellThreats = report.analysis?.workbook_structure?.cell_threats ?? [];
 for (const threat of cellThreats) {
-  console.warn(`  - [${threat.threat_kind}] ${threat.coordinate}: ${threat.description}`);
+  console.warn(`  - [${threat.rule_id}] ${threat.coordinate}: ${threat.threat_kind} (${threat.formula})`);
 }
 
 // 3. 导出用于 CI 代码扫描的 SARIF v2.1.0 报告

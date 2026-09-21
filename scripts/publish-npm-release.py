@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tarfile
 
 repo = os.environ.get('GITHUB_REPOSITORY', 'ryusui-hiro/vba-retrace')
@@ -22,7 +23,7 @@ if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag):
     raise SystemExit('invalid release tag')
 version = tag[1:]
 destination = Path('dist') / f'publish-{kind}'
-destination.mkdir(parents=True, exist_ok=False)
+destination.mkdir(parents=True, exist_ok=True)
 prefix = 'vba-insight-' if kind == 'npm' else 'ryusui-hiro-vba-insight-'
 subprocess.run(['gh', 'release', 'download', tag, '--repo', repo, '--dir', str(destination),
                 '--pattern', prefix + '*.tgz', '--pattern', 'release-manifest.json'], check=True)
@@ -62,5 +63,16 @@ for name, path, integrity in sorted(artifacts, key=lambda item: (item[0] == root
     cmd = ['npm', 'publish', str(path), '--access', 'public', '--registry', registry]
     if kind == 'npm':
         cmd.append('--provenance')
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as err:
+        print(f"\n[ERROR] Failed to publish {name}@{version} to {registry} (exit code {err.returncode}).", file=sys.stderr)
+        if kind == 'npm':
+            print("\n[npm Publication Troubleshooting]:", file=sys.stderr)
+            print("1. If npm failed with 'EOTP' (This operation requires a one-time password):", file=sys.stderr)
+            print("   - npm requires 2FA for your account. To publish non-interactively in CI:", file=sys.stderr)
+            print("     a) Classic Token: create a token with type 'Automation' (Automation tokens bypass 2FA prompts in CI).", file=sys.stderr)
+            print("     b) Granular Token: ensure 'Bypass 2FA' checkbox is explicitly checked.", file=sys.stderr)
+            print("     c) Trusted Publishing (OIDC): once the package exists on npmjs.com, configure GitHub Actions as a Trusted Publisher and remove NODE_AUTH_TOKEN.", file=sys.stderr)
+        raise
     print(f'Published {name}@{version} to {kind}')

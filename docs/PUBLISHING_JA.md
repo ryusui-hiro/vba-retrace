@@ -45,7 +45,12 @@ npm の Trusted Publishing（OIDC）は「既に存在するパッケージ」�
 
 #### 方法 1: npm Access Token を GitHub Actions Secret に登録（推奨・自動化）
 1. [npm](https://www.npmjs.com/) にログインし、右上のユーザーアイコン -> **Access Tokens** -> **Generate New Token** を選択します。
-2. **Granular Access Token**（または **Classic Token - Automation**）を作成し、Permissions で **Read and write**（パッケージの公開権限）を選択します。
+2. トークンを生成します：
+   - **Granular Access Token を使用する場合**:
+     - Permissions で **Read and write** を選択します。
+     - **【重要】**: 必ず **"Bypass 2FA"**（二要素認証バイパス）を有効にしてください。これを有効にしない場合、npm のセキュリティポリシーにより GitHub Actions の自動実行時に `npm error code EOTP (This operation requires a one-time password)` で失敗します。
+   - **Classic Token を使用する場合**:
+     - 種類として必ず **"Automation"** を選択してください（"Publish" トークンは対話的なワンタイムパスワードを要求するため CI では使用できません）。
 3. トークンをコピーし、GitHub リポジトリ（または `npm` Environment）の Secret に **`NPM_TOKEN`** として登録します：
    ```bash
    gh secret set NPM_TOKEN --env npm

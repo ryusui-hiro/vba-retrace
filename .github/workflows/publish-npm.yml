@@ -26,6 +26,18 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
+      - name: Configure npm authentication
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NODE_AUTH_TOKEN is not set; removing _authToken from .npmrc to allow OIDC Trusted Publishing"
+            for rc in "$HOME/.npmrc" "${NPM_CONFIG_USERCONFIG:-}"; do
+              if [ -n "$rc" ] && [ -f "$rc" ]; then
+                sed -i '/_authToken=/d' "$rc" || true
+              fi
+            done
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish verified packages
         env:
           GH_TOKEN: ${{ github.token }}

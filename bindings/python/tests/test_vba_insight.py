@@ -63,6 +63,34 @@ def test_inspect_file_nonexistent_path(tmp_path):
         vba_insight.inspect_file(str(missing_file))
 
 
+def test_disasm_file_rejects_invalid():
+    with pytest.raises(ValueError, match="failed"):
+        vba_insight.disasm_file(b"invalid data")
+
+    with pytest.raises(ValueError, match="failed"):
+        vba_insight.disasm_file_json(b"invalid data")
+
+    with pytest.raises(ValueError, match="failed"):
+        vba_insight.disasm_file_markdown(b"invalid data")
+
+
+def test_disasm_file_nonexistent_and_type_error(tmp_path):
+    missing_file = tmp_path / "missing.xlsm"
+    with pytest.raises(IOError):
+        vba_insight.disasm_file(missing_file)
+
+    with pytest.raises(ValueError, match="expected bytes"):
+        vba_insight.disasm_file(None)  # type: ignore
+
+
+def test_analyze_sources_empty_list():
+    with pytest.raises(ValueError, match="at least one VBA source unit is required"):
+        vba_insight.analyze_sources([])
+
+
 def test_inspect_file_type_error():
     with pytest.raises(ValueError, match="expected bytes"):
         vba_insight.inspect_file(12345)  # type: ignore
+
+    with pytest.raises(ValueError, match="failed"):
+        vba_insight.inspect_file_sarif(b"invalid data")
