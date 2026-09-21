@@ -889,6 +889,75 @@ impl Evaluator<'_> {
                     FormulaValue::Boolean(_)
                 ))))
             }
+            "isnontext" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                Ok(EvalValue::Scalar(FormulaValue::Boolean(!matches!(
+                    val,
+                    FormulaValue::String(_)
+                ))))
+            }
+            "type" if arguments.len() == 1 => {
+                let eval_res = self.evaluate(&arguments[0], depth + 1)?;
+                let type_code = match eval_res {
+                    EvalValue::Range { .. } => 64.0,
+                    EvalValue::Scalar(s) => match s {
+                        FormulaValue::Number(_) | FormulaValue::Blank => 1.0,
+                        FormulaValue::String(_) => 2.0,
+                        FormulaValue::Boolean(_) => 4.0,
+                        FormulaValue::Error(_) => 16.0,
+                    },
+                };
+                Ok(EvalValue::Scalar(FormulaValue::Number(type_code)))
+            }
+            "formulatext" if arguments.len() == 1 => {
+                let (sheet, addr) = match self.eval_cell_origin(&arguments[0], depth + 1) {
+                    Ok(res) => res,
+                    Err(_) => return Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into()))),
+                };
+                let effective_sheet = sheet.as_deref().or(self.current_sheet);
+                let mut found_formula = None;
+                for c in self.cells {
+                    let sheet_matches = match (effective_sheet, &c.sheet_name) {
+                        (Some(s), target) => s.eq_ignore_ascii_case(target),
+                        (None, _) => true,
+                    };
+                    if sheet_matches && c.row == Some(addr.row) && c.column == Some(addr.column) {
+                        if let Some(f) = c.formula.as_deref().filter(|f| !f.trim().is_empty()) {
+                            let formatted = if f.starts_with('=') {
+                                f.to_string()
+                            } else {
+                                format!("={f}")
+                            };
+                            found_formula = Some(formatted);
+                        }
+                        break;
+                    }
+                }
+                if let Some(f) = found_formula {
+                    self.record_reference(&format!(
+                        "{}{}",
+                        sheet
+                            .as_deref()
+                            .map(|s| format!("{s}!"))
+                            .unwrap_or_default(),
+                        column_to_letters(addr.column) + &addr.row.to_string()
+                    ));
+                    Ok(EvalValue::Scalar(FormulaValue::String(f)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                }
+            }
+            "roman" => {
+                if !(1..=2).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
+                Ok(EvalValue::Scalar(to_roman(n)))
+            }
+            "arabic" if arguments.len() == 1 => {
+                let text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(from_roman(&text)))
+            }
             "int" if arguments.len() == 1 => {
                 let number = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
                 Ok(EvalValue::Scalar(FormulaValue::Number(number.floor())))
@@ -3904,6 +3973,72 @@ fn evaluate_binary(
     }
 }
 
+fn to_roman(mut num: i64) -> FormulaValue {
+    if !(1..=3999).contains(&num) {
+        return FormulaValue::Error("#VALUE!".into());
+    }
+    const ROMAN_SYMBOLS: &[(i64, &str)] = &[
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    let mut result = String::new();
+    for &(val, sym) in ROMAN_SYMBOLS {
+        while num >= val {
+            result.push_str(sym);
+            num -= val;
+        }
+    }
+    FormulaValue::String(result)
+}
+
+fn from_roman(raw: &str) -> FormulaValue {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return FormulaValue::Number(0.0);
+    }
+    let (is_negative, content) = if let Some(stripped) = trimmed.strip_prefix('-') {
+        (true, stripped.trim())
+    } else {
+        (false, trimmed)
+    };
+    if content.is_empty() {
+        return FormulaValue::Error("#VALUE!".into());
+    }
+    let mut total: i64 = 0;
+    let mut prev: i64 = 0;
+    for ch in content.chars().rev() {
+        let val = match ch.to_ascii_uppercase() {
+            'I' => 1,
+            'V' => 5,
+            'X' => 10,
+            'L' => 50,
+            'C' => 100,
+            'D' => 500,
+            'M' => 1000,
+            _ => return FormulaValue::Error("#VALUE!".into()),
+        };
+        if val < prev {
+            total -= val;
+        } else {
+            total += val;
+            prev = val;
+        }
+    }
+    let res = if is_negative { -total } else { total };
+    FormulaValue::Number(res as f64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5505,6 +5640,161 @@ mod tests {
             )
             .value,
             Some(FormulaValue::String("Y".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_formulatext_type_isnontext_roman_arabic() {
+        let mut test_cells = vec![
+            cell_on_sheet("Data", "A1", "123", "n"),
+            cell_on_sheet("Data", "A2", "hello", "s"),
+        ];
+        test_cells.push(WorkbookCellInfo {
+            sheet_index: 0,
+            sheet_name: "Data".into(),
+            cell_ref: "B1".into(),
+            row: Some(1),
+            column: Some(2),
+            cell_type: "s".into(),
+            formula: Some("CHAR(65)&CHAR(66)".into()),
+            stored_value: Some("AB".into()),
+            ..Default::default()
+        });
+
+        // FORMULATEXT
+        assert_eq!(
+            evaluate_formula(
+                "=FORMULATEXT(B1)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("=CHAR(65)&CHAR(66)".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=FORMULATEXT(A1)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Error("#N/A".into()))
+        );
+
+        // TYPE
+        assert_eq!(
+            evaluate_formula("=TYPE(A1)", Some("Data"), &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=TYPE(A2)", Some("Data"), &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula("=TYPE(TRUE)", Some("Data"), &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(4.0))
+        );
+        assert_eq!(
+            evaluate_formula("=TYPE(1/0)", Some("Data"), &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(16.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=TYPE(A1:A2)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(64.0))
+        );
+
+        // ISNONTEXT
+        assert_eq!(
+            evaluate_formula(
+                "=ISNONTEXT(A1)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ISNONTEXT(A2)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Boolean(false))
+        );
+
+        // ROMAN & ARABIC
+        assert_eq!(
+            evaluate_formula("=ROMAN(10)", Some("Data"), &test_cells, Default::default()).value,
+            Some(FormulaValue::String("X".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=ROMAN(42)", Some("Data"), &test_cells, Default::default()).value,
+            Some(FormulaValue::String("XLII".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ROMAN(1994)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("MCMXCIV".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ARABIC(\"X\")",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(10.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ARABIC(\"XLII\")",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(42.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ARABIC(\"MCMXCIV\")",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(1994.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ARABIC(\"-IV\")",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(-4.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ROMAN(0)", Some("Data"), &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#VALUE!".into()))
         );
     }
 }

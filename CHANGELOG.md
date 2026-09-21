@@ -1,5 +1,16 @@
 # Changelog
 
+- Added OOXML container package & formula security threat inspection rules:
+  - **Real-Time Data Execution (`VBA-CELL-020`, Critical/High)**: Detects `=RTD(...)` formulas in worksheet cells and defined names that invoke external COM automation servers (`WScript.Shell`, `Shell.Application`, `Scripting.FileSystemObject`, `System.Diagnostics`, etc.) or remote DCOM servers (`\\host\share`, remote IP addresses) to trigger code execution and NTLM coercion.
+  - **Suspicious SVG Vector Graphic (`VBA-CELL-021`, Critical/High)**: Detects embedded SVG graphics (`/media/*.svg`) containing malicious `<script>` tags, inline event handlers (`onload=`, `onerror=`, `onclick=`, `onmouseover=`), XML external entities (XXE), `<foreignObject>` HTML embedding, or dangerous URI protocol handlers.
+  - **Tampered VBA Project Signature (`VBA-CELL-022`, High)**: Detects truncated, hollowed, or corrupted digital signature binaries (`vbaProjectSignature*.bin`), invalid ASN.1/PKCS#7 headers, or dangling signature relationships in `.rels` indicating signature stripping or tampering.
+- Extended Excel formula evaluation engine (`formula_eval`) with formula inspection, type queries, and Roman numeral conversion:
+  - **Formula Inspection**: Added `FORMULATEXT(reference)` enabling cross-cell formula string extraction, dynamic slicing, and recursive de-obfuscation.
+  - **Type & Information Queries**: Added `TYPE(value)` (returning Excel standard type numbers: 1 for number, 2 for text, 4 for boolean, 16 for error, 64 for array) and `ISNONTEXT(value)`.
+  - **Roman Numeral Conversion**: Added `ROMAN(number, [form])` (Arabic to Roman numeral translation) and `ARABIC(text)` (Roman numeral parsing and numeric decoding).
+- Extended container cell threat scanning (`VBA-CELL-009`) with triggers for `FORMULATEXT`, `ROMAN`, `ARABIC`, `TYPE`, and `ISNONTEXT`.
+- Extended SARIF v2.1.0 and structured JSON exports with complete rule descriptors and locations for `VBA-CELL-020`, `VBA-CELL-021`, and `VBA-CELL-022`.
+
 - Added OOXML container package security threat inspection rules:
   - **Suspicious Drawing Action (`VBA-CELL-018`, High)**: Detects drawing shapes, PowerPoint slide actions, and legacy Excel VML form controls configured with mouse-over hover triggers (`<a:hlinkHover>`), external program execution (`ppaction://program`), macro actions (`ppaction://macro`), VML button macro bindings (`<x:FmlaMacro>`), or drawing relationships targeting dangerous executables/scripts or exploit protocol handlers.
   - **External Data Connection (`VBA-CELL-019`, High)**: Detects external data connections, query tables, and Word MailMerge configurations containing remote UNC paths (`Data Source=\\`, NTLM credential coercion vector), web query remote payloads (`type="4"`, `connection="URL;http..."`), or command injection keywords (`xp_cmdshell`, `powershell`, `cmd.exe`).
