@@ -1,5 +1,14 @@
 # Changelog
 
+- Extended Excel formula evaluation engine (`formula_eval`) with 18 additional functions:
+  - **Radix & Base Conversions**: `HEX2DEC`, `DEC2HEX`, `BIN2DEC`, `DEC2BIN`, `OCT2DEC`, `DEC2OCT` (supporting 40-bit two's complement and padding).
+  - **Unicode Encoding**: `UNICHAR` and `UNICODE` (supporting full UTF-8 Unicode code points and surrogate exclusion).
+  - **Grid & Table Lookups**: `INDEX` (1D vectors and 2D matrices), `MATCH` (exact and ordered approximate matching), `VLOOKUP` (table vertical lookups), and `HLOOKUP` (horizontal table lookups).
+  - **Text & Structure Formatting**: `TEXTJOIN` (multi-argument and range joining with custom delimiter and empty cell filtering), and `PROPER` (title case conversion).
+  - **Logic & Mathematics**: `XOR` (parity logic), `PRODUCT` (multi-factor arithmetic aggregate), `QUOTIENT` (integer division), and `LOG` (custom base logarithm).
+- Enhanced 2D range matrix preservation in `EvalValue::Range { values, rows, cols }`, enabling accurate multi-row/multi-column grid indexing and table lookups across sheets.
+- Extended container cell threat scanning (`VBA-CELL-009`) with dynamic evaluation for radix conversion, Unicode, grid lookup (`INDEX`, `VLOOKUP`, `HLOOKUP`, `MATCH`), and `TEXTJOIN` expressions, proactively exposing obfuscated DDE payloads and remote dropper URLs hidden across workbook grids.
+- Expanded Living-off-the-Land Binaries (LOLBins) recognized in cell threat evaluation to include `regsvcs`, `control.exe`, `bash.exe`, and `wsl.exe`.
 - Added dynamic Excel formula de-obfuscation in container cell threat scanning (`VBA-CELL-009` `DeobfuscatedThreatFormula`), evaluating formulas with `CHAR()`, `CONCATENATE()`, `&`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, and `HYPERLINK()` to detect hidden DDE, executable download, and LOLBin payload executions.
 - Extended Excel formula evaluation engine (`formula_eval`) with advanced control, string, math, and information functions: `PI`, `EXP`, `LN`, `LOG10`, `ISNONTEXT`, `TYPE`, `CHOOSE` (with lazy evaluation), `IFNA`, `IFS`, `SWITCH`, `CHAR`, `CODE`, `CLEAN`, `T`, `N`, `FIND`, `SEARCH`, and `HYPERLINK`.
 - Enhanced VBA Stomping detection (`stomping::detect_vba_stomping`) to identify Windows API callback injection techniques (`EnumChildWindows`, `LineDDA`, `EnumFontFamiliesA`, `EnumSystemLocalesA`, `GrayStringA`, etc.) and additional LOLBins (`hh.exe`, `installutil`, `regasm`, `regsvcs`, `msconfig`, `control.exe`, `bash.exe`, `wsl.exe`, `tar.exe`, `explorer.exe`).

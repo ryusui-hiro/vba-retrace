@@ -334,7 +334,7 @@ console.log('解析完了。コード実行の有無:', parsedAnalysis.project.c
 | `VBA-CELL-008` | `XlmMacroSheetPresent` | **Critical** | マルウェアの攻撃ペイロードとして多用される、旧形式の Excel 4.0 マクロシートが存在する。 |
 | `VBA-CELL-009` | `DeobfuscatedThreatFormula` | **Critical** | 数式難読化（`CHAR`, `CONCATENATE`, 文字列置換等）が動的に評価され、実行可能ファイル、コマンド、または DDE ペイロードに解決される。 |
 
-- **動的数式難読化解除（De-obfuscation）**: `CHAR()`、`&`、`CONCATENATE()`、`MID()`、`SUBSTITUTE()`、`CHOOSE()`、`HYPERLINK()` 等を用いた難読化数式を有界評価し、静的文字列検索をすり抜ける LOLBins、DDE 実行、悪意あるダウンロード URL を自動復元・検知。
+- **数式動的難読化解除（De-obfuscation）**: 難読化された複合数式（`CHAR()`, `UNICHAR()`, `HEX2DEC()`, `BIN2DEC()`, `INDEX()`, `VLOOKUP()`, `TEXTJOIN()`, `&`, `CONCATENATE()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`）を有界評価エンジンで動的に解決し、静的パターンマッチングをすり抜ける隠蔽LOLBinsやDDE実行、ダウンロードペイロードを自動暴きます。
 - **全角文字難読化回避の正規化**: 数式検査前に全角英数字・記号（`U+FF01`〜`U+FF5E`、`U+3000`）を標準 ASCII に正規化し、難読化による検知回避を無力化。
 
 ---

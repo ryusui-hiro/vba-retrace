@@ -334,7 +334,7 @@ console.log('Analysis completed. Code executed:', parsedAnalysis.project.code_ex
 | `VBA-CELL-008` | `XlmMacroSheetPresent` | **Critical** | Workbook contains a legacy Excel 4.0 macro sheet, frequently leveraged in evasion payloads. |
 | `VBA-CELL-009` | `DeobfuscatedThreatFormula` | **Critical** | Formula obfuscation (`CHAR`, `CONCATENATE`, string substitution) dynamically resolves to an executable, command, or DDE payload. |
 
-- **Dynamic Formula De-Obfuscation**: Evaluates complex obfuscated formulas (`CHAR()`, `&`, `CONCATENATE()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`) to uncover hidden LOLBins, DDE execution, and download payloads that evade static pattern matching.
+- **Dynamic Formula De-Obfuscation**: Evaluates complex obfuscated formulas (`CHAR()`, `UNICHAR()`, `HEX2DEC()`, `BIN2DEC()`, `INDEX()`, `VLOOKUP()`, `TEXTJOIN()`, `&`, `CONCATENATE()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`) to uncover hidden LOLBins, DDE execution, and download payloads that evade static pattern matching.
 - **Full-Width Character Evasion Defense**: Automatically normalizes full-width Unicode characters (`U+FF01`–`U+FF5E`, `U+3000`) to standard ASCII prior to formula inspection, neutralizing obfuscation tricks.
 
 ---

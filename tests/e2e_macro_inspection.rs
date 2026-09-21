@@ -2341,3 +2341,77 @@ fn e2e_deobfuscated_cell_threat_and_dynamic_evaluation() {
         "SARIF results should contain VBA-CELL-009: {sarif_report}"
     );
 }
+
+#[test]
+fn e2e_advanced_radix_lookup_and_unicode_cell_threat_detection() {
+    let src = "Sub Harmless()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "RadixLookupProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["Harmless"],
+    );
+
+    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
+    let wb = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><workbookPr codeName=\"ThisWorkbook\"/><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId2\"/></sheets></workbook>";
+
+    // Grid data:
+    // A1: "c", B1: "m", C1: "d"
+    // F1: "dropper", G1: "http://attacker.example.com/beacon.exe"
+    // D1: =TEXTJOIN("", TRUE, INDEX(A1:C1, 1), INDEX(A1:C1, 2), INDEX(A1:C1, 3)) & UNICHAR(46) & UNICHAR(HEX2DEC("65")) & UNICHAR(HEX2DEC("78")) & UNICHAR(HEX2DEC("65")) & "|'/c calc'!A0"
+    // E1: =VLOOKUP("dropper", F1:G1, 2, FALSE)
+    let sheet1 = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>\
+        <row r=\"1\">\
+            <c r=\"A1\" t=\"s\"><v>0</v></c>\
+            <c r=\"B1\" t=\"s\"><v>1</v></c>\
+            <c r=\"C1\" t=\"s\"><v>2</v></c>\
+            <c r=\"D1\"><f>=TEXTJOIN(&quot;&quot;, TRUE, INDEX(A1:C1, 1), INDEX(A1:C1, 2), INDEX(A1:C1, 3)) &amp; UNICHAR(46) &amp; UNICHAR(HEX2DEC(&quot;65&quot;)) &amp; UNICHAR(HEX2DEC(&quot;78&quot;)) &amp; UNICHAR(HEX2DEC(&quot;65&quot;)) &amp; &quot;|'/c calc'!A0&quot;</f></c>\
+            <c r=\"E1\"><f>=VLOOKUP(&quot;dropper&quot;, F1:G1, 2, FALSE)</f></c>\
+            <c r=\"F1\" t=\"s\"><v>3</v></c>\
+            <c r=\"G1\" t=\"s\"><v>4</v></c>\
+        </row>\
+    </sheetData></worksheet>";
+
+    let shared_strings = "<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" count=\"5\" uniqueCount=\"5\">\
+        <si><t>c</t></si>\
+        <si><t>m</t></si>\
+        <si><t>d</t></si>\
+        <si><t>dropper</t></si>\
+        <si><t>http://attacker.example.com/beacon.exe</t></si>\
+    </sst>";
+
+    let content_types_ss = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.ms-excel.sheet.macroEnabled.main+xml\"/><Override PartName=\"/xl/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/><Override PartName=\"/xl/sharedStrings.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml\"/></Types>";
+    let wb_rels_ss = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/><Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings\" Target=\"sharedStrings.xml\"/></Relationships>";
+
+    let xlsm = synthesize_zip(&[
+        ("[Content_Types].xml", content_types_ss.as_bytes()),
+        ("_rels/.rels", pkg_rels.as_bytes()),
+        ("xl/workbook.xml", wb.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels_ss.as_bytes()),
+        ("xl/vbaProject.bin", &cfb),
+        ("xl/worksheets/sheet1.xml", sheet1.as_bytes()),
+        ("xl/sharedStrings.xml", shared_strings.as_bytes()),
+    ]);
+
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // Check D1: De-obfuscated DDE resolved via TEXTJOIN, INDEX, UNICHAR, HEX2DEC
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "D1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("cmd.exe|'/c calc'!A0")),
+        "D1 should resolve to cmd.exe DDE: {threats:?}"
+    );
+
+    // Check E1: De-obfuscated payload URL resolved via VLOOKUP
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "E1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description
+                .contains("http://attacker.example.com/beacon.exe")),
+        "E1 should resolve to payload URL: {threats:?}"
+    );
+}
