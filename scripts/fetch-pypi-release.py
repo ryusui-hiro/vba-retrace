@@ -14,7 +14,7 @@ if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag):
     raise SystemExit('expected a version tag such as v0.1.0')
 version = tag[1:]
 destination = Path('dist/pypi')
-destination.mkdir(parents=True, exist_ok=False)
+destination.mkdir(parents=True, exist_ok=True)
 subprocess.run(['gh', 'release', 'download', tag, '--repo', repo, '--dir', str(destination),
                 '--pattern', '*.whl', '--pattern', '*.tar.gz', '--pattern', 'release-manifest.json'], check=True)
 manifest = json.loads((destination / 'release-manifest.json').read_text())
