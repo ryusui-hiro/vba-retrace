@@ -206,7 +206,7 @@ if cell_threats:
         print(f"  - [{threat['rule_id']}] {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
 
 # 3. GitHub Advanced Security / CI 統合用の OASIS SARIF v2.1.0 レポートを出力
-# (VBA Stomping VBA-STOMP-001..010 および コンテナ・セル脅威 VBA-CELL-001..014 の双方を含みます)
+# (VBA Stomping VBA-STOMP-001..010 および コンテナ・セル脅威 VBA-CELL-001..017 の双方を含みます)
 sarif_json = vba_insight.inspect_file_sarif("suspicious.xlsm")
 with open("security_report.sarif", "w", encoding="utf-8") as f:
     f.write(sarif_json)
@@ -338,9 +338,12 @@ console.log('解析完了。コード実行の有無:', parsedAnalysis.project.c
 | `VBA-CELL-012` | `ExternalOleObject` | **High** | リレーションシップが外部 OLE オブジェクト（`oleObject`）を HTTP/HTTPS/SMB 経由で参照し、遠隔 Moniker や脆弱性悪用を可能にする。 |
 | `VBA-CELL-013` | `ActiveXControlPresent` | **Medium** | OOXML コンテナ内の `/activex/` に埋め込み ActiveX コントロールが存在し、マクロレス悪用を可能にする。 |
 | `VBA-CELL-014` | `ExternalSubdocumentReference` | **High** | リレーションシップが外部サブドキュメントまたはフレーム（`subDocument` / `frame`）を HTTP/HTTPS/SMB 経由で参照している。 |
+| `VBA-CELL-015` | `SuspiciousPrinterSettings` | **High** | プリンター設定（`printerSettings*.bin`）に外部 UNC パス（`\\host\share`）、遠隔 URL、またはコマンド実行トリガー（CVE-2023-36884 / Storm-0978）が含まれている。 |
+| `VBA-CELL-016` | `CustomXmlPayloadSmuggling` | **High** | カスタム XML パーツ（`/customXml/*.xml`）内に Base64 化された PE 実行バイナリ、XXE 外部実体インジェクション、またはスクリプト/HTML ペイロードが隠蔽密輸されている。 |
+| `VBA-CELL-017` | `SuspiciousProtocolHandler` | **Critical** | リレーションシップのターゲットが危険なカスタムプロトコルハンドラー（`ms-msdt:` / Follina CVE-2022-30190、`search-ms:`、`ms-appinstaller:`、`mhtml:`、`javascript:`、`vbscript:` 等）を参照している。 |
 
-- **コンテナレベル脅威検査**: マクロが存在しない DOCX/XLSX コンテナであっても、OOXML リレーションシップやパーツ構造からリモートテンプレートインジェクション、埋め込み OLE パッケージ、外部 Moniker リンク、ActiveX コントロールを自動検出。
-- **数式動的難読化解除（De-obfuscation）**: 難読化された複合数式を有界評価エンジンで動的解決。グリッド動的解決（`INDIRECT()`, `OFFSET()`, `ADDRESS()`）、ビット演算暗号復号（`BITXOR()`, `BITAND()`, `BITOR()`, `BITLSHIFT()`, `BITRSHIFT()`）、最新動的検索（`XLOOKUP()`, `XMATCH()`）、テキスト分解（`TEXTBEFORE()`, `TEXTAFTER()`, `TEXTSPLIT()`）、複数セル範囲結合（`CONCAT()`, `TEXTJOIN()`）、2D テーブル参照（`INDEX()`, `VLOOKUP()`, `HLOOKUP()`, `MATCH()`）、基数・Unicode 変換（`HEX2DEC()`, `BIN2DEC()`, `UNICHAR()`）、文字列・数学関数（`CHAR()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`）を連鎖評価し、静的パターンマッチングをすり抜けるセル跨ぎの DDE 実行や LOLBins、遠隔ダウンロードペイロードを自動暴きます。
+- **コンテナレベル脅威検査**: マクロが存在しない DOCX/XLSX コンテナであっても、OOXML リレーションシップやパーツ構造からリモートテンプレートインジェクション、埋め込み OLE パッケージ、外部 Moniker リンク、ActiveX コントロール、プリンター設定 UNC 誘導、カスタム XML ペイロード密輸、および危険なプロトコルハンドラーを自動検出。
+- **数式動的難読化解除（De-obfuscation）**: 難読化された複合数式を有界評価エンジンで動的解決。グリッド動的解決（`INDIRECT()`, `OFFSET()`, `ADDRESS()`）、ビット演算暗号復号（`BITXOR()`, `BITAND()`, `BITOR()`, `BITLSHIFT()`, `BITRSHIFT()`）、基数変換（`BASE()`, `DECIMAL()`, `HEX2DEC()`, `BIN2DEC()`）、最新動的配列変形（`TAKE()`, `DROP()`, `CHOOSEROWS()`, `CHOOSECOLS()`, `TOROW()`, `TOCOL()`, `EXPAND()`）、最新動的検索（`XLOOKUP()`, `XMATCH()`）、テキスト分解・シリアライズ（`TEXTBEFORE()`, `TEXTAFTER()`, `TEXTSPLIT()`, `ARRAYTOTEXT()`, `VALUETOTEXT()`）、複数セル範囲結合（`CONCAT()`, `TEXTJOIN()`）、2D テーブル参照（`INDEX()`, `VLOOKUP()`, `HLOOKUP()`, `MATCH()`）、Unicode 変換（`UNICHAR()`, `UNICODE()`）、文字列・数学関数（`CHAR()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`）を連鎖評価し、静的パターンマッチングをすり抜けるセル跨ぎの DDE 実行や LOLBins、遠隔ダウンロードペイロードを自動暴きます。
 - **全角文字難読化回避の正規化**: 数式検査前に全角英数字・記号（`U+FF01`〜`U+FF5E`、`U+3000`）を標準 ASCII に正規化し、難読化による検知回避を無力化。
 
 ---

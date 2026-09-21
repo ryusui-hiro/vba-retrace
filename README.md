@@ -206,7 +206,7 @@ if cell_threats:
         print(f"  - [{threat['rule_id']}] {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
 
 # 3. Export OASIS SARIF v2.1.0 report for GitHub Advanced Security / CI integration
-# (Includes both VBA Stomping VBA-STOMP-001..010 and Container/Cell Threat VBA-CELL-001..014 rules)
+# (Includes both VBA Stomping VBA-STOMP-001..010 and Container/Cell Threat VBA-CELL-001..017 rules)
 sarif_json = vba_insight.inspect_file_sarif("suspicious.xlsm")
 with open("security_report.sarif", "w", encoding="utf-8") as f:
     f.write(sarif_json)
@@ -338,9 +338,12 @@ console.log('Analysis completed. Code executed:', parsedAnalysis.project.code_ex
 | `VBA-CELL-012` | `ExternalOleObject` | **High** | Relationship links to an external OLE object over HTTP/HTTPS/SMB (`oleObject`), enabling remote Moniker or exploit execution. |
 | `VBA-CELL-013` | `ActiveXControlPresent` | **Medium** | OOXML package contains embedded ActiveX control binary in `/activex/`, enabling macro-less exploitation. |
 | `VBA-CELL-014` | `ExternalSubdocumentReference` | **High** | Relationship links to an external subdocument or frame over HTTP/HTTPS/SMB (`subDocument` / `frame`). |
+| `VBA-CELL-015` | `SuspiciousPrinterSettings` | **High** | Package contains printer settings (`printerSettings*.bin`) with external UNC paths (`\\host\share`), remote URLs, or command triggers (CVE-2023-36884 / Storm-0978). |
+| `VBA-CELL-016` | `CustomXmlPayloadSmuggling` | **High** | Custom XML parts (`/customXml/*.xml`) contain smuggled base64 PE executables, XXE injection, or script/HTML payloads. |
+| `VBA-CELL-017` | `SuspiciousProtocolHandler` | **Critical** | Relationship target references dangerous URI schemes (`ms-msdt:` / Follina CVE-2022-30190, `search-ms:`, `ms-appinstaller:`, `mhtml:`, `javascript:`, `vbscript:`). |
 
-- **Container-Level Threat Inspection**: Automatically scans OOXML package relationships and parts for Remote Template Injection, embedded OLE packager binaries, external Moniker links, and ActiveX controls even in macro-less weaponized containers.
-- **Dynamic Formula De-Obfuscation**: Evaluates complex obfuscated formulas across the workbook grid with recursive reference resolution (`INDIRECT()`, `OFFSET()`, `ADDRESS()`), bitwise decryption (`BITXOR()`, `BITAND()`, `BITOR()`, `BITLSHIFT()`, `BITRSHIFT()`), modern dynamic lookups (`XLOOKUP()`, `XMATCH()`), text dissection (`TEXTBEFORE()`, `TEXTAFTER()`, `TEXTSPLIT()`), multi-cell range aggregations (`CONCAT()`, `TEXTJOIN()`), 2D table lookups (`INDEX()`, `VLOOKUP()`, `HLOOKUP()`, `MATCH()`), radix/Unicode conversions (`HEX2DEC()`, `BIN2DEC()`, `UNICHAR()`), and mathematical/string operations (`CHAR()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`) to uncover hidden LOLBins, multi-cell DDE execution, and remote download payloads that evade static pattern matching.
+- **Container-Level Threat Inspection**: Automatically scans OOXML package relationships and parts for Remote Template Injection, embedded OLE packager binaries, external Moniker links, ActiveX controls, printer settings UNC coercion, custom XML payload smuggling, and dangerous protocol handlers even in macro-less weaponized containers.
+- **Dynamic Formula De-Obfuscation**: Evaluates complex obfuscated formulas across the workbook grid with recursive reference resolution (`INDIRECT()`, `OFFSET()`, `ADDRESS()`), bitwise decryption (`BITXOR()`, `BITAND()`, `BITOR()`, `BITLSHIFT()`, `BITRSHIFT()`), radix conversions (`BASE()`, `DECIMAL()`, `HEX2DEC()`, `BIN2DEC()`), modern dynamic array reshaping (`TAKE()`, `DROP()`, `CHOOSEROWS()`, `CHOOSECOLS()`, `TOROW()`, `TOCOL()`, `EXPAND()`), modern dynamic lookups (`XLOOKUP()`, `XMATCH()`), text dissection and serialization (`TEXTBEFORE()`, `TEXTAFTER()`, `TEXTSPLIT()`, `ARRAYTOTEXT()`, `VALUETOTEXT()`), multi-cell range aggregations (`CONCAT()`, `TEXTJOIN()`), 2D table lookups (`INDEX()`, `VLOOKUP()`, `HLOOKUP()`, `MATCH()`), Unicode conversions (`UNICHAR()`, `UNICODE()`), and mathematical/string operations (`CHAR()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`) to uncover hidden LOLBins, multi-cell DDE execution, and remote download payloads that evade static pattern matching.
 - **Full-Width Character Evasion Defense**: Automatically normalizes full-width Unicode characters (`U+FF01`–`U+FF5E`, `U+3000`) to standard ASCII prior to formula inspection, neutralizing obfuscation tricks.
 
 ---

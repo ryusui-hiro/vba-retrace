@@ -3045,6 +3045,9 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "ExternalOleObject" => ("VBA-CELL-012", "error"),
         "ActiveXControl" => ("VBA-CELL-013", "warning"),
         "ExternalSubdocument" => ("VBA-CELL-014", "error"),
+        "SuspiciousPrinterSettings" => ("VBA-CELL-015", "error"),
+        "CustomXmlPayloadSmuggling" => ("VBA-CELL-016", "error"),
+        "SuspiciousProtocolHandler" => ("VBA-CELL-017", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3136,7 +3139,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-013\",\"name\":\"ActiveXControlPresent\",\"shortDescription\":{\"text\":\"Embedded ActiveX Control Present\"},\"fullDescription\":{\"text\":\"Container package contains embedded ActiveX control binary in activex/.\"},\"defaultConfiguration\":{\"level\":\"warning\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-014\",\"name\":\"ExternalSubdocumentReference\",\"shortDescription\":{\"text\":\"External Subdocument or Frame Reference\"},\"fullDescription\":{\"text\":\"Relationship links to an external subdocument or frame over HTTP/HTTPS/SMB.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-014\",\"name\":\"ExternalSubdocumentReference\",\"shortDescription\":{\"text\":\"External Subdocument or Frame Reference\"},\"fullDescription\":{\"text\":\"Relationship links to an external subdocument or frame over HTTP/HTTPS/SMB.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-015\",\"name\":\"SuspiciousPrinterSettings\",\"shortDescription\":{\"text\":\"Suspicious Printer Settings (NTLM Coercion / UNC Injection)\"},\"fullDescription\":{\"text\":\"Printer settings binary or relationship contains remote UNC paths, external URLs, or executable commands (NTLM relay / CVE-2023-36884 vector).\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-016\",\"name\":\"CustomXmlPayloadSmuggling\",\"shortDescription\":{\"text\":\"Custom XML Part Payload Smuggling\"},\"fullDescription\":{\"text\":\"Container custom XML part contains smuggled base64 executables, script tags, XXE external entities, or exploit protocol handlers.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-017\",\"name\":\"SuspiciousProtocolHandler\",\"shortDescription\":{\"text\":\"Suspicious Protocol Handler / URI Exploit Target\"},\"fullDescription\":{\"text\":\"Package relationship links to dangerous protocol handlers such as ms-msdt (Follina), search-ms, ms-appinstaller, or mhtml.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

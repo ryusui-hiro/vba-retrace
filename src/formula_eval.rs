@@ -105,6 +105,14 @@ pub fn evaluate_formula(
             output.status = "resolved".into();
             output.value = Some(value);
         }
+        Ok(EvalValue::Range {
+            mut values,
+            rows,
+            cols,
+        }) if rows == 1 && cols == 1 && !values.is_empty() => {
+            output.status = "resolved".into();
+            output.value = Some(values.swap_remove(0));
+        }
         Ok(EvalValue::Range { .. }) => output.status = "unsupported".into(),
         Err(status) => output.status = status.into(),
     }
@@ -918,6 +926,26 @@ impl Evaluator<'_> {
                 let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
                 let p = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
                 Ok(EvalValue::Scalar(FormulaValue::Number(n.powf(p))))
+            }
+            "delta" if arguments.len() == 1 || arguments.len() == 2 => {
+                let n1 = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let n2 = if arguments.len() == 2 {
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?
+                } else {
+                    0.0
+                };
+                let res = if (n1 - n2).abs() < 1e-12 { 1.0 } else { 0.0 };
+                Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+            }
+            "gestep" if arguments.len() == 1 || arguments.len() == 2 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let step = if arguments.len() == 2 {
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?
+                } else {
+                    0.0
+                };
+                let res = if n >= step { 1.0 } else { 0.0 };
+                Ok(EvalValue::Scalar(FormulaValue::Number(res)))
             }
             "pi" if arguments.is_empty() => Ok(EvalValue::Scalar(FormulaValue::Number(
                 std::f64::consts::PI,
@@ -1928,11 +1956,15 @@ impl Evaluator<'_> {
                     Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
                 }
             }
+            "take" | "drop" | "chooserows" | "choosecols" | "torow" | "tocol" | "expand"
+            | "arraytotext" | "valuetotext" => {
+                self.evaluate_array_manipulation(name, arguments, depth + 1)
+            }
             "len" | "left" | "right" | "mid" | "concatenate" | "concat" | "value" | "trim"
             | "upper" | "lower" | "exact" | "rept" | "substitute" | "replace" | "char" | "code"
             | "clean" | "t" | "n" | "find" | "search" | "hyperlink" | "proper" | "unichar"
             | "unicode" | "hex2dec" | "dec2hex" | "bin2dec" | "dec2bin" | "oct2dec" | "dec2oct"
-            | "textjoin" | "textbefore" | "textafter" | "textsplit" => {
+            | "textjoin" | "textbefore" | "textafter" | "textsplit" | "base" | "decimal" => {
                 self.evaluate_string_function(name, arguments, depth + 1)
             }
             _ => Err("unsupported"),
@@ -2359,6 +2391,25 @@ impl Evaluator<'_> {
                 }
                 Ok(EvalValue::Scalar(val))
             }
+            "base" if arguments.len() == 2 || arguments.len() == 3 => {
+                let num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let radix = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let min_len = if arguments.len() == 3 {
+                    Some(to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?)
+                } else {
+                    None
+                };
+                let val = base_to_str(num, radix, min_len);
+                if let FormulaValue::String(ref s) = val {
+                    self.check_string_size(s)?;
+                }
+                Ok(EvalValue::Scalar(val))
+            }
+            "decimal" if arguments.len() == 2 => {
+                let s = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let radix = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                Ok(EvalValue::Scalar(decimal_from_base(&s, radix)))
+            }
             "textjoin" if arguments.len() >= 3 => {
                 let delim = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
                 let ignore_empty = to_bool(&self.eval_scalar(&arguments[1], depth + 1)?)?;
@@ -2550,6 +2601,319 @@ impl Evaluator<'_> {
                         cols: num_cols,
                     })
                 }
+            }
+            _ => Err("unsupported"),
+        }
+    }
+
+    fn evaluate_array_manipulation(
+        &mut self,
+        name: &str,
+        arguments: &[Expr],
+        depth: usize,
+    ) -> Result<EvalValue, &'static str> {
+        if arguments.is_empty() {
+            return Err("unsupported");
+        }
+        let (values, orig_rows, orig_cols) = match self.evaluate(&arguments[0], depth + 1)? {
+            EvalValue::Scalar(s) => (vec![s], 1, 1),
+            EvalValue::Range { values, rows, cols } => (values, rows, cols),
+        };
+
+        match name {
+            "take" if (2..=3).contains(&arguments.len()) => {
+                let num_rows =
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                if num_rows == 0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                let num_cols = if arguments.len() == 3 {
+                    let c = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i64;
+                    if c == 0 {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                    Some(c)
+                } else {
+                    None
+                };
+
+                let (start_r, end_r) = if num_rows > 0 {
+                    (0, (num_rows as usize).min(orig_rows))
+                } else {
+                    let take_r = ((-num_rows) as usize).min(orig_rows);
+                    (orig_rows - take_r, orig_rows)
+                };
+
+                let (start_c, end_c) = if let Some(c) = num_cols {
+                    if c > 0 {
+                        (0, (c as usize).min(orig_cols))
+                    } else {
+                        let take_c = ((-c) as usize).min(orig_cols);
+                        (orig_cols - take_c, orig_cols)
+                    }
+                } else {
+                    (0, orig_cols)
+                };
+
+                let new_rows = end_r.saturating_sub(start_r);
+                let new_cols = end_c.saturating_sub(start_c);
+                if new_rows == 0 || new_cols == 0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#CALC!".into())));
+                }
+
+                let mut new_values = Vec::with_capacity(new_rows * new_cols);
+                for r in start_r..end_r {
+                    for c in start_c..end_c {
+                        new_values.push(values[r * orig_cols + c].clone());
+                    }
+                }
+                Ok(EvalValue::Range {
+                    values: new_values,
+                    rows: new_rows,
+                    cols: new_cols,
+                })
+            }
+            "drop" if (2..=3).contains(&arguments.len()) => {
+                let drop_rows =
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                let drop_cols = if arguments.len() == 3 {
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as i64
+                } else {
+                    0
+                };
+
+                let (start_r, end_r) = if drop_rows >= 0 {
+                    let dr = (drop_rows as usize).min(orig_rows);
+                    (dr, orig_rows)
+                } else {
+                    let dr = ((-drop_rows) as usize).min(orig_rows);
+                    (0, orig_rows.saturating_sub(dr))
+                };
+
+                let (start_c, end_c) = if drop_cols >= 0 {
+                    let dc = (drop_cols as usize).min(orig_cols);
+                    (dc, orig_cols)
+                } else {
+                    let dc = ((-drop_cols) as usize).min(orig_cols);
+                    (0, orig_cols.saturating_sub(dc))
+                };
+
+                if start_r >= end_r || start_c >= end_c {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#CALC!".into())));
+                }
+
+                let new_rows = end_r - start_r;
+                let new_cols = end_c - start_c;
+                let mut new_values = Vec::with_capacity(new_rows * new_cols);
+                for r in start_r..end_r {
+                    for c in start_c..end_c {
+                        new_values.push(values[r * orig_cols + c].clone());
+                    }
+                }
+                Ok(EvalValue::Range {
+                    values: new_values,
+                    rows: new_rows,
+                    cols: new_cols,
+                })
+            }
+            "chooserows" if arguments.len() >= 2 => {
+                let mut selected_rows = Vec::with_capacity(arguments.len() - 1);
+                for arg in &arguments[1..] {
+                    let r_idx = to_number(&self.eval_scalar(arg, depth + 1)?)?.trunc() as i64;
+                    if r_idx == 0 {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                    let row = if r_idx > 0 {
+                        (r_idx - 1) as usize
+                    } else {
+                        let offset = (-r_idx) as usize;
+                        if offset > orig_rows {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                        }
+                        orig_rows - offset
+                    };
+                    if row >= orig_rows {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                    selected_rows.push(row);
+                }
+
+                let new_rows = selected_rows.len();
+                let mut new_values = Vec::with_capacity(new_rows * orig_cols);
+                for row in selected_rows {
+                    for c in 0..orig_cols {
+                        new_values.push(values[row * orig_cols + c].clone());
+                    }
+                }
+                Ok(EvalValue::Range {
+                    values: new_values,
+                    rows: new_rows,
+                    cols: orig_cols,
+                })
+            }
+            "choosecols" if arguments.len() >= 2 => {
+                let mut selected_cols = Vec::with_capacity(arguments.len() - 1);
+                for arg in &arguments[1..] {
+                    let c_idx = to_number(&self.eval_scalar(arg, depth + 1)?)?.trunc() as i64;
+                    if c_idx == 0 {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                    let col = if c_idx > 0 {
+                        (c_idx - 1) as usize
+                    } else {
+                        let offset = (-c_idx) as usize;
+                        if offset > orig_cols {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                        }
+                        orig_cols - offset
+                    };
+                    if col >= orig_cols {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                    selected_cols.push(col);
+                }
+
+                let new_cols = selected_cols.len();
+                let mut new_values = Vec::with_capacity(orig_rows * new_cols);
+                for r in 0..orig_rows {
+                    for &col in &selected_cols {
+                        new_values.push(values[r * orig_cols + col].clone());
+                    }
+                }
+                Ok(EvalValue::Range {
+                    values: new_values,
+                    rows: orig_rows,
+                    cols: new_cols,
+                })
+            }
+            "torow" | "tocol" if (1..=3).contains(&arguments.len()) => {
+                let ignore = if arguments.len() >= 2 {
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64
+                } else {
+                    0
+                };
+                let scan_by_column = if arguments.len() == 3 {
+                    to_bool(&self.eval_scalar(&arguments[2], depth + 1)?)?
+                } else {
+                    false
+                };
+
+                let mut ordered_values = Vec::with_capacity(values.len());
+                if scan_by_column {
+                    for c in 0..orig_cols {
+                        for r in 0..orig_rows {
+                            ordered_values.push(values[r * orig_cols + c].clone());
+                        }
+                    }
+                } else {
+                    ordered_values = values;
+                }
+
+                let filtered: Vec<FormulaValue> = ordered_values
+                    .into_iter()
+                    .filter(|val| match ignore {
+                        1 => !matches!(val, FormulaValue::Blank),
+                        2 => !matches!(val, FormulaValue::Error(_)),
+                        3 => !matches!(val, FormulaValue::Blank | FormulaValue::Error(_)),
+                        _ => true,
+                    })
+                    .collect();
+
+                let res_values = if filtered.is_empty() {
+                    vec![FormulaValue::Error("#CALC!".into())]
+                } else {
+                    filtered
+                };
+
+                let (rows, cols) = if name == "torow" {
+                    (1, res_values.len())
+                } else {
+                    (res_values.len(), 1)
+                };
+
+                Ok(EvalValue::Range {
+                    values: res_values,
+                    rows,
+                    cols,
+                })
+            }
+            "expand" if (2..=4).contains(&arguments.len()) => {
+                let target_rows =
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as usize;
+                let target_cols = if arguments.len() >= 3 {
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.trunc() as usize
+                } else {
+                    orig_cols
+                };
+                let pad_with = if arguments.len() == 4 {
+                    self.eval_scalar(&arguments[3], depth + 1)?
+                } else {
+                    FormulaValue::Error("#N/A".into())
+                };
+
+                if target_rows < orig_rows
+                    || target_cols < orig_cols
+                    || target_rows == 0
+                    || target_cols == 0
+                {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+
+                if target_rows.saturating_mul(target_cols) > self.limits.max_range_cells {
+                    return Err("resource_limit");
+                }
+
+                let mut new_values = Vec::with_capacity(target_rows * target_cols);
+                for r in 0..target_rows {
+                    for c in 0..target_cols {
+                        if r < orig_rows && c < orig_cols {
+                            new_values.push(values[r * orig_cols + c].clone());
+                        } else {
+                            new_values.push(pad_with.clone());
+                        }
+                    }
+                }
+                Ok(EvalValue::Range {
+                    values: new_values,
+                    rows: target_rows,
+                    cols: target_cols,
+                })
+            }
+            "arraytotext" if (1..=2).contains(&arguments.len()) => {
+                let format_mode = if arguments.len() == 2 {
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64
+                } else {
+                    0
+                };
+                let mut row_strings = Vec::with_capacity(orig_rows);
+                for r in 0..orig_rows {
+                    let mut col_strings = Vec::with_capacity(orig_cols);
+                    for c in 0..orig_cols {
+                        let item = &values[r * orig_cols + c];
+                        let item_str = format_formula_value_text(item, format_mode == 1);
+                        col_strings.push(item_str);
+                    }
+                    row_strings.push(col_strings.join(", "));
+                }
+
+                let result = if format_mode == 1 {
+                    format!("{{{}}}", row_strings.join("; "))
+                } else {
+                    row_strings.join("; ")
+                };
+                self.check_string_size(&result)?;
+                Ok(EvalValue::Scalar(FormulaValue::String(result)))
+            }
+            "valuetotext" if (1..=2).contains(&arguments.len()) => {
+                let format_mode = if arguments.len() == 2 {
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64
+                } else {
+                    0
+                };
+                let item = values.into_iter().next().unwrap_or(FormulaValue::Blank);
+                let result = format_formula_value_text(&item, format_mode == 1);
+                self.check_string_size(&result)?;
+                Ok(EvalValue::Scalar(FormulaValue::String(result)))
             }
             _ => Err("unsupported"),
         }
@@ -2934,6 +3298,109 @@ fn dec_to_oct(number: f64, places: Option<f64>) -> FormulaValue {
         } else {
             FormulaValue::String(s)
         }
+    }
+}
+
+fn base_to_str(num: f64, radix: f64, min_length: Option<f64>) -> FormulaValue {
+    if !num.is_finite() || !(0.0..=9_007_199_254_740_992.0).contains(&num) || !radix.is_finite() {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    let radix_i = radix.trunc() as i64;
+    if !(2..=36).contains(&radix_i) {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    let min_len = if let Some(ml) = min_length {
+        if !ml.is_finite() || !(0.0..=255.0).contains(&ml) {
+            return FormulaValue::Error("#NUM!".into());
+        }
+        ml.trunc() as usize
+    } else {
+        0
+    };
+
+    let mut n = num.trunc() as u64;
+    let mut chars = Vec::new();
+    if n == 0 {
+        chars.push('0');
+    } else {
+        while n > 0 {
+            let rem = (n % radix_i as u64) as u8;
+            let ch = if rem < 10 {
+                (b'0' + rem) as char
+            } else {
+                (b'A' + (rem - 10)) as char
+            };
+            chars.push(ch);
+            n /= radix_i as u64;
+        }
+        chars.reverse();
+    }
+
+    let mut s: String = chars.into_iter().collect();
+    if s.len() < min_len {
+        let pad = "0".repeat(min_len - s.len());
+        s = format!("{pad}{s}");
+    }
+    FormulaValue::String(s)
+}
+
+fn decimal_from_base(text: &str, radix: f64) -> FormulaValue {
+    if !radix.is_finite() {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    let radix_i = radix.trunc() as i64;
+    if !(2..=36).contains(&radix_i) {
+        return FormulaValue::Error("#NUM!".into());
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return FormulaValue::Error("#NUM!".into());
+    }
+
+    let mut acc = 0.0f64;
+    for ch in trimmed.chars() {
+        let digit = match ch {
+            '0'..='9' => (ch as u8 - b'0') as i64,
+            'a'..='z' => (ch as u8 - b'a' + 10) as i64,
+            'A'..='Z' => (ch as u8 - b'A' + 10) as i64,
+            _ => return FormulaValue::Error("#NUM!".into()),
+        };
+        if digit >= radix_i {
+            return FormulaValue::Error("#NUM!".into());
+        }
+        acc = acc * (radix_i as f64) + (digit as f64);
+        if acc > 9_007_199_254_740_992.0 {
+            return FormulaValue::Error("#NUM!".into());
+        }
+    }
+    FormulaValue::Number(acc)
+}
+
+fn format_formula_value_text(value: &FormulaValue, strict: bool) -> String {
+    match value {
+        FormulaValue::String(s) => {
+            if strict {
+                format!("\"{}\"", s.replace('"', "\"\""))
+            } else {
+                s.clone()
+            }
+        }
+        FormulaValue::Number(n) => {
+            if n.fract() == 0.0 && n.abs() < 1e15 {
+                format!("{:.0}", n)
+            } else {
+                n.to_string()
+            }
+        }
+        FormulaValue::Boolean(b) => {
+            if *b {
+                "TRUE".into()
+            } else {
+                "FALSE".into()
+            }
+        }
+        FormulaValue::Blank => String::new(),
+        FormulaValue::Error(e) => e.clone(),
     }
 }
 
@@ -4283,6 +4750,183 @@ mod tests {
             )
             .value,
             Some(FormulaValue::String("abc".into()))
+        );
+
+        // Radix conversion: BASE & DECIMAL
+        assert_eq!(
+            evaluate_formula("=BASE(255, 16)", None, &[], Default::default()).value,
+            Some(FormulaValue::String("FF".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=BASE(10, 2, 8)", None, &[], Default::default()).value,
+            Some(FormulaValue::String("00001010".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=BASE(35, 36)", None, &[], Default::default()).value,
+            Some(FormulaValue::String("Z".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=DECIMAL(\"FF\", 16)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(255.0))
+        );
+        assert_eq!(
+            evaluate_formula("=DECIMAL(\"00001010\", 2)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(10.0))
+        );
+        assert_eq!(
+            evaluate_formula("=DECIMAL(\"Z\", 36)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(35.0))
+        );
+        // Radix-based malware string deobfuscation
+        assert_eq!(
+            evaluate_formula(
+                "=CONCAT(CHAR(DECIMAL(\"63\", 16)), CHAR(DECIMAL(\"6D\", 16)), CHAR(DECIMAL(\"64\", 16)))",
+                None,
+                &[],
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cmd".into()))
+        );
+
+        // Math: DELTA & GESTEP
+        assert_eq!(
+            evaluate_formula("=DELTA(5, 5)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=DELTA(5, 4)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=GESTEP(5, 3)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=GESTEP(2, 3)", None, &[], Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+
+        // Array manipulation: TAKE, DROP, CHOOSEROWS, CHOOSECOLS, TOROW, TOCOL, EXPAND
+        let grid_cells = vec![
+            cell_on_sheet("G", "A1", "10", "n"),
+            cell_on_sheet("G", "B1", "20", "n"),
+            cell_on_sheet("G", "A2", "30", "n"),
+            cell_on_sheet("G", "B2", "40", "n"),
+            cell_on_sheet("G", "A3", "50", "n"),
+            cell_on_sheet("G", "B3", "60", "n"),
+        ];
+        // TAKE top-level 1x1 unwrap
+        assert_eq!(
+            evaluate_formula(
+                "=TAKE(A1:B3, 1, 1)",
+                Some("G"),
+                &grid_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(10.0))
+        );
+        // TAKE with INDEX
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(TAKE(A1:B3, -1, -1), 1, 1)",
+                Some("G"),
+                &grid_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(60.0))
+        );
+        // DROP with INDEX
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(DROP(A1:B3, 2, 1), 1, 1)",
+                Some("G"),
+                &grid_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(60.0))
+        );
+        // CHOOSEROWS & CHOOSECOLS
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(CHOOSEROWS(A1:B3, 3), 1, 1)",
+                Some("G"),
+                &grid_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(50.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(CHOOSECOLS(A1:B3, 2), 1, 1)",
+                Some("G"),
+                &grid_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(20.0))
+        );
+        // TOROW & TOCOL
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(TOROW(A1:B3), 1, 3)",
+                Some("G"),
+                &grid_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(30.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(TOCOL(A1:B3), 4, 1)",
+                Some("G"),
+                &grid_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(40.0))
+        );
+        // EXPAND with pad_with
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(EXPAND(A1:B1, 2, 3, 999), 2, 3)",
+                Some("G"),
+                &grid_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(999.0))
+        );
+
+        // Formatting: ARRAYTOTEXT & VALUETOTEXT
+        assert_eq!(
+            evaluate_formula(
+                "=ARRAYTOTEXT(A1:B2, 0)",
+                Some("G"),
+                &grid_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("10, 20; 30, 40".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ARRAYTOTEXT(A1:B2, 1)",
+                Some("G"),
+                &grid_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("{10, 20; 30, 40}".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=VALUETOTEXT(\"hello\", 1)", None, &[], Default::default()).value,
+            Some(FormulaValue::String("\"hello\"".into()))
         );
     }
 }
