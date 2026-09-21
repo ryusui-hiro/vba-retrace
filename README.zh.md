@@ -320,7 +320,7 @@ console.log('静态分析完成。是否执行代码:', parsedAnalysis.project.c
 
 ### 2. 容器包与工作表单元格威胁扫描器
 
-`vba-insight` 针对容器包结构（OOXML 关系、内嵌 OLE 部件）、工作簿公式、定义名及工作表元数据进行 22 项专业安全规则筛查：
+`vba-insight` 针对容器包结构（OOXML 关系、内嵌 OLE 部件）、工作簿公式、定义名及工作表元数据进行 25 项专业安全规则筛查：
 
 | 规则编号 | 违规类型 | 严重程度 | 规则描述与检测逻辑 |
 |---|---|:---:|---|
@@ -346,9 +346,12 @@ console.log('静态分析完成。是否执行代码:', parsedAnalysis.project.c
 | `VBA-CELL-020` | `RealTimeDataExecution` | **Critical** | 单元格公式或定义名称包含 `=RTD(...)`，试图调用外部 COM 自动化服务（`WScript.Shell`, `Shell.Application` 等）或远端 DCOM 服务器执行命令或窃取 NTLM 凭据。 |
 | `VBA-CELL-021` | `SuspiciousSvgVector` | **High** | 容器包含的内嵌 SVG 矢量图（`/media/*.svg`）携带恶意脚本（`<script>`）、内联事件处理程序、XML 外部实体（XXE）或危险伪协议。 |
 | `VBA-CELL-022` | `TamperedVbaProjectSignature` | **High** | VBA 项目数字签名二进制文件（`vbaProjectSignature*.bin`）被截断、损坏或存在孤立签名关系引用（数字签名剥离与伪造逃避）。 |
+| `VBA-CELL-023` | `WordFieldCodeExecution` | **Critical** | Word 文档部件（`word/document.xml`、页眉、页脚等）包含可疑域代码（`w:fldSimple`、`w:instrText`），通过 DDE/DDEAUTO 执行外部命令、通过 INCLUDETEXT/LINK 远程注入文档或通过 UNC 路径诱导窃取凭据。 |
+| `VBA-CELL-024` | `PowerPointSlideAction` | **Critical** | PowerPoint 演示文稿部件（`ppt/slides/slide*.xml`、版式、母版）包含单击或鼠标悬停动作触发器（`ppaction://program`、`<a:hlinkHover>`），执行外部程序、调用宏或链接至可执行文件。 |
+| `VBA-CELL-025` | `SuspiciousAltChunkPayload` | **Critical** | Word 替代格式导入块（`aFChunk`）关系或部件（HTML、MHT、RTF、BIN）引用外部远程模板，或携带走私 HTML 脚本、内嵌 RTF 漏洞代码或 PE 二进制载荷。 |
 
-- **容器级威胁深度审查**: 即使在无宏代码的 DOCX/XLSX 攻击样本中，也能自动审查 OOXML 关系、绘图对象、外部数据连接、内嵌 SVG 矢量图、数字签名及部件结构，检测远程模板注入、内嵌 OLE 漏洞载荷、外部 Moniker 链接、ActiveX 控件、打印机设置 UNC 诱导、自定义 XML 载荷走私、绘图鼠标悬停/宏动作、外部数据连接/NTLM 诱导、SVG 恶意脚本、数字签名篡改及危险协议处理程序。
-- **动态公式反混淆求值（De-obfuscation）**: 对网格动态解析（`INDIRECT()`, `OFFSET()`, `ADDRESS()`）、跨单元格公式审查（`FORMULATEXT()`）、动态数组过滤与排序（`FILTER()`, `SORT()`, `SORTBY()`, `UNIQUE()`, `WRAPROWS()`, `WRAPCOLS()`）、位运算解密（`BITXOR()`, `BITAND()`, `BITOR()`, `BITLSHIFT()`, `BITRSHIFT()`）、进制与罗马数字转换（`BASE()`, `DECIMAL()`, `ROMAN()`, `ARABIC()`, `HEX2DEC()`, `BIN2DEC()`）、现代动态数组变形（`TAKE()`, `DROP()`, `CHOOSEROWS()`, `CHOOSECOLS()`, `TOROW()`, `TOCOL()`, `EXPAND()`）、现代动态检索（`XLOOKUP()`, `XMATCH()`）、文本拆解与序列化（`TEXTBEFORE()`, `TEXTAFTER()`, `TEXTSPLIT()`, `ARRAYTOTEXT()`, `VALUETOTEXT()`）、多单元格区域拼接（`CONCAT()`, `TEXTJOIN()`）、二维表格检索（`INDEX()`, `VLOOKUP()`, `HLOOKUP()`, `MATCH()`）、Unicode 转换（`UNICHAR()`, `UNICODE()`）以及数学/字符串/类型判断函数（`CHAR()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`, `ROWS()`, `COLUMNS()`, `MROUND()`, `TYPE()`, `ISNONTEXT()`）的复杂混淆公式执行有界求值与递归解析，自动还原并捕获规避静态匹配的异或解密与多单元格拼接 DDE 命令、RTD COM 自动化、LOLBins 及远程恶意下载载荷。
+- **容器级威胁深度审查**: 即使在无宏代码的 DOCX/XLSX 攻击样本中，也能自动审查 OOXML 关系、绘图对象、外部数据连接、内嵌 SVG 矢量图、数字签名、Word 域代码（`w:fldSimple`、`w:instrText`）、PowerPoint 幻灯片动作及 AltChunk 外部格式载荷走私部件结构，检测远程模板注入、内嵌 OLE 漏洞载荷、外部 Moniker 链接、ActiveX 控件、打印机设置 UNC 诱导、自定义 XML 载荷走私、绘图鼠标悬停/宏动作、外部数据连接/NTLM 诱导、SVG 恶意脚本、数字签名篡改及危险协议处理程序。
+- **动态公式反混淆求值（De-obfuscation）**: 对变量作用域求值（`LET()`）、动态 URL 编码（`ENCODEURL()`）、网格动态解析（`INDIRECT()`, `OFFSET()`, `ADDRESS()`）、跨单元格公式审查（`FORMULATEXT()`）、动态数组过滤与排序（`FILTER()`, `SORT()`, `SORTBY()`, `UNIQUE()`, `WRAPROWS()`, `WRAPCOLS()`）、位运算解密（`BITXOR()`, `BITAND()`, `BITOR()`, `BITLSHIFT()`, `BITRSHIFT()`）、进制与罗马数字转换（`BASE()`, `DECIMAL()`, `ROMAN()`, `ARABIC()`, `HEX2DEC()`, `BIN2DEC()`）、现代动态数组变形（`TAKE()`, `DROP()`, `CHOOSEROWS()`, `CHOOSECOLS()`, `TOROW()`, `TOCOL()`, `EXPAND()`）、现代动态检索（`XLOOKUP()`, `XMATCH()`）、文本拆解与序列化（`TEXTBEFORE()`, `TEXTAFTER()`, `TEXTSPLIT()`, `ARRAYTOTEXT()`, `VALUETOTEXT()`）、多单元格区域拼接（`CONCAT()`, `TEXTJOIN()`）、二维表格检索（`INDEX()`, `VLOOKUP()`, `HLOOKUP()`, `MATCH()`）、Unicode 转换（`UNICHAR()`, `UNICODE()`）以及数学/字符串/类型判断函数（`CHAR()`, `MID()`, `SUBSTITUTE()`, `CHOOSE()`, `HYPERLINK()`, `ROWS()`, `COLUMNS()`, `MROUND()`, `TYPE()`, `ISNONTEXT()`）的复杂混淆公式执行有界求值与递归解析，自动还原并捕获规避静态匹配的异或解密与多单元格拼接 DDE 命令、RTD COM 自动化、LOLBins 及远程恶意下载载荷。
 - **全角字符混淆逃逸防御**: 在检查公式前，自动将全角字符（`U+FF01`–`U+FF5E`、`U+3000`）规范化映射为标准 ASCII，破坏利用全角字符绕过安全检查的企图。
 
 ---

@@ -3053,6 +3053,9 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "RealTimeData" => ("VBA-CELL-020", "error"),
         "SuspiciousSvgVector" => ("VBA-CELL-021", "error"),
         "TamperedVbaProjectSignature" => ("VBA-CELL-022", "error"),
+        "WordFieldCode" => ("VBA-CELL-023", "error"),
+        "PowerPointSlideAction" => ("VBA-CELL-024", "error"),
+        "SuspiciousAltChunk" => ("VBA-CELL-025", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3168,7 +3171,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-021\",\"name\":\"SuspiciousSvgVector\",\"shortDescription\":{\"text\":\"Suspicious SVG Vector Graphic (Embedded Script / XXE / Protocol Exploit)\"},\"fullDescription\":{\"text\":\"Container SVG vector graphic part contains embedded script tags, inline event handlers, XML external entity injection, or dangerous protocol handlers.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-022\",\"name\":\"TamperedVbaProjectSignature\",\"shortDescription\":{\"text\":\"Tampered, Corrupted, or Stripped VBA Project Digital Signature\"},\"fullDescription\":{\"text\":\"VBA project digital signature binary is truncated, missing valid PKCS#7 structures, hollowed with dummy padding, or referenced by dangling relationships.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-022\",\"name\":\"TamperedVbaProjectSignature\",\"shortDescription\":{\"text\":\"Tampered, Corrupted, or Stripped VBA Project Digital Signature\"},\"fullDescription\":{\"text\":\"VBA project digital signature binary is truncated, missing valid PKCS#7 structures, hollowed with dummy padding, or referenced by dangling relationships.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-023\",\"name\":\"WordFieldCodeExecution\",\"shortDescription\":{\"text\":\"Suspicious Word Field Code (DDE / INCLUDETEXT / Remote Injection)\"},\"fullDescription\":{\"text\":\"Word document part contains suspicious field codes executing commands via DDE/DDEAUTO, downloading remote documents via INCLUDETEXT/LINK, or coercing credentials via UNC paths.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-024\",\"name\":\"PowerPointSlideAction\",\"shortDescription\":{\"text\":\"Suspicious PowerPoint Slide Action or Hover Trigger\"},\"fullDescription\":{\"text\":\"PowerPoint slide or layout contains clickable or mouse-over hover action triggers executing programs, macros, or linking to executable files.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-025\",\"name\":\"SuspiciousAltChunkPayload\",\"shortDescription\":{\"text\":\"Suspicious Alternative Format Chunk (AltChunk / HTML Smuggling)\"},\"fullDescription\":{\"text\":\"Word alternative format import chunk (AltChunk) references external remote templates or contains smuggled HTML, scripts, RTF exploits, or PE headers.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

@@ -616,6 +616,8 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("arabic")
                 || f_lower.contains("type")
                 || f_lower.contains("isnontext")
+                || f_lower.contains("let")
+                || f_lower.contains("encodeurl")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -1554,6 +1556,361 @@ pub fn scan_ooxml_package_threats(
         None
     }
 
+    fn decode_xml_entities(s: &str) -> String {
+        s.replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+    }
+
+    fn inspect_word_instruction(instr: &str) -> Option<(&'static str, String)> {
+        let trimmed = instr.trim();
+        let lower = trimmed.to_ascii_lowercase();
+
+        // 1. DDE / DDEAUTO command execution
+        if lower.starts_with("ddeauto")
+            || lower.starts_with("dde ")
+            || lower.starts_with("dde\t")
+            || lower.starts_with("dde\"")
+            || lower == "dde"
+        {
+            return Some((
+                "Critical",
+                format!("Word DDE/DDEAUTO command execution field code: '{trimmed}'"),
+            ));
+        }
+
+        // 2. Dangerous Protocol Handler smuggling
+        for &proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "ms-appinstaller:",
+            "mhtml:",
+            "javascript:",
+        ] {
+            if lower.contains(proto) {
+                return Some((
+                    "Critical",
+                    format!("Dangerous protocol handler '{proto}' in Word field code: '{trimmed}'"),
+                ));
+            }
+        }
+
+        // 3. INCLUDETEXT / LINK remote document injection or NTLM coercion
+        if (lower.starts_with("includetext")
+            || lower.starts_with("link ")
+            || lower.starts_with("link\t"))
+            && (lower.contains("http://")
+                || lower.contains("https://")
+                || lower.contains("ftp://")
+                || lower.contains("\\\\")
+                || lower.contains("//"))
+        {
+            return Some((
+                "High",
+                format!("Word remote document injection / NTLM coercion field code: '{trimmed}'"),
+            ));
+        }
+
+        // 4. MACROBUTTON social engineering lure
+        if lower.starts_with("macrobutton") {
+            let suspicious = lower.contains("autoopen")
+                || lower.contains("document_open")
+                || lower.contains("autoexec")
+                || lower.contains("autoclose")
+                || lower.contains("powershell")
+                || lower.contains("cmd");
+            if suspicious {
+                return Some((
+                    "High",
+                    format!(
+                        "Word MACROBUTTON field code targeting auto-exec or script macro: '{trimmed}'"
+                    ),
+                ));
+            }
+        }
+
+        // 5. FILENAME with UNC path
+        if lower.starts_with("filename") && (lower.contains("\\\\") || lower.contains("//")) {
+            return Some((
+                "High",
+                format!(
+                    "Word FILENAME field code pointing to UNC path (NTLM coercion): '{trimmed}'"
+                ),
+            ));
+        }
+
+        None
+    }
+
+    fn scan_word_field_codes(xml_str: &str) -> Vec<(String, &'static str, String)> {
+        let mut results = Vec::new();
+        let s_lower = xml_str.to_ascii_lowercase();
+
+        // 1. Simple fields: <w:fldSimple ... w:instr="..." ...>
+        let mut search_idx = 0;
+        let mut field_num = 1;
+        while let Some(start) = s_lower[search_idx..].find("<w:fldsimple") {
+            let abs_start = search_idx + start;
+            let tag_end = xml_str[abs_start..]
+                .find('>')
+                .map(|e| abs_start + e)
+                .unwrap_or(xml_str.len());
+            let tag_content = &xml_str[abs_start..tag_end];
+            let tag_lower = &s_lower[abs_start..tag_end];
+            if let Some(instr_start) = tag_lower.find("w:instr=") {
+                let rest = &tag_content[instr_start + 8..];
+                let quote = rest.chars().next().unwrap_or('"');
+                if quote == '"' || quote == '\'' {
+                    let rest = &rest[1..];
+                    if let Some(q_end) = rest.find(quote) {
+                        let raw_instr = &rest[..q_end];
+                        let decoded = decode_xml_entities(raw_instr);
+                        if let Some((sev, reason)) = inspect_word_instruction(&decoded) {
+                            results.push((format!("fldSimple{field_num}"), sev, reason));
+                            field_num += 1;
+                        }
+                    }
+                }
+            }
+            search_idx = tag_end;
+        }
+
+        // 2. Complex fields: from <w:fldChar w:fldCharType="begin" to <w:fldChar w:fldCharType="end"
+        let mut in_complex = false;
+        let mut complex_instr = String::new();
+        let mut cursor = 0;
+        let mut complex_num = 1;
+
+        while cursor < xml_str.len() {
+            if let Some(tag_open) = xml_str[cursor..].find('<') {
+                let tag_start = cursor + tag_open;
+                let Some(tag_close) = xml_str[tag_start..].find('>') else {
+                    break;
+                };
+                let tag_end = tag_start + tag_close + 1;
+                let tag_text = &xml_str[tag_start..tag_end];
+                let tag_lower = tag_text.to_ascii_lowercase();
+
+                if tag_lower.contains("fldchartype=\"begin\"")
+                    || tag_lower.contains("fldchartype='begin'")
+                {
+                    if in_complex && !complex_instr.is_empty() {
+                        let decoded = decode_xml_entities(&complex_instr);
+                        if let Some((sev, reason)) = inspect_word_instruction(&decoded) {
+                            results.push((format!("complexField{complex_num}"), sev, reason));
+                            complex_num += 1;
+                        }
+                    }
+                    in_complex = true;
+                    complex_instr.clear();
+                } else if tag_lower.contains("fldchartype=\"end\"")
+                    || tag_lower.contains("fldchartype='end'")
+                {
+                    if in_complex && !complex_instr.is_empty() {
+                        let decoded = decode_xml_entities(&complex_instr);
+                        if let Some((sev, reason)) = inspect_word_instruction(&decoded) {
+                            results.push((format!("complexField{complex_num}"), sev, reason));
+                            complex_num += 1;
+                        }
+                    }
+                    in_complex = false;
+                    complex_instr.clear();
+                } else if in_complex
+                    && (tag_lower.starts_with("<w:instrtext")
+                        || tag_lower.starts_with("<instrtext"))
+                {
+                    let text_start = tag_end;
+                    let text_end = xml_str[text_start..]
+                        .find("</")
+                        .map(|e| text_start + e)
+                        .unwrap_or(text_start);
+                    complex_instr.push_str(&xml_str[text_start..text_end]);
+                    cursor = text_end;
+                    continue;
+                }
+                cursor = tag_end;
+            } else {
+                break;
+            }
+        }
+        if in_complex && !complex_instr.is_empty() {
+            let decoded = decode_xml_entities(&complex_instr);
+            if let Some((sev, reason)) = inspect_word_instruction(&decoded) {
+                results.push((format!("complexField{complex_num}"), sev, reason));
+            }
+        }
+
+        results
+    }
+
+    fn scan_ppt_slide_actions(xml_str: &str) -> Vec<(&'static str, &'static str, String)> {
+        let mut results = Vec::new();
+        let s_lower = xml_str.to_ascii_lowercase();
+
+        // 1. ppaction://program (external program launch)
+        if s_lower.contains("ppaction://program") {
+            let detail = if let Some(idx) = s_lower.find("ppaction://program") {
+                let rest = &xml_str[idx..xml_str.len().min(idx + 120)];
+                let end = rest.find(['"', '\'', '<', '>']).unwrap_or(rest.len());
+                &rest[..end]
+            } else {
+                "ppaction://program"
+            };
+            results.push((
+                "ProgramLaunch",
+                "Critical",
+                format!("Slide action launches external program or command ('{detail}')"),
+            ));
+        }
+
+        // 2. Mouse-over hover trigger (<a:hlinkHover>)
+        if s_lower.contains("<a:hlinkhover") || s_lower.contains(":hlinkhover") {
+            results.push((
+                "MouseHoverTrigger",
+                "Critical",
+                "Slide shape configured with mouse-over hover trigger ('<a:hlinkHover>') executing without click".into(),
+            ));
+        }
+
+        // 3. ppaction://macro (macro invocation)
+        if s_lower.contains("ppaction://macro") {
+            let macro_name = if let Some(idx) = s_lower.find("ppaction://macro") {
+                let rest = &xml_str[idx..xml_str.len().min(idx + 80)];
+                let end = rest.find(['"', '\'', '<', '>']).unwrap_or(rest.len());
+                &rest[..end]
+            } else {
+                "ppaction://macro"
+            };
+            results.push((
+                "MacroTrigger",
+                "High",
+                format!("Slide action triggers macro execution ('{macro_name}')"),
+            ));
+        }
+
+        // 4. Dangerous protocol in slide action or hyperlink
+        for &proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "ms-appinstaller:",
+            "mhtml:",
+            "javascript:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "DangerousProtocol",
+                    "Critical",
+                    format!("Slide action contains exploit protocol handler '{proto}'"),
+                ));
+            }
+        }
+
+        // 5. Direct executable reference in slide XML
+        for &ext in &[
+            ".exe\"", ".bat\"", ".cmd\"", ".ps1\"", ".vbs\"", ".hta\"", ".cpl\"", ".msi\"",
+        ] {
+            if s_lower.contains(ext) {
+                results.push((
+                    "ExecutableLink",
+                    "Critical",
+                    format!("Slide action links directly to executable payload ('{ext}')"),
+                ));
+            }
+        }
+
+        results
+    }
+
+    fn scan_altchunk_content(data: &[u8]) -> Option<(&'static str, &'static str, String)> {
+        // 1. Raw PE header
+        if data.starts_with(b"MZ") {
+            return Some((
+                "RawExecutableHeader",
+                "Critical",
+                "AltChunk contains raw 'MZ' DOS executable binary".into(),
+            ));
+        }
+
+        let s = String::from_utf8_lossy(data);
+        let lower = s.to_ascii_lowercase();
+
+        // 2. Base64 PE header
+        for pe_sig in &["tvqqaamaaaaeaaaa", "tvoaaa", "tvpaaa", "tvpbaa"] {
+            if lower.contains(pe_sig) {
+                return Some((
+                    "Base64Executable",
+                    "Critical",
+                    format!("AltChunk contains Base64 encoded PE executable ('{pe_sig}')"),
+                ));
+            }
+        }
+
+        // 3. RTF exploit headers and OLE object streams
+        if lower.starts_with("{\\rtf")
+            && (lower.contains("\\objdata")
+                || lower.contains("\\object")
+                || lower.contains("0002ce02-0000-0000-c000-000000000046")
+                || lower.contains("\\bin"))
+        {
+            return Some((
+                "RtfExploitPayload",
+                "Critical",
+                "AltChunk contains RTF payload with embedded OLE object or equation exploit".into(),
+            ));
+        }
+
+        // 4. HTML smuggling
+        if lower.contains("data:text/html;base64,") {
+            return Some((
+                "HtmlSmuggling",
+                "Critical",
+                "AltChunk contains HTML smuggling payload ('data:text/html;base64,')".into(),
+            ));
+        }
+
+        // 5. Embedded script tags
+        if lower.contains("<script") {
+            return Some((
+                "EmbeddedScript",
+                "Critical",
+                "AltChunk contains embedded HTML/XML <script> element".into(),
+            ));
+        }
+
+        // 6. Dangerous protocol handlers
+        for &proto in &["ms-msdt:", "search-ms:", "ms-appinstaller:", "mhtml:"] {
+            if lower.contains(proto) {
+                return Some((
+                    "DangerousProtocol",
+                    "Critical",
+                    format!("AltChunk contains exploit protocol handler '{proto}'"),
+                ));
+            }
+        }
+
+        // 7. Shell execution triggers
+        for &kw in &[
+            "wscript.shell",
+            "powershell",
+            "cmd.exe",
+            "mshta",
+            "rundll32",
+            "cscript",
+        ] {
+            if lower.contains(kw) {
+                return Some((
+                    "ShellCommandTrigger",
+                    "High",
+                    format!("AltChunk contains shell execution trigger '{kw}'"),
+                ));
+            }
+        }
+
+        None
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -1665,16 +2022,13 @@ pub fn scan_ooxml_package_threats(
             }
         }
 
-        // Check for suspicious drawings, slides, and VML form controls
-        let is_drawing_or_slide = (name_lower.contains("/drawings/drawing")
+        // Check for suspicious drawings and VML form controls
+        let is_drawing = (name_lower.contains("/drawings/drawing")
             || name_lower.starts_with("drawings/drawing")
             || name_lower.contains("\\drawings\\drawing")
-            || name_lower.contains("vmldrawing")
-            || name_lower.contains("/slides/slide")
-            || name_lower.starts_with("slides/slide")
-            || name_lower.contains("/notesslides/notesslide"))
+            || name_lower.contains("vmldrawing"))
             && (name_lower.ends_with(".xml") || name_lower.ends_with(".vml"));
-        if is_drawing_or_slide {
+        if is_drawing {
             let Ok(data) = zip.read(entry) else { continue };
             let s = String::from_utf8_lossy(&data);
             let s_lower = s.to_ascii_lowercase();
@@ -1683,12 +2037,12 @@ pub fn scan_ooxml_package_threats(
             if s_lower.contains("ppaction://program") {
                 indicator = Some((
                     "Critical",
-                    "Shape or slide action launches external program ('ppaction://program')".into(),
+                    "Shape action launches external program ('ppaction://program')".into(),
                 ));
             } else if s_lower.contains("ppaction://macro") {
                 indicator = Some((
                     "High",
-                    "Shape or slide action executes macro ('ppaction://macro')".into(),
+                    "Shape action executes macro ('ppaction://macro')".into(),
                 ));
             } else if s_lower.contains("<a:hlinkhover") || s_lower.contains("hlinkhover") {
                 indicator = Some((
@@ -1728,6 +2082,109 @@ pub fn scan_ooxml_package_threats(
                         threat_kind: "SuspiciousDrawingAction".into(),
                         severity: sev.into(),
                         formula: entry.name.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for suspicious PowerPoint slide actions, hover triggers, and executable links
+        let is_ppt_slide = (name_lower.starts_with("ppt/slides/")
+            || name_lower.contains("/ppt/slides/")
+            || name_lower.starts_with("ppt/slidelayouts/")
+            || name_lower.contains("/ppt/slidelayouts/")
+            || name_lower.starts_with("ppt/slidemasters/")
+            || name_lower.contains("/ppt/slidemasters/")
+            || name_lower.starts_with("ppt/notesslides/")
+            || name_lower.contains("/ppt/notesslides/")
+            || name_lower.ends_with("presentation.xml"))
+            && name_lower.ends_with(".xml");
+        if is_ppt_slide {
+            let Ok(data) = zip.read(entry) else { continue };
+            let s = String::from_utf8_lossy(&data);
+            for (action_type, sev, details) in scan_ppt_slide_actions(&s) {
+                let coord = format!("part:{}:action:{}", entry.name, action_type);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Suspicious PowerPoint slide action or trigger detected in part '{}': {details}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Presentation".into(),
+                        cell_ref: action_type.into(),
+                        coordinate: coord,
+                        threat_kind: "PowerPointSlideAction".into(),
+                        severity: sev.into(),
+                        formula: details.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word field codes (DDE, DDEAUTO, INCLUDETEXT, LINK, MACROBUTTON, FILENAME \p)
+        let is_word_xml = (name_lower.starts_with("word/")
+            || name_lower.contains("/word/")
+            || name_lower.starts_with("word\\")
+            || name_lower.contains("\\word\\"))
+            && (name_lower.ends_with("document.xml")
+                || name_lower.contains("/header")
+                || name_lower.contains("/footer")
+                || name_lower.ends_with("footnotes.xml")
+                || name_lower.ends_with("endnotes.xml")
+                || name_lower.ends_with("comments.xml"));
+        if is_word_xml {
+            let Ok(data) = zip.read(entry) else { continue };
+            let xml_str = String::from_utf8_lossy(&data);
+            for (fld_id, sev, reason) in scan_word_field_codes(&xml_str) {
+                let coord = format!("part:{}:field:{}", entry.name, fld_id);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Suspicious Word field code detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Document".into(),
+                        cell_ref: fld_id,
+                        coordinate: coord,
+                        threat_kind: "WordFieldCode".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word Alternative Format Chunks (AltChunk / aFChunk)
+        let is_altchunk = (name_lower.contains("/afchunk")
+            || name_lower.starts_with("afchunk")
+            || name_lower.contains("\\afchunk"))
+            && (name_lower.ends_with(".dat")
+                || name_lower.ends_with(".htm")
+                || name_lower.ends_with(".html")
+                || name_lower.ends_with(".rtf")
+                || name_lower.ends_with(".mht")
+                || name_lower.ends_with(".bin"));
+        if is_altchunk {
+            let Ok(data) = zip.read(entry) else { continue };
+            if let Some((kind, sev, details)) = scan_altchunk_content(&data) {
+                let coord = format!("part:{}", entry.name);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Word Alternative Format Chunk (AltChunk) in part '{}' contains suspicious payload: {details}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Package".into(),
+                        cell_ref: entry.name.clone(),
+                        coordinate: coord,
+                        threat_kind: "SuspiciousAltChunk".into(),
+                        severity: sev.into(),
+                        formula: kind.into(),
                         description: desc,
                     });
                 }
@@ -2019,8 +2476,36 @@ pub fn scan_ooxml_package_threats(
                     }
                 }
 
-                // Check for Suspicious Protocol Handler (ms-msdt, search-ms, ms-appinstaller, mhtml, javascript, vbscript, remote file://)
                 let target_lower = rel.target.to_ascii_lowercase();
+
+                // Check for External AltChunk relationship (aFChunk)
+                if (rel_type.contains("afchunk") || rel_type.contains("altchunk")) && is_ext {
+                    let coord = format!("rel:{}->{}", rels_part, rel.id);
+                    if !threats.iter().any(|t| t.coordinate == coord) {
+                        let is_dangerous = target_lower.starts_with("ms-msdt:")
+                            || target_lower.starts_with("search-ms:")
+                            || target_lower.starts_with("mhtml:")
+                            || target_lower.starts_with("\\\\")
+                            || target_lower.starts_with("//");
+                        let sev = if is_dangerous { "Critical" } else { "High" };
+                        let desc = format!(
+                            "External Alternative Format Chunk (AltChunk) reference detected: relationship '{}' in '{}' targets external resource '{}'",
+                            rel.id, rels_part, rel.target
+                        );
+                        diagnostics.push(format!("Security warning: {desc}"));
+                        threats.push(CellThreat {
+                            sheet_name: "Package".into(),
+                            cell_ref: rel.id.clone(),
+                            coordinate: coord,
+                            threat_kind: "SuspiciousAltChunk".into(),
+                            severity: sev.into(),
+                            formula: rel.target.clone(),
+                            description: desc,
+                        });
+                    }
+                }
+
+                // Check for Suspicious Protocol Handler (ms-msdt, search-ms, ms-appinstaller, mhtml, javascript, vbscript, remote file://)
                 let is_suspicious_proto = target_lower.starts_with("ms-msdt:")
                     || target_lower.starts_with("search-ms:")
                     || target_lower.starts_with("ms-appinstaller:")
@@ -2035,6 +2520,8 @@ pub fn scan_ooxml_package_threats(
                     && !rel_type.contains("oleobject")
                     && !rel_type.contains("subdocument")
                     && !rel_type.contains("frame")
+                    && !rel_type.contains("afchunk")
+                    && !rel_type.contains("altchunk")
                 {
                     let coord = format!("rel:{}->{}", rels_part, rel.id);
                     if !threats.iter().any(|t| t.coordinate == coord) {

