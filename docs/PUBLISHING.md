@@ -24,9 +24,12 @@ and [PyPI trusted publishers](https://docs.pypi.org/trusted-publishers/).
   publisher supports the first release; later releases use the resulting
   project publisher. No long-lived PyPI token is needed.
 - **npm**: Bootstrap each new package through an authenticated maintainer publish,
-  then configure its GitHub trusted publisher with the same owner/repository,
-  workflow `publish-npm.yml`, environment `npm`. Configure the root package and
-  every platform package listed in `scripts/release-targets.json`.
+  or configure an `NPM_TOKEN` secret in GitHub Actions.
+  When generating an npm access token for CI publishing, ensure it can bypass interactive 2FA prompts:
+  - **Granular Access Token**: Explicitly enable **"Bypass 2FA"** under permissions.
+  - **Classic Token**: Select type **"Automation"** (not "Publish", which requires interactive OTP prompts causing `npm error code EOTP`).
+  Once packages exist on npmjs.com, configure GitHub Actions as a Trusted Publisher
+  (workflow `publish-npm.yml`, environment `npm`) to transition to keyless OIDC publishing.
 - **GitHub Packages**: `publish-github.yml` uses the job's short-lived
   `GITHUB_TOKEN` with `packages: write`, in environment `github-packages`.
 - **crates.io**: Use GitHub Actions OIDC via `rust-lang/crates-io-auth-action`

@@ -70,21 +70,21 @@ vba-insight analyze examples/approval.bas --format dot > cfg.dot
 
 ```rust
 use vba_insight::{
-    inspect_macro_file, inspect_to_markdown, stomping_to_sarif, AnalysisOptions,
+    inspect_macro_file, inspect_to_markdown, inspection_to_sarif, AnalysisOptions,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let container_bytes = std::fs::read("suspicious.xlsm")?;
     let options = AnalysisOptions::default();
 
-    // Inspect container: unpacks streams, parses AST, disassembles P-code, detects stomping
+    // Inspect container: unpacks streams, parses AST, disassembles P-code, detects stomping & cell threats
     let inspection = inspect_macro_file(&container_bytes, &options)?;
 
     println!("Extracted Modules: {}", inspection.extracted.modules.len());
-    println!("Stomped: {}", inspection.stomping_report.is_stomped);
+    println!("Has Stomping: {}", inspection.stomping_report.has_stomping);
 
-    // Export SARIF v2.1.0 for GitHub Code Scanning
-    let sarif = stomping_to_sarif(&inspection.stomping_report, "suspicious.xlsm");
+    // Export SARIF v2.1.0 (includes both stomping and cell threats) for GitHub Code Scanning
+    let sarif = inspection_to_sarif(&inspection, "suspicious.xlsm");
     std::fs::write("audit.sarif", sarif)?;
 
     // Generate Markdown report
@@ -107,10 +107,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let extracted = extract_macro_container(&bytes, &Limits::bounded())?;
     let report = detect_project_stomping(&extracted)?;
 
-    if report.is_stomped {
-        eprintln!("ALERT: Stomping detected! Findings: {}", report.findings.len());
-        for finding in &report.findings {
-            eprintln!(" - [{:?}] {}: {}", finding.severity, finding.rule_id, finding.description);
+    if report.has_stomping {
+        eprintln!("ALERT: Stomping detected! Overall Severity: {:?}", report.overall_severity);
+        for m in &report.modules {
+            if m.is_stomped {
+                eprintln!(" Module {}: {} findings", m.module_name, m.findings.len());
+                for finding in &m.findings {
+                    eprintln!("  - [{:?}] {}", finding.severity, finding.description);
+                }
+            }
+        }
+        for finding in &report.project_findings {
+            eprintln!(" - [{:?}] {}", finding.severity, finding.description);
         }
     }
 
@@ -182,6 +190,11 @@ if stomping.get("has_stomping"):
     print(f"[!] VBA Stomping Detected! Severity: {stomping.get('overall_severity')}")
     for finding in stomping.get("project_findings", []):
         print(f"  - [{finding['rule_id']}] {finding['description']}")
+    for mod in stomping.get("modules", []):
+        if mod.get("is_stomped"):
+            print(f"  Module {mod.get('module_name')}:")
+            for finding in mod.get("findings", []):
+                print(f"    - [{finding['rule_id']}] {finding['description']}")
 
 # 2. Check for dangerous worksheet cell threats (DDE, XLM, WEBSERVICE)
 analysis = report.get("analysis", {})
@@ -190,7 +203,7 @@ cell_threats = workbook.get("cell_threats", [])
 if cell_threats:
     print(f"[!] Found {len(cell_threats)} dangerous cell formulas:")
     for threat in cell_threats:
-        print(f"  - {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
+        print(f"  - [{threat['rule_id']}] {threat['coordinate']}: {threat['threat_kind']} ({threat['formula']})")
 
 # 3. Export OASIS SARIF v2.1.0 report for GitHub Advanced Security / CI integration
 # (Includes both VBA Stomping VBA-STOMP-001..010 and Cell Threat VBA-CELL-001..008 rules)
@@ -241,15 +254,23 @@ const report = JSON.parse(rawJson);
 console.log('Project Name:', report.project_name);
 if (report.stomping?.has_stomping) {
   console.error(`[!] Stomping Detected! Severity: ${report.stomping.overall_severity}`);
-  for (const finding of report.stomping.project_findings) {
+  for (const finding of report.stomping.project_findings ?? []) {
     console.error(`  - [${finding.rule_id}] ${finding.description}`);
+  }
+  for (const mod of report.stomping.modules ?? []) {
+    if (mod.is_stomped) {
+      console.error(`  Module ${mod.module_name}:`);
+      for (const finding of mod.findings ?? []) {
+        console.error(`    - [${finding.rule_id}] ${finding.description}`);
+      }
+    }
   }
 }
 
 // Check dangerous worksheet cell threats (DDE, XLM, WEBSERVICE)
 const cellThreats = report.analysis?.workbook_structure?.cell_threats ?? [];
 for (const threat of cellThreats) {
-  console.warn(`  - [${threat.threat_kind}] ${threat.coordinate}: ${threat.description}`);
+  console.warn(`  - [${threat.rule_id}] ${threat.coordinate}: ${threat.threat_kind} (${threat.formula})`);
 }
 
 // 3. Export SARIF v2.1.0 report for CI code scanning

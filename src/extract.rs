@@ -605,7 +605,9 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                     "Potential DDE execution formula in cell '{}'!{}: '{}'",
                     cell.sheet_name, cell.cell_ref, formula
                 );
-                extracted.diagnostics.push(format!("Security warning: {}", desc));
+                extracted
+                    .diagnostics
+                    .push(format!("Security warning: {}", desc));
                 extracted.cell_threats.push(CellThreat {
                     sheet_name: cell.sheet_name.clone(),
                     cell_ref: cell.cell_ref.clone(),
@@ -620,7 +622,9 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                     "Potential Excel 4.0 (XLM) macro execution formula in cell '{}'!{}: '{}'",
                     cell.sheet_name, cell.cell_ref, formula
                 );
-                extracted.diagnostics.push(format!("Security warning: {}", desc));
+                extracted
+                    .diagnostics
+                    .push(format!("Security warning: {}", desc));
                 extracted.cell_threats.push(CellThreat {
                     sheet_name: cell.sheet_name.clone(),
                     cell_ref: cell.cell_ref.clone(),
@@ -635,7 +639,9 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                     "Potential remote workbook link injection in cell '{}'!{}: '{}'",
                     cell.sheet_name, cell.cell_ref, formula
                 );
-                extracted.diagnostics.push(format!("Security warning: {}", desc));
+                extracted
+                    .diagnostics
+                    .push(format!("Security warning: {}", desc));
                 extracted.cell_threats.push(CellThreat {
                     sheet_name: cell.sheet_name.clone(),
                     cell_ref: cell.cell_ref.clone(),
@@ -650,7 +656,9 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                     "Potential external data request / exfiltration formula in cell '{}'!{}: '{}'",
                     cell.sheet_name, cell.cell_ref, formula
                 );
-                extracted.diagnostics.push(format!("Security warning: {}", desc));
+                extracted
+                    .diagnostics
+                    .push(format!("Security warning: {}", desc));
                 extracted.cell_threats.push(CellThreat {
                     sheet_name: cell.sheet_name.clone(),
                     cell_ref: cell.cell_ref.clone(),
@@ -665,7 +673,9 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                     "Suspicious executable download hyperlink in cell '{}'!{}: '{}'",
                     cell.sheet_name, cell.cell_ref, formula
                 );
-                extracted.diagnostics.push(format!("Security warning: {}", desc));
+                extracted
+                    .diagnostics
+                    .push(format!("Security warning: {}", desc));
                 extracted.cell_threats.push(CellThreat {
                     sheet_name: cell.sheet_name.clone(),
                     cell_ref: cell.cell_ref.clone(),

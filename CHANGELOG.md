@@ -1,5 +1,12 @@
 # Changelog
 
+- Added dangerous worksheet cell threat and workbook structure scanning for Excel macro containers (`scan_workbook_cell_threats`), detecting DDE execution (`VBA-CELL-001`), legacy XLM/Excel 4.0 macro formulas (`VBA-CELL-002`), Remote Workbook Links (`VBA-CELL-003`), `WEBSERVICE`/`FILTERXML` exfiltration formulas (`VBA-CELL-004`), suspicious external hyperlinks (`VBA-CELL-005`), auto-executing defined names (`VBA-CELL-006`), `xlSheetVeryHidden` state evasion (`VBA-CELL-007`), and legacy XLM macro sheets (`VBA-CELL-008`).
+- Added full OASIS SARIF v2.1.0 report generation (`stomping_to_sarif`, `inspection_to_sarif`) embedding comprehensive rule descriptors, help markdown, CWE mappings, physical file URIs, and structured results for seamless GitHub Code Scanning and CI integration.
+- Enriched structured JSON exports (`stomping_to_json`, `ContainerInspection::to_json`) with standardized `rule_id` identifiers (`VBA-STOMP-001..010` and `VBA-CELL-001..008`).
+- Added CLI `--format sarif` alongside `json`, `markdown`, and `text`, plus automatic Office host profile inference from container extensions (`.docm`/`.dotm` -> Word, `.pptm`/`.ppam` -> PowerPoint, `.accdb`/`.mdb` -> Access, `.xlsm`/`.xlsb` -> Excel).
+- Added multi-language bindings APIs:
+  - Python ABI3 bindings: `inspect_file_sarif`, `disasm_file`, `disasm_file_json`, `disasm_file_markdown`, `inspect_file_markdown`.
+  - Node.js N-API bindings: `inspectMacroFileSarif`, `disasmMacroFileJson`, `disasmMacroFileMarkdown`, `inspectMacroFileMarkdown`.
 - Added built-in standard VBA P-code instruction schemas for VBA6 and VBA7 (32-bit and 64-bit) supporting all 264 opcodes without requiring external caller-supplied tables.
 - Added `_VBA_PROJECT` stream identifier table parser to resolve internal runtime names and user-defined identifiers.
 - Added high-fidelity P-code disassembler (`disassemble_pcode_module`, `disassemble_extracted_project`) producing formatted line-by-line assembly with procedure declarations, string literals, and call targets.

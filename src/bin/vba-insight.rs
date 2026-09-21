@@ -183,7 +183,26 @@ fn run() -> Result<(), String> {
                 extract_macro_container(&bytes, &limits)?
             };
             if !host_overridden {
-                host_profile = HostProfile::Excel;
+                host_profile = if let Some(ext) = Path::new(p).extension() {
+                    let s = ext.to_string_lossy();
+                    if s.eq_ignore_ascii_case("docm")
+                        || s.eq_ignore_ascii_case("dotm")
+                        || s.eq_ignore_ascii_case("doc")
+                    {
+                        HostProfile::Word
+                    } else if s.eq_ignore_ascii_case("pptm")
+                        || s.eq_ignore_ascii_case("ppam")
+                        || s.eq_ignore_ascii_case("ppt")
+                    {
+                        HostProfile::PowerPoint
+                    } else if s.eq_ignore_ascii_case("accdb") || s.eq_ignore_ascii_case("mdb") {
+                        HostProfile::Access
+                    } else {
+                        HostProfile::Excel
+                    }
+                } else {
+                    HostProfile::Excel
+                };
             }
             kind = Some("macro_container");
             extracted = Some(x);
@@ -254,6 +273,12 @@ fn run() -> Result<(), String> {
                     report.overall_severity.as_str()
                 );
                 println!("Has Stomping: {}", report.has_stomping);
+                if !report.project_findings.is_empty() {
+                    println!("Project-level Findings:");
+                    for f in &report.project_findings {
+                        println!("  * [{}] {}", f.severity.as_str(), f.description);
+                    }
+                }
                 for m in &report.modules {
                     println!("--- Module: {} ---", m.module_name);
                     println!(
@@ -316,13 +341,26 @@ fn run() -> Result<(), String> {
                     inspection.stomping_report.has_stomping
                 );
                 if !inspection.extracted.cell_threats.is_empty() {
-                    println!("Cell Threats      : {}", inspection.extracted.cell_threats.len());
+                    println!(
+                        "Cell Threats      : {}",
+                        inspection.extracted.cell_threats.len()
+                    );
                 }
                 println!("-------------------------------------------------------");
                 if !inspection.extracted.cell_threats.is_empty() {
                     println!("Worksheet & Cell Threats:");
                     for t in &inspection.extracted.cell_threats {
-                        println!("  - [{:<8}] {:<20} | {:<16} | {}", t.severity, t.coordinate, t.threat_kind, t.description);
+                        println!(
+                            "  - [{:<8}] {:<20} | {:<16} | {}",
+                            t.severity, t.coordinate, t.threat_kind, t.description
+                        );
+                    }
+                    println!("-------------------------------------------------------");
+                }
+                if !inspection.stomping_report.project_findings.is_empty() {
+                    println!("Project-level Findings:");
+                    for f in &inspection.stomping_report.project_findings {
+                        println!("  * [{}] {}", f.severity.as_str(), f.description);
                     }
                     println!("-------------------------------------------------------");
                 }
@@ -371,9 +409,11 @@ fn run() -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "usage: vba-insight analyze FILE... [--format json|dot] [--include-source] [--define NAME=VALUE] [--code-page N] [--host excel|generic] [--pcode-profile vba7-observed]
-       vba-insight extract FILE.xlsm [--format json] [--include-source] [--pcode-profile vba7-observed]
-       vba-insight disasm FILE.xlsm [--format json|markdown|text]
-       vba-insight stomping FILE.xlsm [--format json|sarif|markdown|text]
-       vba-insight inspect FILE.xlsm [--format json|markdown|sarif|text]".into()
+    "usage: vba-insight analyze FILE... [--format json|dot] [--include-source] [--define NAME=VALUE] [--code-page N] [--host excel|word|powerpoint|access|generic] [--pcode-profile vba7-observed]
+       vba-insight extract CONTAINER [--format json] [--include-source] [--pcode-profile vba7-observed]
+       vba-insight disasm CONTAINER [--format json|markdown|text]
+       vba-insight stomping CONTAINER [--format json|sarif|markdown|text]
+       vba-insight inspect CONTAINER [--format json|markdown|sarif|text]
+
+CONTAINER can be an Office macro container (.xlsm, .xlsb, .docm, .pptm, legacy .xls, or raw vbaProject.bin).".into()
 }

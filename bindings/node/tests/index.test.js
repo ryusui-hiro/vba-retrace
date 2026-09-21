@@ -52,10 +52,30 @@ test('inspectMacroFileMarkdown and inspectMacroFileSarif reject invalid buffer',
   }, /inspection failed/);
 
   assert.throws(() => {
+    vbaInsight.inspectMacroFileSarif(Buffer.from('corrupt'));
+  }, /inspection failed/);
+
+  assert.throws(() => {
     vbaInsight.disasmMacroFileJson(Buffer.from('corrupt'));
   }, /inspection failed/);
 
   assert.throws(() => {
     vbaInsight.disasmMacroFileMarkdown(Buffer.from('corrupt'));
   }, /inspection failed/);
+});
+
+test('analyzeSourcesJson rejects empty array and handles multi-module inputs', () => {
+  assert.throws(() => {
+    vbaInsight.analyzeSourcesJson([]);
+  }, /at least one VBA source unit is required/);
+
+  const multi = [
+    { name: 'Mod1.bas', text: 'Public Sub Foo()\nEnd Sub\n' },
+    { name: 'Mod2.bas', text: 'Public Sub Bar()\n    Call Foo\nEnd Sub\n' },
+  ];
+  const multiRes = vbaInsight.analyzeSourcesJson(multi);
+  const multiParsed = JSON.parse(multiRes);
+  assert.equal(multiParsed.modules.length, 2);
+  assert.equal(multiParsed.modules[0].name, 'Mod1');
+  assert.equal(multiParsed.modules[1].name, 'Mod2');
 });

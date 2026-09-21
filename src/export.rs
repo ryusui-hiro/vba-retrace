@@ -643,12 +643,14 @@ pub fn to_json(a: &Analysis, x: Option<&ExtractedProject>, d: Disclosure) -> Str
             if index > 0 {
                 o.push(',');
             }
+            let (rule_id, _) = cell_threat_to_sarif_rule(threat);
             o.push_str(&format!(
-                "{{\"sheet_name\":{},\"cell_ref\":{},\"coordinate\":{},\"threat_kind\":{},\"severity\":{},\"formula\":{},\"description\":{}}}",
+                "{{\"sheet_name\":{},\"cell_ref\":{},\"coordinate\":{},\"threat_kind\":{},\"rule_id\":{},\"severity\":{},\"formula\":{},\"description\":{}}}",
                 if reveal { q(&threat.sheet_name) } else { "null".into() },
                 if reveal { q(&threat.cell_ref) } else { "null".into() },
                 if reveal { q(&threat.coordinate) } else { "null".into() },
                 q(&threat.threat_kind),
+                q(rule_id),
                 q(&threat.severity),
                 if reveal { q(&threat.formula) } else { "null".into() },
                 if reveal { q(&threat.description) } else { "null".into() }
@@ -2709,10 +2711,12 @@ pub fn stomping_to_json(report: &ProjectStompingReport) -> String {
             StompingFindingKind::HiddenGuiModule(_) => "hidden_gui_module",
             StompingFindingKind::ProjectLockedOrUnviewable => "project_locked_or_unviewable",
         };
+        let (rule_id, _) = finding_to_sarif_rule(f);
         out.push_str(&format!(
-            "{{\"severity\":{},\"kind\":{},\"description\":{}}}",
+            "{{\"severity\":{},\"kind\":{},\"rule_id\":{},\"description\":{}}}",
             q(f.severity.as_str()),
             q(kind_str),
+            q(rule_id),
             q(&f.description)
         ));
     }
@@ -2753,10 +2757,12 @@ pub fn stomping_to_json(report: &ProjectStompingReport) -> String {
                 StompingFindingKind::HiddenGuiModule(_) => "hidden_gui_module",
                 StompingFindingKind::ProjectLockedOrUnviewable => "project_locked_or_unviewable",
             };
+            let (rule_id, _) = finding_to_sarif_rule(f);
             out.push_str(&format!(
-                "{{\"severity\":{},\"kind\":{},\"description\":{}}}",
+                "{{\"severity\":{},\"kind\":{},\"rule_id\":{},\"description\":{}}}",
                 q(f.severity.as_str()),
                 q(kind_str),
+                q(rule_id),
                 q(&f.description)
             ));
         }
@@ -2792,7 +2798,11 @@ fn finding_to_sarif_rule(f: &StompingFinding) -> (&'static str, &'static str) {
 /// Export a VBA Stomping evaluation report as SARIF v2.1.0 for GitHub Code Scanning and VS Code integration.
 pub fn stomping_to_sarif(report: &ProjectStompingReport, file_uri: &str) -> String {
     let mut out = String::from(
-        "{\"$schema\":\"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json\",\"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"vba-insight\",\"version\":\"0.1.0\",\"informationUri\":\"https://github.com/ryusui-hiro/vba-retrace\",\"rules\":[",
+        "{\"$schema\":\"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json\",\"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"vba-insight\",\"version\":\"",
+    );
+    out.push_str(env!("CARGO_PKG_VERSION"));
+    out.push_str(
+        "\",\"informationUri\":\"https://github.com/ryusui-hiro/vba-retrace\",\"rules\":[",
     );
     out.push_str(
         "{\"id\":\"VBA-STOMP-001\",\"name\":\"SourcePurged\",\"shortDescription\":{\"text\":\"VBA Source Code Purged\"},\"fullDescription\":{\"text\":\"VBA source code has been completely stripped or purged while compiled P-code instructions remain executable.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
@@ -3042,12 +3052,13 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
 
 /// Export a ComprehensiveInspection as SARIF v2.1.0 for GitHub Code Scanning and VS Code integration,
 /// containing both VBA Stomping and Worksheet Cell Threat findings.
-pub fn inspection_to_sarif(
-    inspection: &crate::ComprehensiveInspection,
-    file_uri: &str,
-) -> String {
+pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri: &str) -> String {
     let mut out = String::from(
-        "{\"$schema\":\"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json\",\"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"vba-insight\",\"version\":\"0.1.0\",\"informationUri\":\"https://github.com/ryusui-hiro/vba-retrace\",\"rules\":[",
+        "{\"$schema\":\"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json\",\"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"vba-insight\",\"version\":\"",
+    );
+    out.push_str(env!("CARGO_PKG_VERSION"));
+    out.push_str(
+        "\",\"informationUri\":\"https://github.com/ryusui-hiro/vba-retrace\",\"rules\":[",
     );
     out.push_str(
         "{\"id\":\"VBA-STOMP-001\",\"name\":\"SourcePurged\",\"shortDescription\":{\"text\":\"VBA Source Code Purged\"},\"fullDescription\":{\"text\":\"VBA source code has been completely stripped or purged while compiled P-code instructions remain executable.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"

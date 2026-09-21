@@ -1368,6 +1368,29 @@ fn e2e_cli_binary_execution_workflow() {
     let stdout_disasm = String::from_utf8_lossy(&output_disasm.stdout);
     assert!(stdout_disasm.contains("VBA P-Code Disassembly Report"));
 
+    // 3b. Test 'inspect' default text format
+    let output_inspect_text = Command::new(bin_path)
+        .arg("inspect")
+        .arg(&file_path)
+        .output()
+        .expect("CLI inspect text execution failed");
+    assert!(output_inspect_text.status.success());
+    let stdout_inspect_text = String::from_utf8_lossy(&output_inspect_text.stdout);
+    assert!(stdout_inspect_text.contains("VBA MACRO CONTAINER INSPECTION REPORT"));
+    assert!(stdout_inspect_text.contains("Project Name"));
+    assert!(stdout_inspect_text.contains("CliProject"));
+
+    // 3c. Test 'stomping' default text format
+    let output_stomp_text = Command::new(bin_path)
+        .arg("stomping")
+        .arg(&file_path)
+        .output()
+        .expect("CLI stomping text execution failed");
+    assert!(output_stomp_text.status.success());
+    let stdout_stomp_text = String::from_utf8_lossy(&output_stomp_text.stdout);
+    assert!(stdout_stomp_text.contains("Overall Stomping Severity:"));
+    assert!(stdout_stomp_text.contains("Has Stomping:"));
+
     // 4. Test '--version' and '-V'
     let output_ver = Command::new(bin_path)
         .arg("--version")
@@ -2202,7 +2225,9 @@ fn e2e_defined_name_and_very_hidden_sheet_threat_detection() {
         "should have VeryHiddenSheet threat: {threats:?}"
     );
     assert!(
-        threats.iter().any(|t| t.threat_kind == "AutoExecDefinedName"),
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "AutoExecDefinedName"),
         "should have AutoExecDefinedName threat: {threats:?}"
     );
     assert!(
@@ -2214,14 +2239,18 @@ fn e2e_defined_name_and_very_hidden_sheet_threat_detection() {
         "should have XLM threat: {threats:?}"
     );
 
-    // Verify inspect_to_json output contains cell_threats
+    // Verify inspect_to_json output contains cell_threats with rule_id
     let json_report = inspect_to_json(&inspection, Disclosure::IncludeSource);
     assert!(json_report.contains("\"cell_threats\":["));
     assert!(json_report.contains("\"threat_kind\":\"DDE\""));
     assert!(json_report.contains("\"threat_kind\":\"XLM\""));
+    assert!(json_report.contains("\"rule_id\":\"VBA-CELL-001\""));
+    assert!(json_report.contains("\"rule_id\":\"VBA-CELL-002\""));
 
-    // Verify inspection_to_sarif output contains both rules and results
+    // Verify inspection_to_sarif output contains dynamic version, rules, and results
     let sarif_report = inspection_to_sarif(&inspection, "threat_test.xlsm");
+    let expected_ver_fragment = format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION"));
+    assert!(sarif_report.contains(&expected_ver_fragment));
     assert!(sarif_report.contains("\"id\":\"VBA-STOMP-001\""));
     assert!(sarif_report.contains("\"id\":\"VBA-CELL-001\""));
     assert!(sarif_report.contains("\"id\":\"VBA-CELL-002\""));
