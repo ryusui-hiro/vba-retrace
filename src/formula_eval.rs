@@ -99,6 +99,7 @@ pub fn evaluate_formula(
         references: Vec::new(),
         references_truncated: false,
         steps: 0,
+        variables: Vec::new(),
     };
     match evaluator.evaluate(&expression, 0) {
         Ok(EvalValue::Scalar(value)) => {
@@ -319,6 +320,7 @@ enum Expr {
         name: String,
         arguments: Vec<Expr>,
     },
+    Variable(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -448,27 +450,51 @@ impl Parser<'_> {
                 } else {
                     (None, name.clone())
                 };
-                let first = parse_cell_address(&cell_name).ok_or("unsupported")?;
-                if matches!(self.tokens.get(self.position), Some(Token::Colon)) {
-                    self.position += 1;
-                    let last_name = self.next_identifier()?;
-                    let last = parse_cell_address(&last_name).ok_or("unsupported")?;
-                    Ok(Expr::Range {
-                        sheet: sheet.clone(),
-                        first,
-                        last,
-                        source: if let Some(sheet) = &sheet {
-                            format!("{sheet}!{cell_name}:{last_name}")
+                if sheet.is_none() {
+                    if let Some(first) = parse_cell_address(&cell_name) {
+                        if matches!(self.tokens.get(self.position), Some(Token::Colon)) {
+                            self.position += 1;
+                            let last_name = self.next_identifier()?;
+                            let last = parse_cell_address(&last_name).ok_or("unsupported")?;
+                            Ok(Expr::Range {
+                                sheet: None,
+                                first,
+                                last,
+                                source: format!("{cell_name}:{last_name}"),
+                            })
                         } else {
-                            format!("{cell_name}:{last_name}")
-                        },
-                    })
+                            Ok(Expr::Reference {
+                                sheet: None,
+                                cell: first,
+                                source: cell_name,
+                            })
+                        }
+                    } else {
+                        Ok(Expr::Variable(cell_name))
+                    }
                 } else {
-                    Ok(Expr::Reference {
-                        sheet,
-                        cell: first,
-                        source: cell_name,
-                    })
+                    let first = parse_cell_address(&cell_name).ok_or("unsupported")?;
+                    if matches!(self.tokens.get(self.position), Some(Token::Colon)) {
+                        self.position += 1;
+                        let last_name = self.next_identifier()?;
+                        let last = parse_cell_address(&last_name).ok_or("unsupported")?;
+                        Ok(Expr::Range {
+                            sheet: sheet.clone(),
+                            first,
+                            last,
+                            source: if let Some(sheet) = &sheet {
+                                format!("{sheet}!{cell_name}:{last_name}")
+                            } else {
+                                format!("{cell_name}:{last_name}")
+                            },
+                        })
+                    } else {
+                        Ok(Expr::Reference {
+                            sheet,
+                            cell: first,
+                            source: cell_name,
+                        })
+                    }
                 }
             }
             _ => Err("invalid_formula"),
@@ -584,6 +610,7 @@ struct Evaluator<'a> {
     references: Vec<String>,
     references_truncated: bool,
     steps: usize,
+    variables: Vec<(String, EvalValue)>,
 }
 
 impl Evaluator<'_> {
@@ -594,11 +621,31 @@ impl Evaluator<'_> {
         }
         match expression {
             Expr::Value(value) => Ok(EvalValue::Scalar(value.clone())),
+            Expr::Variable(name) => {
+                let name_lower = name.to_ascii_lowercase();
+                if let Some((_, val)) = self.variables.iter().rev().find(|(k, _)| k == &name_lower)
+                {
+                    Ok(val.clone())
+                } else {
+                    Err("unsupported")
+                }
+            }
             Expr::Reference {
                 sheet,
                 cell,
                 source,
             } => {
+                if sheet.is_none() {
+                    let source_lower = source.to_ascii_lowercase();
+                    if let Some((_, val)) = self
+                        .variables
+                        .iter()
+                        .rev()
+                        .find(|(k, _)| k == &source_lower)
+                    {
+                        return Ok(val.clone());
+                    }
+                }
                 self.record_reference(source);
                 Ok(EvalValue::Scalar(self.lookup(sheet.as_deref(), *cell)?))
             }
@@ -821,6 +868,35 @@ impl Evaluator<'_> {
             }
             "true" if arguments.is_empty() => Ok(EvalValue::Scalar(FormulaValue::Boolean(true))),
             "false" if arguments.is_empty() => Ok(EvalValue::Scalar(FormulaValue::Boolean(false))),
+            "let" if arguments.len() >= 3 && arguments.len() % 2 == 1 => {
+                let prev_len = self.variables.len();
+                let num_bindings = (arguments.len() - 1) / 2;
+                for i in 0..num_bindings {
+                    let name_idx = i * 2;
+                    let val_idx = name_idx + 1;
+                    let var_name = match &arguments[name_idx] {
+                        Expr::Variable(n) => n.clone(),
+                        Expr::Value(FormulaValue::String(n)) => n.clone(),
+                        Expr::Reference { source, .. } => source.clone(),
+                        _ => {
+                            self.variables.truncate(prev_len);
+                            return Err("invalid_formula");
+                        }
+                    };
+                    let eval_res = self.evaluate(&arguments[val_idx], depth + 1);
+                    let val = match eval_res {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.variables.truncate(prev_len);
+                            return Err(e);
+                        }
+                    };
+                    self.variables.push((var_name.to_ascii_lowercase(), val));
+                }
+                let res = self.evaluate(&arguments[arguments.len() - 1], depth + 1);
+                self.variables.truncate(prev_len);
+                res
+            }
             "iferror" if arguments.len() == 2 => match self.eval_scalar(&arguments[0], depth + 1) {
                 Ok(FormulaValue::Error(_)) => self.evaluate(&arguments[1], depth + 1),
                 Ok(scalar) => Ok(EvalValue::Scalar(scalar)),
@@ -2058,9 +2134,8 @@ impl Evaluator<'_> {
             | "upper" | "lower" | "exact" | "rept" | "substitute" | "replace" | "char" | "code"
             | "clean" | "t" | "n" | "find" | "search" | "hyperlink" | "proper" | "unichar"
             | "unicode" | "hex2dec" | "dec2hex" | "bin2dec" | "dec2bin" | "oct2dec" | "dec2oct"
-            | "textjoin" | "textbefore" | "textafter" | "textsplit" | "base" | "decimal" => {
-                self.evaluate_string_function(name, arguments, depth + 1)
-            }
+            | "textjoin" | "textbefore" | "textafter" | "textsplit" | "base" | "decimal"
+            | "encodeurl" => self.evaluate_string_function(name, arguments, depth + 1),
             _ => Err("unsupported"),
         }
     }
@@ -2695,6 +2770,23 @@ impl Evaluator<'_> {
                         cols: num_cols,
                     })
                 }
+            }
+            "encodeurl" if arguments.len() == 1 => {
+                let scalar = self.eval_scalar(&arguments[0], depth + 1)?;
+                let text = to_string(&scalar)?;
+                use std::fmt::Write;
+                let mut out = String::with_capacity(text.len());
+                for b in text.as_bytes() {
+                    if b.is_ascii_alphanumeric() || matches!(*b, b'-' | b'_' | b'.' | b'~') {
+                        out.push(*b as char);
+                    } else {
+                        let _ = write!(out, "%{:02X}", b);
+                    }
+                    if out.len() > self.limits.max_string_bytes {
+                        return Err("resource_limit");
+                    }
+                }
+                Ok(EvalValue::Scalar(FormulaValue::String(out)))
             }
             _ => Err("unsupported"),
         }
@@ -5795,6 +5887,83 @@ mod tests {
         assert_eq!(
             evaluate_formula("=ROMAN(0)", Some("Data"), &test_cells, Default::default()).value,
             Some(FormulaValue::Error("#VALUE!".into()))
+        );
+
+        // LET scoped variable evaluation
+        assert_eq!(
+            evaluate_formula(
+                "=LET(x, 5, x + 1)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(6.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=LET(a, \"powersh\", b, \"ell\", CONCAT(a, b))",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("powershell".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=LET(x, 10, y, x * 2, z, y + 5, z)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(25.0))
+        );
+        // Nested LET with variable shadowing
+        assert_eq!(
+            evaluate_formula(
+                "=LET(x, 2, y, LET(x, 10, x * 3), x + y)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(32.0))
+        );
+
+        // ENCODEURL percent encoding
+        assert_eq!(
+            evaluate_formula(
+                "=ENCODEURL(\"Hello World!\")",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("Hello%20World%21".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ENCODEURL(\"cmd.exe /c whoami\")",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cmd.exe%20%2Fc%20whoami".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ENCODEURL(\"https://example.com/api?q=test&id=1\")",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String(
+                "https%3A%2F%2Fexample.com%2Fapi%3Fq%3Dtest%26id%3D1".into()
+            ))
         );
     }
 }
