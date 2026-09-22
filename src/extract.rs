@@ -636,6 +636,8 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("ifs")
                 || f_lower.contains("switch")
                 || f_lower.contains("xor")
+                || f_lower.contains("sequence")
+                || f_lower.contains("single")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -1395,6 +1397,9 @@ pub fn extract_macro_container(data: &[u8], limits: &Limits) -> Result<Extracted
 /// - Smuggled container payload binary, cloaked PE, or staged script (`VBA-CELL-032`, Critical)
 /// - Worksheet view evasion, hidden row/col cloaking, displaced view (`VBA-CELL-033`, High)
 /// - ActiveX XML object declaration anomaly and weaponized CLSID (`VBA-CELL-034`, Critical)
+/// - Word glossary document payload, template injection, or field codes (`VBA-CELL-035`, Critical)
+/// - Embedded font obfuscation, payload smuggling, or external font links (`VBA-CELL-036`, High)
+/// - Digital ink definition anomaly, interactive action trigger, or CLSID (`VBA-CELL-037`, High)
 pub fn scan_ooxml_package_threats(
     zip: &ZipArchive<'_>,
     threats: &mut Vec<CellThreat>,
@@ -3034,6 +3039,521 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_word_glossary_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let name_lower = entry_name.to_ascii_lowercase();
+
+        if name_lower.ends_with(".rels") {
+            let s = String::from_utf8_lossy(data);
+            let mut cursor = 0;
+            while cursor < s.len() {
+                if let Some(pos) = s[cursor..].find("<Relationship ") {
+                    let start = cursor + pos;
+                    let tag_end = s[start..].find('>').unwrap_or(s.len() - start);
+                    let tag = &s[start..start + tag_end];
+                    cursor = start + tag_end;
+
+                    let target = extract_attribute_value(tag, "Target").unwrap_or_default();
+                    let rel_type = extract_attribute_value(tag, "Type").unwrap_or_default();
+                    let target_mode =
+                        extract_attribute_value(tag, "TargetMode").unwrap_or_default();
+                    let t_lower = target.to_ascii_lowercase();
+                    let is_external = target_mode.eq_ignore_ascii_case("External")
+                        || t_lower.starts_with("http:")
+                        || t_lower.starts_with("https:")
+                        || t_lower.starts_with("\\\\");
+
+                    if rel_type.contains("attachedTemplate")
+                        || t_lower.ends_with(".dotm")
+                        || t_lower.ends_with(".dot")
+                    {
+                        results.push((
+                            "Critical",
+                            target.clone(),
+                            "glossary:templateInjection".into(),
+                            format!("Word glossary relationship specifies remote external template injection ('{target}')"),
+                        ));
+                    } else if t_lower.starts_with("ms-msdt:")
+                        || t_lower.starts_with("search-ms:")
+                        || t_lower.starts_with("ms-appinstaller:")
+                        || t_lower.starts_with("mhtml:")
+                        || t_lower.starts_with("javascript:")
+                        || t_lower.starts_with("vbscript:")
+                        || t_lower.starts_with("cmd:")
+                        || t_lower.starts_with("powershell:")
+                    {
+                        results.push((
+                            "Critical",
+                            target.clone(),
+                            "glossary:protocolHandler".into(),
+                            format!("Word glossary relationship references dangerous exploit protocol scheme ('{target}')"),
+                        ));
+                    } else if t_lower.ends_with(".exe")
+                        || t_lower.ends_with(".dll")
+                        || t_lower.ends_with(".sys")
+                        || t_lower.ends_with(".scr")
+                        || t_lower.ends_with(".bat")
+                        || t_lower.ends_with(".cmd")
+                        || t_lower.ends_with(".ps1")
+                        || t_lower.ends_with(".vbs")
+                        || t_lower.ends_with(".hta")
+                    {
+                        results.push((
+                            "Critical",
+                            target.clone(),
+                            "glossary:executableTarget".into(),
+                            format!("Word glossary relationship references executable or script target ('{target}')"),
+                        ));
+                    } else if t_lower.starts_with("\\\\") || t_lower.starts_with("//") {
+                        results.push((
+                            "High",
+                            target.clone(),
+                            "glossary:uncPath".into(),
+                            format!("Word glossary relationship references remote UNC path ('{target}') (NTLM coercion vector)"),
+                        ));
+                    } else if rel_type.contains("oleObject") && is_external {
+                        results.push((
+                            "High",
+                            target.clone(),
+                            "glossary:externalOle".into(),
+                            format!("Word glossary relationship references external OLE object ('{target}')"),
+                        ));
+                    } else if (rel_type.contains("subDocument") || rel_type.contains("frame"))
+                        && is_external
+                    {
+                        results.push((
+                            "High",
+                            target.clone(),
+                            "glossary:externalSubdoc".into(),
+                            format!("Word glossary relationship references external subdocument or frame ('{target}')"),
+                        ));
+                    }
+                } else {
+                    break;
+                }
+            }
+        } else if name_lower.ends_with(".xml") {
+            let s = String::from_utf8_lossy(data);
+            let s_lower = s.to_ascii_lowercase();
+
+            // Check field codes <w:fldSimple ...>
+            let mut cursor = 0;
+            while cursor < s.len() {
+                if let Some(pos) = s_lower[cursor..].find("<w:fldsimple") {
+                    let start = cursor + pos;
+                    let tag_end = s[start..].find('>').unwrap_or(s.len() - start);
+                    let tag = &s[start..start + tag_end];
+                    cursor = start + tag_end;
+
+                    if let Some(instr) = extract_attribute_value(tag, "w:instr") {
+                        let i_low = instr.to_ascii_lowercase();
+                        if i_low.contains("dde")
+                            || i_low.contains("exec")
+                            || i_low.contains("cmd")
+                            || i_low.contains("powershell")
+                            || i_low.contains("mshta")
+                        {
+                            results.push((
+                                "Critical",
+                                instr.clone(),
+                                "glossary:fieldCodeDDE".into(),
+                                format!("Word glossary field code specifies command execution via DDE/shell ('{instr}')"),
+                            ));
+                        } else if i_low.contains("includetext") || i_low.contains("link") {
+                            results.push((
+                                "High",
+                                instr.clone(),
+                                "glossary:fieldCodeInject".into(),
+                                format!("Word glossary field code specifies remote document injection ('{instr}')"),
+                            ));
+                        } else if i_low.contains("macrobutton") {
+                            results.push((
+                                "High",
+                                instr.clone(),
+                                "glossary:fieldCodeMacro".into(),
+                                format!("Word glossary field code specifies macrobutton trigger ('{instr}')"),
+                            ));
+                        } else if i_low.contains("filename \\p") || i_low.contains("\\\\") {
+                            results.push((
+                                "High",
+                                instr.clone(),
+                                "glossary:fieldCodeUNC".into(),
+                                format!(
+                                    "Word glossary field code specifies UNC path leak ('{instr}')"
+                                ),
+                            ));
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            // Check <w:instrText> runs
+            let mut text_cursor = 0;
+            while text_cursor < s.len() {
+                if let Some(pos) = s_lower[text_cursor..].find("<w:instrtext") {
+                    let start = text_cursor + pos;
+                    let open_close = s[start..].find('>').unwrap_or(s.len() - start);
+                    let body_start = start + open_close + 1;
+                    let body_end = s_lower[body_start..]
+                        .find("</w:instrtext>")
+                        .map(|idx| body_start + idx)
+                        .unwrap_or(s.len());
+                    text_cursor = body_end;
+
+                    let instr = s[body_start..body_end].trim();
+                    let i_low = instr.to_ascii_lowercase();
+                    if i_low.contains("dde")
+                        || i_low.contains("exec")
+                        || i_low.contains("cmd")
+                        || i_low.contains("powershell")
+                        || i_low.contains("mshta")
+                    {
+                        results.push((
+                            "Critical",
+                            instr.to_string(),
+                            "glossary:instrTextDDE".into(),
+                            format!("Word glossary instruction text specifies command execution via DDE/shell ('{instr}')"),
+                        ));
+                    } else if i_low.contains("includetext") || i_low.contains("link") {
+                        results.push((
+                            "High",
+                            instr.to_string(),
+                            "glossary:instrTextInject".into(),
+                            format!("Word glossary instruction text specifies remote document injection ('{instr}')"),
+                        ));
+                    } else if i_low.contains("macrobutton") {
+                        results.push((
+                            "High",
+                            instr.to_string(),
+                            "glossary:instrTextMacro".into(),
+                            format!("Word glossary instruction text specifies macrobutton trigger ('{instr}')"),
+                        ));
+                    } else if i_low.contains("filename \\p") || i_low.contains("\\\\") {
+                        results.push((
+                            "High",
+                            instr.to_string(),
+                            "glossary:instrTextUNC".into(),
+                            format!(
+                                "Word glossary instruction text specifies UNC path leak ('{instr}')"
+                            ),
+                        ));
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            // Check <w:altChunk>
+            if s_lower.contains("<w:altchunk") {
+                results.push((
+                    "High",
+                    "altChunk".into(),
+                    "glossary:altChunk".into(),
+                    "Word glossary document contains AltChunk payload reference".into(),
+                ));
+            }
+        }
+
+        results
+    }
+
+    fn scan_embedded_font_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let name_lower = entry_name.to_ascii_lowercase();
+
+        if name_lower.ends_with(".rels") {
+            let s = String::from_utf8_lossy(data);
+            let mut cursor = 0;
+            while cursor < s.len() {
+                if let Some(pos) = s[cursor..].find("<Relationship ") {
+                    let start = cursor + pos;
+                    let tag_end = s[start..].find('>').unwrap_or(s.len() - start);
+                    let tag = &s[start..start + tag_end];
+                    cursor = start + tag_end;
+
+                    let target = extract_attribute_value(tag, "Target").unwrap_or_default();
+                    let target_mode =
+                        extract_attribute_value(tag, "TargetMode").unwrap_or_default();
+                    let t_lower = target.to_ascii_lowercase();
+                    let is_external = target_mode.eq_ignore_ascii_case("External")
+                        || t_lower.starts_with("http:")
+                        || t_lower.starts_with("https:")
+                        || t_lower.starts_with("\\\\");
+
+                    if is_external {
+                        if t_lower.starts_with("\\\\") || t_lower.starts_with("//") {
+                            results.push((
+                                "High",
+                                target.clone(),
+                                "font:uncShare".into(),
+                                format!("Font relationship specifies remote UNC path '{target}' (NTLM coercion vector)"),
+                            ));
+                        } else if t_lower.starts_with("http:") || t_lower.starts_with("https:") {
+                            results.push((
+                                "High",
+                                target.clone(),
+                                "font:remoteUrl".into(),
+                                format!("Font relationship specifies remote external font download '{target}'"),
+                            ));
+                        } else if t_lower.ends_with(".exe")
+                            || t_lower.ends_with(".dll")
+                            || t_lower.ends_with(".scr")
+                            || t_lower.ends_with(".bat")
+                            || t_lower.ends_with(".ps1")
+                        {
+                            results.push((
+                                "Critical",
+                                target.clone(),
+                                "font:executableTarget".into(),
+                                format!(
+                                    "Font relationship references executable target '{target}'"
+                                ),
+                            ));
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+        } else if name_lower.ends_with(".odttf")
+            || name_lower.ends_with(".ttf")
+            || name_lower.ends_with(".woff")
+        {
+            // 1. Check raw PE binary
+            if data.starts_with(b"MZ") && data.len() >= 0x40 {
+                let pe_off =
+                    u32::from_le_bytes(data[0x3c..0x40].try_into().unwrap_or_default()) as usize;
+                if pe_off + 4 <= data.len() && &data[pe_off..pe_off + 4] == b"PE\0\0" {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "font:pePayload".into(),
+                        format!("Embedded font stream contains cloaked Windows PE executable binary (size: {} bytes)", data.len()),
+                    ));
+                    return results;
+                }
+            }
+
+            // 2. Check Windows Shell Link shortcut (.lnk)
+            if data.len() >= 0x4c && data[0..8] == [0x4c, 0x00, 0x02, 0x00, 0x01, 0x14, 0x02, 0x00]
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "font:lnkPayload".into(),
+                    format!("Embedded font stream contains Windows Shell Link shortcut payload (size: {} bytes)", data.len()),
+                ));
+                return results;
+            }
+
+            // 3. Check Linux ELF
+            if data.starts_with(b"\x7fELF") {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "font:elfPayload".into(),
+                    format!("Embedded font stream contains Linux ELF executable binary (size: {} bytes)", data.len()),
+                ));
+                return results;
+            }
+
+            // 4. Check Staged script
+            if data.starts_with(b"#!/bin/")
+                || (data.len() > 10
+                    && data[..100.min(data.len())]
+                        .to_ascii_lowercase()
+                        .windows(10)
+                        .any(|w| w == b"powershell"))
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "font:scriptPayload".into(),
+                    format!(
+                        "Embedded font stream contains staged script payload (size: {} bytes)",
+                        data.len()
+                    ),
+                ));
+                return results;
+            }
+
+            // 5. Check Obfuscated OpenType Font (.odttf) XOR de-masking
+            if name_lower.ends_with(".odttf") && data.len() >= 32 {
+                let filename = entry_name.rsplit(['/', '\\']).next().unwrap_or(entry_name);
+                let stem = filename.strip_suffix(".odttf").unwrap_or(filename);
+                let mut hex_bytes = Vec::new();
+                for b in stem.bytes() {
+                    if b.is_ascii_hexdigit() {
+                        hex_bytes.push(b);
+                    }
+                }
+                if hex_bytes.len() >= 32 {
+                    let mut guid = [0u8; 16];
+                    for i in 0..16 {
+                        let hi = match hex_bytes[i * 2] {
+                            b'0'..=b'9' => hex_bytes[i * 2] - b'0',
+                            b'a'..=b'f' => hex_bytes[i * 2] - b'a' + 10,
+                            b'A'..=b'F' => hex_bytes[i * 2] - b'A' + 10,
+                            _ => 0,
+                        };
+                        let lo = match hex_bytes[i * 2 + 1] {
+                            b'0'..=b'9' => hex_bytes[i * 2 + 1] - b'0',
+                            b'a'..=b'f' => hex_bytes[i * 2 + 1] - b'a' + 10,
+                            b'A'..=b'F' => hex_bytes[i * 2 + 1] - b'A' + 10,
+                            _ => 0,
+                        };
+                        guid[i] = (hi << 4) | lo;
+                    }
+                    let mut key = [0u8; 16];
+                    for i in 0..16 {
+                        key[i] = guid[15 - i];
+                    }
+                    let mut demasked = [0u8; 32];
+                    for i in 0..32 {
+                        demasked[i] = data[i] ^ key[i % 16];
+                    }
+                    if &demasked[0..2] == b"MZ" {
+                        results.push((
+                            "Critical",
+                            entry_name.to_string(),
+                            "font:odttfPePayload".into(),
+                            format!("Obfuscated font stream (.odttf) de-masks to Windows PE executable binary (size: {} bytes)", data.len()),
+                        ));
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    fn scan_digital_ink_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let name_lower = entry_name.to_ascii_lowercase();
+
+        if name_lower.ends_with(".rels") {
+            let s = String::from_utf8_lossy(data);
+            let mut cursor = 0;
+            while cursor < s.len() {
+                if let Some(pos) = s[cursor..].find("<Relationship ") {
+                    let start = cursor + pos;
+                    let tag_end = s[start..].find('>').unwrap_or(s.len() - start);
+                    let tag = &s[start..start + tag_end];
+                    cursor = start + tag_end;
+
+                    let target = extract_attribute_value(tag, "Target").unwrap_or_default();
+                    let target_mode =
+                        extract_attribute_value(tag, "TargetMode").unwrap_or_default();
+                    let t_lower = target.to_ascii_lowercase();
+                    let is_external = target_mode.eq_ignore_ascii_case("External")
+                        || t_lower.starts_with("http:")
+                        || t_lower.starts_with("https:")
+                        || t_lower.starts_with("\\\\");
+
+                    if is_external {
+                        if t_lower.starts_with("\\\\") || t_lower.starts_with("//") {
+                            results.push((
+                                "High",
+                                target.clone(),
+                                "ink:uncPath".into(),
+                                format!("Digital Ink relationship references remote UNC path '{target}' (NTLM coercion vector)"),
+                            ));
+                        } else if t_lower.starts_with("ms-msdt:")
+                            || t_lower.starts_with("search-ms:")
+                            || t_lower.starts_with("mhtml:")
+                            || t_lower.starts_with("javascript:")
+                            || t_lower.starts_with("vbscript:")
+                        {
+                            results.push((
+                                "Critical",
+                                target.clone(),
+                                "ink:protocolHandler".into(),
+                                format!("Digital Ink relationship references dangerous exploit protocol scheme ('{target}')"),
+                            ));
+                        } else if t_lower.ends_with(".exe")
+                            || t_lower.ends_with(".dll")
+                            || t_lower.ends_with(".scr")
+                            || t_lower.ends_with(".bat")
+                            || t_lower.ends_with(".ps1")
+                            || t_lower.ends_with(".vbs")
+                        {
+                            results.push((
+                                "Critical",
+                                target.clone(),
+                                "ink:executableTarget".into(),
+                                format!("Digital Ink relationship references executable or script target '{target}'"),
+                            ));
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+        } else if name_lower.ends_with(".xml") {
+            let s = String::from_utf8_lossy(data);
+            let s_lower = s.to_ascii_lowercase();
+
+            if s_lower.contains("<a:hlinkclick")
+                || s_lower.contains("<a:hlinkhover")
+                || s_lower.contains("ppaction://")
+            {
+                let is_command = s_lower.contains("ppaction://program")
+                    || s_lower.contains(".exe")
+                    || s_lower.contains(".bat")
+                    || s_lower.contains(".cmd")
+                    || s_lower.contains(".ps1")
+                    || s_lower.contains("powershell")
+                    || s_lower.contains("cmd.exe")
+                    || s_lower.contains("mshta");
+                let sev = if is_command { "Critical" } else { "High" };
+                results.push((
+                    sev,
+                    entry_name.to_string(),
+                    "ink:actionTrigger".into(),
+                    "Digital Ink annotation defines interactive action/hover trigger (command execution vector)".into(),
+                ));
+            }
+
+            if s_lower.contains("{72c24dd5-d70a-438b-8a42-98424b88afb8}")
+                || s_lower.contains("{0002ce02-0000-0000-c000-000000000046}")
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "ink:clsidAnomaly".into(),
+                    "Digital Ink markup references weaponized ActiveX / OLE CLSID".into(),
+                ));
+            }
+        } else if (name_lower.ends_with(".bin") || name_lower.ends_with(".isf"))
+            && data.starts_with(b"MZ")
+            && data.len() >= 0x40
+        {
+            let pe_off =
+                u32::from_le_bytes(data[0x3c..0x40].try_into().unwrap_or_default()) as usize;
+            if pe_off + 4 <= data.len() && &data[pe_off..pe_off + 4] == b"PE\0\0" {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "ink:pePayload".into(),
+                    format!("Digital Ink binary stream contains cloaked Windows PE executable binary (size: {} bytes)", data.len()),
+                ));
+            }
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -3116,6 +3636,97 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "ActiveXObjectDeclaration".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word Glossary Document Anomaly (VBA-CELL-035)
+        let is_glossary = name_lower.starts_with("word/glossary/")
+            || name_lower.contains("/glossary/")
+            || name_lower.contains("\\glossary\\");
+        if is_glossary && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_word_glossary_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Word glossary document anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Glossary".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "GlossaryDocumentAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Embedded Font Obfuscation or Smuggling (VBA-CELL-036)
+        let is_font_part = name_lower.contains("fonttable")
+            || name_lower.ends_with(".odttf")
+            || name_lower.ends_with(".ttf")
+            || name_lower.ends_with(".woff")
+            || name_lower.contains("/fonts/")
+            || name_lower.starts_with("fonts/")
+            || name_lower.contains("\\fonts\\");
+        if is_font_part && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_embedded_font_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Embedded font obfuscation or payload smuggling detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Fonts".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "EmbeddedFontSmuggling".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Digital Ink Definition Anomaly (VBA-CELL-037)
+        let is_ink_part = name_lower.contains("/ink/")
+            || name_lower.starts_with("ink/")
+            || name_lower.contains("\\ink\\")
+            || name_lower.ends_with(".isf")
+            || (name_lower.contains("ink")
+                && (name_lower.ends_with(".xml") || name_lower.ends_with(".bin")));
+        if is_ink_part && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_digital_ink_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Digital ink definition anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "DigitalInk".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "DigitalInkDefinitionAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,

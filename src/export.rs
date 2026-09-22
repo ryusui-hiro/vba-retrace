@@ -3065,6 +3065,9 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "SmuggledContainerPayload" => ("VBA-CELL-032", "error"),
         "WorksheetViewEvasion" => ("VBA-CELL-033", "warning"),
         "ActiveXObjectDeclaration" => ("VBA-CELL-034", "error"),
+        "GlossaryDocumentAnomaly" => ("VBA-CELL-035", "error"),
+        "EmbeddedFontObfuscation" | "EmbeddedFontSmuggling" => ("VBA-CELL-036", "error"),
+        "DigitalInkDefinitionAnomaly" | "DigitalInkActionAnomaly" => ("VBA-CELL-037", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3216,7 +3219,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-033\",\"name\":\"WorksheetViewEvasion\",\"shortDescription\":{\"text\":\"Worksheet View Evasion or Hidden Formula Cloaking\"},\"fullDescription\":{\"text\":\"Worksheet contains formulas cloaked in hidden rows or columns, extreme viewport scrolling (topLeftCell), or display header suppression to evade visual inspection.\"},\"defaultConfiguration\":{\"level\":\"warning\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-034\",\"name\":\"ActiveXObjectDeclarationAnomaly\",\"shortDescription\":{\"text\":\"ActiveX Object Declaration Anomaly or Weaponized CLSID\"},\"fullDescription\":{\"text\":\"ActiveX definition XML part (activeX*.xml) registers weaponized ActiveX CLSIDs (WScript.Shell, Equation Editor, Shell.Explorer, ADODB.Stream, Scriptlet.TypeLib) or properties with remote UNC/URL targets.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-034\",\"name\":\"ActiveXObjectDeclarationAnomaly\",\"shortDescription\":{\"text\":\"ActiveX Object Declaration Anomaly or Weaponized CLSID\"},\"fullDescription\":{\"text\":\"ActiveX definition XML part (activeX*.xml) registers weaponized ActiveX CLSIDs (WScript.Shell, Equation Editor, Shell.Explorer, ADODB.Stream, Scriptlet.TypeLib) or properties with remote UNC/URL targets.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-035\",\"name\":\"GlossaryDocumentAnomaly\",\"shortDescription\":{\"text\":\"Glossary Document Payload or External Relationship Anomaly\"},\"fullDescription\":{\"text\":\"Word glossary document tree (word/glossary/) contains external template injection, DDE/command field codes, dangerous URI protocols, or smuggled AltChunk payloads.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-036\",\"name\":\"EmbeddedFontObfuscationOrSmuggling\",\"shortDescription\":{\"text\":\"Embedded Font Obfuscation or Payload Smuggling\"},\"fullDescription\":{\"text\":\"Package font table or embedded font streams contain external UNC/HTTP links for credential coercion, or smuggled executable PE/script binaries cloaked within obfuscated font streams.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-037\",\"name\":\"DigitalInkDefinitionAnomaly\",\"shortDescription\":{\"text\":\"Digital Ink Definition Anomaly or Action Trigger\"},\"fullDescription\":{\"text\":\"Digital Ink annotations (ink*.xml, ink*.bin) contain hidden click/hover action triggers, external UNC/web targets, or embedded OLE/COM binary payloads.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));
