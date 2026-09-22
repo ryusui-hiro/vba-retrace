@@ -638,6 +638,8 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("xor")
                 || f_lower.contains("sequence")
                 || f_lower.contains("single")
+                || f_lower.contains("transpose")
+                || f_lower.contains("lookup")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -1400,6 +1402,9 @@ pub fn extract_macro_container(data: &[u8], limits: &Limits) -> Result<Extracted
 /// - Word glossary document payload, template injection, or field codes (`VBA-CELL-035`, Critical)
 /// - Embedded font obfuscation, payload smuggling, or external font links (`VBA-CELL-036`, High)
 /// - Digital ink definition anomaly, interactive action trigger, or CLSID (`VBA-CELL-037`, High)
+/// - Document property payload smuggling, Base64 PE, or staged scripts (`VBA-CELL-038`, Critical)
+/// - Office web extension or taskpane auto-show anomaly (`VBA-CELL-039`, Critical)
+/// - PivotCache data connection anomaly, UNC, or shell command injection (`VBA-CELL-040`, Critical)
 pub fn scan_ooxml_package_threats(
     zip: &ZipArchive<'_>,
     threats: &mut Vec<CellThreat>,
@@ -3554,6 +3559,398 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_document_property_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let name_lower = entry_name.to_ascii_lowercase();
+        let is_docprops = name_lower.starts_with("docprops/")
+            || name_lower.contains("/docprops/")
+            || name_lower.contains("\\docprops\\")
+            || name_lower.ends_with("core.xml")
+            || name_lower.ends_with("app.xml")
+            || name_lower.ends_with("custom.xml");
+
+        if !is_docprops {
+            return results;
+        }
+
+        let s = String::from_utf8_lossy(data);
+        let s_lower = s.to_ascii_lowercase();
+
+        // 1. Base64 PE header markers
+        'b64: for marker in &["tvqq", "tvoa", "tvpb", "tvpq"] {
+            let mut pos = 0;
+            while let Some(idx) = s_lower[pos..].find(marker) {
+                let abs = pos + idx;
+                let candidate = &s[abs..];
+                let b64_len = candidate
+                    .bytes()
+                    .take_while(|b| {
+                        b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/' || *b == b'='
+                    })
+                    .count();
+                if b64_len >= 64 {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "docProps:base64PePayload".into(),
+                        format!(
+                            "Document property contains smuggled Base64 Windows PE executable payload (length: {} chars)",
+                            b64_len
+                        ),
+                    ));
+                    break 'b64;
+                }
+                pos = abs + 4;
+            }
+        }
+
+        // 2. Hex-encoded PE header (4d5a9000)
+        if s_lower.contains("4d5a9000")
+            || (s_lower.contains("4d5a")
+                && s_lower.contains("this program cannot be run in dos mode"))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "docProps:hexPePayload".into(),
+                "Document property contains hex-encoded Windows PE executable binary header".into(),
+            ));
+        }
+
+        // 3. Dangerous protocol handlers
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "javascript:",
+            "vbscript:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "docProps:dangerousProtocol".into(),
+                    format!("Document property contains dangerous URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 4. Staged commands and script execution triggers
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+            "bitsadmin",
+            "bash.exe",
+            "wsl.exe",
+            "regsvr32",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "docProps:stagedScriptOrCommand".into(),
+                    format!("Document property contains staged shell execution command or script trigger: '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 5. External UNC paths for NTLM credential coercion
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || w == b"//") && i + 4 < data.len() {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "docProps:uncCoercion".into(),
+                        format!(
+                            "Document property contains external UNC path '{unc}' (NTLM coercion vector)"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        results
+    }
+
+    fn scan_web_extension_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let name_lower = entry_name.to_ascii_lowercase();
+        let is_webext = name_lower.contains("webextension") || name_lower.contains("taskpane");
+
+        if !is_webext {
+            return results;
+        }
+
+        if name_lower.ends_with(".rels") {
+            let mut pos = 0;
+            while let Some(idx) = data[pos..]
+                .windows(8)
+                .position(|w| w.eq_ignore_ascii_case(b"<relatio"))
+            {
+                let rel_start = pos + idx;
+                pos = rel_start + 8;
+                let rel_end = match data[rel_start..]
+                    .windows(2)
+                    .position(|w| w == b"/>" || w == b"\">")
+                {
+                    Some(p) => rel_start + p + 2,
+                    None => break,
+                };
+                let rel_bytes = &data[rel_start..rel_end];
+                let rel_str = String::from_utf8_lossy(rel_bytes);
+                let target = extract_attribute_value(&rel_str, "Target").unwrap_or_default();
+                let target_mode =
+                    extract_attribute_value(&rel_str, "TargetMode").unwrap_or_default();
+
+                if !target.is_empty() {
+                    let t_lower = target.to_ascii_lowercase();
+                    let is_external = target_mode.eq_ignore_ascii_case("External")
+                        || t_lower.starts_with("http:")
+                        || t_lower.starts_with("https:")
+                        || t_lower.starts_with("\\\\")
+                        || t_lower.starts_with("//");
+
+                    if is_external {
+                        if t_lower.starts_with("\\\\") || t_lower.starts_with("//") {
+                            results.push((
+                                "High",
+                                target.clone(),
+                                "webext:uncPath".into(),
+                                format!("Web extension / taskpane relationship references remote UNC path '{target}' (NTLM coercion vector)"),
+                            ));
+                        } else if t_lower.starts_with("ms-msdt:")
+                            || t_lower.starts_with("search-ms:")
+                            || t_lower.starts_with("mhtml:")
+                            || t_lower.starts_with("javascript:")
+                        {
+                            results.push((
+                                "Critical",
+                                target.clone(),
+                                "webext:protocolHandler".into(),
+                                format!("Web extension / taskpane relationship references dangerous exploit URI scheme '{target}'"),
+                            ));
+                        } else {
+                            results.push((
+                                "High",
+                                target.clone(),
+                                "webext:remoteTarget".into(),
+                                format!("Web extension / taskpane relationship targets external remote web server '{target}'"),
+                            ));
+                        }
+                    }
+                }
+            }
+        } else if name_lower.ends_with(".xml") {
+            let s = String::from_utf8_lossy(data);
+            let s_lower = s.to_ascii_lowercase();
+
+            // Auto-show taskpane check
+            if s_lower.contains("canautoshow=\"1\"")
+                || s_lower.contains("canautoshow=\"true\"")
+                || s_lower.contains("autoshow=\"1\"")
+                || s_lower.contains("autoshow=\"true\"")
+                || s_lower.contains("visibility=\"visible\"")
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "taskpane:autoShowTrigger".into(),
+                    "Office taskpane defines automatic display trigger (canAutoShow/visible), launching webview without user interaction".into(),
+                ));
+            }
+
+            // Dangerous protocol or URL in webextension XML
+            for proto in &[
+                "ms-msdt:",
+                "search-ms:",
+                "mhtml:",
+                "javascript:",
+                "powershell:",
+            ] {
+                if s_lower.contains(proto) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "webext:dangerousUri".into(),
+                        format!("Web extension markup contains dangerous protocol URI '{proto}'"),
+                    ));
+                }
+            }
+
+            // Script tags in web extension parts
+            if s_lower.contains("<script") || s_lower.contains("javascript:") {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "webext:embeddedScript".into(),
+                    "Web extension markup contains embedded script elements or JavaScript triggers"
+                        .into(),
+                ));
+            }
+        }
+
+        results
+    }
+
+    fn scan_pivot_cache_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let name_lower = entry_name.to_ascii_lowercase();
+        let is_pivot_cache = name_lower.contains("pivotcache");
+
+        if !is_pivot_cache {
+            return results;
+        }
+
+        if name_lower.ends_with(".rels") {
+            let mut pos = 0;
+            while let Some(idx) = data[pos..]
+                .windows(8)
+                .position(|w| w.eq_ignore_ascii_case(b"<relatio"))
+            {
+                let rel_start = pos + idx;
+                pos = rel_start + 8;
+                let rel_end = match data[rel_start..]
+                    .windows(2)
+                    .position(|w| w == b"/>" || w == b"\">")
+                {
+                    Some(p) => rel_start + p + 2,
+                    None => break,
+                };
+                let rel_bytes = &data[rel_start..rel_end];
+                let rel_str = String::from_utf8_lossy(rel_bytes);
+                let target = extract_attribute_value(&rel_str, "Target").unwrap_or_default();
+                let target_mode =
+                    extract_attribute_value(&rel_str, "TargetMode").unwrap_or_default();
+
+                if !target.is_empty() {
+                    let t_lower = target.to_ascii_lowercase();
+                    let is_external = target_mode.eq_ignore_ascii_case("External")
+                        || t_lower.starts_with("http:")
+                        || t_lower.starts_with("https:")
+                        || t_lower.starts_with("\\\\")
+                        || t_lower.starts_with("//");
+
+                    if is_external {
+                        if t_lower.starts_with("\\\\") || t_lower.starts_with("//") {
+                            results.push((
+                                "High",
+                                target.clone(),
+                                "pivotCache:uncPath".into(),
+                                format!("PivotCache relationship references remote UNC path '{target}' (NTLM coercion vector)"),
+                            ));
+                        } else if t_lower.starts_with("ms-msdt:")
+                            || t_lower.starts_with("search-ms:")
+                        {
+                            results.push((
+                                "Critical",
+                                target.clone(),
+                                "pivotCache:protocolHandler".into(),
+                                format!("PivotCache relationship references dangerous exploit URI scheme '{target}'"),
+                            ));
+                        } else {
+                            results.push((
+                                "High",
+                                target.clone(),
+                                "pivotCache:externalTarget".into(),
+                                format!("PivotCache relationship targets external remote data source '{target}'"),
+                            ));
+                        }
+                    }
+                }
+            }
+        } else if name_lower.ends_with(".xml") {
+            let s = String::from_utf8_lossy(data);
+            let s_lower = s.to_ascii_lowercase();
+
+            // 1. Database command execution
+            for cmd in &[
+                "xp_cmdshell",
+                "sp_oacreate",
+                "openrowset",
+                "bulk insert",
+                "powershell",
+                "cmd.exe",
+            ] {
+                if s_lower.contains(cmd) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "pivotCache:commandExecution".into(),
+                        format!("PivotCache definition contains database shell command execution trigger: '{cmd}'"),
+                    ));
+                    break;
+                }
+            }
+
+            // 2. UNC connection path
+            if s_lower.contains("data source=\\\\")
+                || s_lower.contains("data source=//")
+                || s_lower.contains("server=\\\\")
+                || s_lower.contains("server=//")
+                || s_lower.contains("location=\\\\")
+            {
+                results.push((
+                    "High",
+                    entry_name.to_string(),
+                    "pivotCache:uncConnection".into(),
+                    "PivotCache connection definition contains remote UNC path (NTLM credential coercion vector)".into(),
+                ));
+            }
+
+            // 3. Dangerous protocol or file targets
+            for proto in &["ms-msdt:", "search-ms:", "mhtml:"] {
+                if s_lower.contains(proto) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "pivotCache:dangerousProtocol".into(),
+                        format!(
+                            "PivotCache connection references dangerous URI protocol '{proto}'"
+                        ),
+                    ));
+                }
+            }
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -3727,6 +4124,89 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "DigitalInkDefinitionAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Document Property Payload Smuggling (VBA-CELL-038)
+        let is_docprops = name_lower.starts_with("docprops/")
+            || name_lower.contains("/docprops/")
+            || name_lower.contains("\\docprops\\")
+            || name_lower.ends_with("core.xml")
+            || name_lower.ends_with("app.xml")
+            || name_lower.ends_with("custom.xml");
+        if is_docprops && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_document_property_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Document property payload smuggling detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "DocProps".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "DocumentPropertyPayloadSmuggling".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Web Extension or Taskpane Anomaly (VBA-CELL-039)
+        let is_webext = name_lower.contains("webextension") || name_lower.contains("taskpane");
+        if is_webext && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_web_extension_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Web extension or taskpane anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "WebExtension".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "WebExtensionOrTaskpaneAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for PivotCache Data Connection Anomaly (VBA-CELL-040)
+        let is_pivot_cache = name_lower.contains("pivotcache");
+        if is_pivot_cache && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_pivot_cache_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "PivotCache data connection anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "PivotCache".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "PivotCacheDataConnectionAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,

