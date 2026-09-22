@@ -640,6 +640,13 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("single")
                 || f_lower.contains("transpose")
                 || f_lower.contains("lookup")
+                || f_lower.contains("delta")
+                || f_lower.contains("gestep")
+                || f_lower.contains("sign")
+                || f_lower.contains("lenb")
+                || f_lower.contains("leftb")
+                || f_lower.contains("rightb")
+                || f_lower.contains("midb")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -3951,6 +3958,256 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn percent_decode_simple(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let bytes = input.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if let Some(val) = (bytes[i] == b'%' && i + 2 < bytes.len())
+                .then(|| std::str::from_utf8(&bytes[i + 1..i + 3]).ok())
+                .flatten()
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+            {
+                out.push(val as char);
+                i += 3;
+                continue;
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+        out
+    }
+
+    fn scan_metafile_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let name_lower = entry_name.to_ascii_lowercase();
+
+        // 1. WMF SetAbortProc Exploit (CVE-2005-4560)
+        let is_wmf = name_lower.ends_with(".wmf")
+            || (data.len() >= 4 && data[0..4] == [0xD7, 0xCD, 0xC6, 0x9A])
+            || (data.len() >= 2 && (data[0..2] == [0x01, 0x00] || data[0..2] == [0x02, 0x00]));
+
+        if is_wmf && data.windows(2).any(|w| w == [0x2F, 0x05]) {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "metafile:setAbortProcExploit".into(),
+                "Windows Metafile (WMF) contains META_SETABORTPROC record (CVE-2005-4560 arbitrary code execution exploit)".into(),
+            ));
+        }
+
+        // 2. Embedded / cloaked Windows PE Executable
+        if let Some(mz_idx) = data.windows(2).position(|w| w == b"MZ") {
+            let scan_window = &data[mz_idx..data.len().min(mz_idx + 1024)];
+            if scan_window.windows(4).any(|w| w == b"PE\0\0") {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "metafile:cloakedPeExecutable".into(),
+                    "Metafile graphic stream contains cloaked Windows PE executable binary".into(),
+                ));
+            }
+        }
+
+        // 3. Embedded Windows Shell Link (.lnk) Payload
+        const LNK_GUID: [u8; 16] = [
+            0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x46,
+        ];
+        if data.windows(16).any(|w| w == LNK_GUID) {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "metafile:embeddedShellLink".into(),
+                "Metafile graphic stream contains embedded Windows Shell Link (.lnk) shortcut payload".into(),
+            ));
+        }
+
+        // 4. Shell Execution Commands or Staged Scripts
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+        for kw in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(kw) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "metafile:embeddedShellCommand".into(),
+                    format!(
+                        "Metafile graphic stream contains embedded shell execution command '{kw}'"
+                    ),
+                ));
+                break;
+            }
+        }
+
+        results
+    }
+
+    fn scan_xslt_transform_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        // 1. Executable MSXSL Script Elements
+        if s_lower.contains("<msxsl:script")
+            || s_lower.contains("<ms:script")
+            || s_lower.contains("<xsl:script")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "xslt:scriptExecution".into(),
+                "XML part contains executable MSXSL script element (macro-less arbitrary script execution)".into(),
+            ));
+        }
+
+        // 2. SaveThroughXslt or Remote Transform References
+        if s_lower.contains("<w:savethroughxslt")
+            || s_lower.contains("<w:transform")
+            || ((s_lower.contains("<xsl:stylesheet") || s_lower.contains("<xsl:transform"))
+                && (s_lower.contains("http://")
+                    || s_lower.contains("https://")
+                    || s_lower.contains(r"\\")))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "xslt:remoteTransformTarget".into(),
+                "XML part configures XSLT transform targeting remote external URI or UNC path"
+                    .into(),
+            ));
+        }
+
+        // 3. Dangerous XPath / XSLT Functions (document() SSRF / NTLM coercion)
+        if s_lower.contains("document('http")
+            || s_lower.contains("document(\"http")
+            || s_lower.contains("document('file")
+            || s_lower.contains("document(\"file")
+            || s_lower.contains("document('\\\\")
+            || s_lower.contains("document(\"\\\\")
+        {
+            results.push((
+                "High",
+                entry_name.to_string(),
+                "xslt:dangerousDocumentCall".into(),
+                "XSLT markup contains dangerous external document() invocation (SSRF / NTLM coercion vector)".into(),
+            ));
+        }
+
+        // 4. Windows Shell Automation Objects in XSLT Context
+        if (s_lower.contains("wscript.shell") || s_lower.contains("shell.application"))
+            && (s_lower.contains("xsl") || s_lower.contains("transform"))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "xslt:shellAutomationObject".into(),
+                "XSLT markup references Windows Shell COM automation object (WScript.Shell / Shell.Application)".into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_relationship_cloaking_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+
+        let mut pos = 0;
+        while let Some(idx) = data[pos..]
+            .windows(13)
+            .position(|w| w.eq_ignore_ascii_case(b"<relationship"))
+        {
+            let rel_start = pos + idx;
+            pos = rel_start + 13;
+            let rel_end = match data[rel_start..]
+                .windows(2)
+                .position(|w| w == b"/>" || w == b"\">")
+            {
+                Some(p) => rel_start + p + 2,
+                None => break,
+            };
+            let rel_bytes = &data[rel_start..rel_end];
+            let rel_str = String::from_utf8_lossy(rel_bytes);
+            let target = extract_attribute_value(&rel_str, "Target").unwrap_or_default();
+            let target_id = extract_attribute_value(&rel_str, "Id").unwrap_or_default();
+
+            if !target.is_empty() {
+                // 1. Null-byte or Unicode bidirectional override cloaking
+                let has_null = target.contains('\0') || target.contains("%00");
+                let has_override = target.chars().any(|c| {
+                    matches!(
+                        c,
+                        '\u{202A}'..='\u{202E}' | '\u{200B}'..='\u{200D}'
+                    )
+                });
+                if has_null || has_override {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        format!("rels:cloakingCharacter:{}", target_id),
+                        format!("Relationship Target contains evasion characters (null-byte or Unicode override) in '{target}'"),
+                    ));
+                }
+
+                // 2. Percent-encoded dangerous protocol evasion
+                let decoded = percent_decode_simple(&target);
+                let d_lower = decoded.to_ascii_lowercase();
+                let t_lower = target.to_ascii_lowercase();
+                for proto in &[
+                    "ms-msdt:",
+                    "search-ms:",
+                    "mhtml:",
+                    "javascript:",
+                    "vbscript:",
+                    "ms-appinstaller:",
+                ] {
+                    if d_lower.contains(proto) && !t_lower.contains(proto) {
+                        results.push((
+                            "Critical",
+                            entry_name.to_string(),
+                            format!("rels:percentEncodedProtocol:{}", target_id),
+                            format!("Relationship Target obfuscates dangerous protocol handler via percent-encoding '{proto}'"),
+                        ));
+                        break;
+                    }
+                }
+
+                // 3. Local IPC Named Pipe or Loopback Coercion
+                if target.starts_with(r"\\.\pipe\")
+                    || target.starts_with(r"\\.\PIPE\")
+                    || target.starts_with(r"\\127.0.0.1\")
+                    || target.starts_with(r"\\localhost\")
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        format!("rels:localIpcCoercion:{}", target_id),
+                        format!("Relationship Target references local IPC named pipe or loopback resource '{target}'"),
+                    ));
+                }
+            }
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -4207,6 +4464,91 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "PivotCacheDataConnectionAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Metafile Exploit or Payload Smuggling (VBA-CELL-041)
+        let is_metafile = name_lower.ends_with(".wmf")
+            || name_lower.ends_with(".emf")
+            || ((name_lower.starts_with("word/media/")
+                || name_lower.starts_with("xl/media/")
+                || name_lower.starts_with("ppt/media/"))
+                && (name_lower.contains(".wmf") || name_lower.contains(".emf")));
+        if is_metafile && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in scan_metafile_threats(&entry.name, data) {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Metafile exploit or payload smuggling detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Metafile".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "MetafileExploitOrPayloadSmuggling".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for XSLT Transform or Script Injection (VBA-CELL-042)
+        let is_xslt_part = name_lower.ends_with(".xsl")
+            || name_lower.ends_with(".xslt")
+            || name_lower.ends_with("styles.xml")
+            || name_lower.ends_with("settings.xml")
+            || name_lower.contains("customxml");
+        if is_xslt_part && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_xslt_transform_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "XSLT transform or script injection detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "XSLT".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "XsltTransformOrScriptInjection".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Relationship Target Cloaking or Evasion (VBA-CELL-043)
+        let is_rels_part = name_lower.ends_with(".rels");
+        if is_rels_part && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_relationship_cloaking_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Relationship target cloaking or evasion detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Package".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "RelationshipTargetCloakingOrEvasion".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,
