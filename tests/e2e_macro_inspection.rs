@@ -3750,3 +3750,222 @@ fn e2e_externallink_websettings_workbookprotection_and_lambda_helpers_inspection
         "JSON missing VBA-CELL-031"
     );
 }
+
+#[test]
+fn e2e_smuggled_payload_view_evasion_activex_and_array_stacking_inspection() {
+    let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetViews>
+    <sheetView workbookViewId="0" topLeftCell="ZZ5000" showGridLines="0" showRowColHeaders="0"/>
+  </sheetViews>
+  <cols>
+    <col min="2" max="2" hidden="1"/>
+  </cols>
+  <sheetData>
+    <row r="1">
+      <c r="A1">
+        <f>=CONCAT(VSTACK("cmd.exe", "|'/c calc'!A0"))</f>
+      </c>
+      <c r="B1">
+        <f>=EXEC("powershell.exe")</f>
+      </c>
+    </row>
+    <row r="100" hidden="1">
+      <c r="A100">
+        <f>=DDE("cmd", "/c calc")</f>
+      </c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    let workbook_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let activex_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<ocx:ocx xmlns:ocx="http://schemas.microsoft.com/office/2006/activeX" classid="{72C24DD5-D70A-438B-8A42-98424B88AFB8}">
+  <ocx:ocxPr name="PayloadPath" value="\\10.0.0.1\share\exploit.dll"/>
+</ocx:ocx>"#;
+
+    let content_types = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/word/activeX/activeX1.xml" ContentType="application/vnd.ms-office.activeX+xml"/>
+</Types>"#;
+
+    let root_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let wb_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    let project_bytes = synthesize_cfb_project(
+        "VBAProject",
+        &[("Module1", "Sub AutoOpen()\nEnd Sub\n", &[])],
+        &[],
+    );
+
+    // Synthesize PE executable disguised as PNG
+    let mut pe_disguised_png = vec![0u8; 80];
+    pe_disguised_png[0] = b'M';
+    pe_disguised_png[1] = b'Z';
+    pe_disguised_png[0x3c] = 0x40;
+    pe_disguised_png[0x40] = b'P';
+    pe_disguised_png[0x41] = b'E';
+
+    // Synthesize LNK file
+    let mut lnk_shortcut = vec![0u8; 32];
+    lnk_shortcut[0..8].copy_from_slice(&[0x4c, 0x00, 0x00, 0x00, 0x01, 0x14, 0x02, 0x00]);
+
+    let payload_exe = b"MZ\x90\x00DummyPayloadExecutableBytes";
+
+    let entries: Vec<(&str, &[u8])> = vec![
+        ("[Content_Types].xml", content_types),
+        ("_rels/.rels", root_rels),
+        ("xl/_rels/workbook.xml.rels", wb_rels),
+        ("xl/workbook.xml", workbook_xml),
+        ("xl/worksheets/sheet1.xml", sheet_xml),
+        ("word/activeX/activeX1.xml", activex_xml),
+        ("custom/payload.exe", payload_exe),
+        ("word/media/shortcut.lnk", &lnk_shortcut),
+        ("word/media/image1.png", &pe_disguised_png),
+        ("xl/vbaProject.bin", &project_bytes),
+    ];
+
+    let zip_bytes = synthesize_zip(&entries);
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("Inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify SmuggledContainerPayload (VBA-CELL-032)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "SmuggledContainerPayload"
+                && t.coordinate == "part:custom/payload.exe"
+                && t.severity == "Critical"),
+        "Should detect smuggled standalone executable extension: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "SmuggledContainerPayload"
+                && t.coordinate == "part:word/media/shortcut.lnk"
+                && t.severity == "Critical"),
+        "Should detect smuggled Shell Link shortcut: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "SmuggledContainerPayload"
+                && t.coordinate == "part:word/media/image1.png"
+                && t.severity == "Critical"),
+        "Should detect smuggled PE binary cloaked in image part: {threats:?}"
+    );
+
+    // 2. Verify WorksheetViewEvasion (VBA-CELL-033)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WorksheetViewEvasion"
+                && t.coordinate.contains("evasion:hiddenCell:B1")
+                && t.severity == "High"),
+        "Should detect formula cloaked in hidden column: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WorksheetViewEvasion"
+                && t.coordinate.contains("evasion:hiddenCell:A100")
+                && t.severity == "High"),
+        "Should detect formula cloaked in hidden row: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WorksheetViewEvasion"
+                && t.coordinate.contains("sheetView:topLeftCell:ZZ5000")
+                && t.severity == "High"),
+        "Should detect extreme topLeftCell scrolling: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WorksheetViewEvasion"
+                && t.coordinate.contains("sheetView:cloakedHeaders")
+                && t.severity == "Medium"),
+        "Should detect cloaked grid headers: {threats:?}"
+    );
+
+    // 3. Verify ActiveXObjectDeclaration (VBA-CELL-034)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "ActiveXObjectDeclaration"
+                && t.coordinate
+                    .contains("clsid:{72c24dd5-d70a-438b-8a42-98424b88afb8}")
+                && t.severity == "Critical"),
+        "Should detect weaponized WScript.Shell CLSID: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "ActiveXObjectDeclaration"
+                && t.coordinate.contains("prop:PayloadPath")
+                && t.severity == "High"),
+        "Should detect remote UNC property in ActiveX: {threats:?}"
+    );
+
+    // 4. Verify Dynamic Formula De-obfuscation via VSTACK in A1
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("cmd.exe|'/c calc'!A0")),
+        "Cell A1 should resolve DDE through VSTACK array stacking evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-032, VBA-CELL-033, VBA-CELL-034
+    let sarif = inspection_to_sarif(&inspection, "file:///test/smuggled_view_evasion.xlsm");
+    assert!(
+        sarif.contains("VBA-CELL-032"),
+        "SARIF must contain VBA-CELL-032 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-033"),
+        "SARIF must contain VBA-CELL-033 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-034"),
+        "SARIF must contain VBA-CELL-034 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-032, VBA-CELL-033, VBA-CELL-034
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-032\""),
+        "JSON missing VBA-CELL-032"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-033\""),
+        "JSON missing VBA-CELL-033"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-034\""),
+        "JSON missing VBA-CELL-034"
+    );
+}
