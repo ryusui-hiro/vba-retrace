@@ -3073,6 +3073,11 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
             ("VBA-CELL-039", "error")
         }
         "PivotCacheDataConnectionAnomaly" | "PivotCacheAnomaly" => ("VBA-CELL-040", "error"),
+        "MetafileExploitOrPayloadSmuggling" | "MetafileExploit" => ("VBA-CELL-041", "error"),
+        "XsltTransformOrScriptInjection" | "XsltTransformAnomaly" => ("VBA-CELL-042", "error"),
+        "RelationshipTargetCloakingOrEvasion" | "RelationshipCloakingAnomaly" => {
+            ("VBA-CELL-043", "error")
+        }
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3242,7 +3247,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-039\",\"name\":\"WebExtensionOrTaskpaneAnomaly\",\"shortDescription\":{\"text\":\"Web Extension or Taskpane Auto-Show Anomaly\"},\"fullDescription\":{\"text\":\"Office Web Add-in or Taskpane (webextensions/, taskpanes/) defines auto-show triggers (canAutoShow/visible), remote external web targets, dangerous URI schemes, or embedded script code.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-040\",\"name\":\"PivotCacheDataConnectionAnomaly\",\"shortDescription\":{\"text\":\"PivotCache Data Connection Anomaly or Command Injection\"},\"fullDescription\":{\"text\":\"Workbook PivotCache definition (xl/pivotCache/) contains external UNC connection paths for NTLM credential coercion, database shell execution commands (xp_cmdshell), or dangerous URI schemes.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-040\",\"name\":\"PivotCacheDataConnectionAnomaly\",\"shortDescription\":{\"text\":\"PivotCache Data Connection Anomaly or Command Injection\"},\"fullDescription\":{\"text\":\"Workbook PivotCache definition (xl/pivotCache/) contains external UNC connection paths for NTLM credential coercion, database shell execution commands (xp_cmdshell), or dangerous URI schemes.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-041\",\"name\":\"MetafileExploitOrPayloadSmuggling\",\"shortDescription\":{\"text\":\"Metafile Exploit or Payload Smuggling\"},\"fullDescription\":{\"text\":\"Windows Metafile (WMF/EMF) contains CVE-2005-4560 META_SETABORTPROC exploit records, embedded Windows PE executables, Windows Shell Links (.lnk), or embedded shell commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-042\",\"name\":\"XsltTransformOrScriptInjection\",\"shortDescription\":{\"text\":\"XSLT Transform or Script Injection\"},\"fullDescription\":{\"text\":\"XML part or stylesheet contains executable MSXSL script elements, external saveThroughXslt transform targets, dangerous document() SSRF/NTLM coercion functions, or Windows Shell automation objects.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-043\",\"name\":\"RelationshipTargetCloakingOrEvasion\",\"shortDescription\":{\"text\":\"Relationship Target Cloaking or Evasion\"},\"fullDescription\":{\"text\":\"Relationship Target contains evasion characters (null bytes or Unicode bidirectional overrides), percent-encoded dangerous URI schemes, or local IPC named pipe / loopback coercion targets.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

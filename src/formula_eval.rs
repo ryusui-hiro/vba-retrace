@@ -2505,6 +2505,41 @@ impl Evaluator<'_> {
                 let res = (num / multiple).round() * multiple;
                 Ok(EvalValue::Scalar(FormulaValue::Number(res)))
             }
+            "delta" if arguments.len() == 1 || arguments.len() == 2 => {
+                let n1 = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let n2 = if arguments.len() == 2 {
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?
+                } else {
+                    0.0
+                };
+                let res = if (n1 - n2).abs() < f64::EPSILON {
+                    1.0
+                } else {
+                    0.0
+                };
+                Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+            }
+            "gestep" if arguments.len() == 1 || arguments.len() == 2 => {
+                let num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let step = if arguments.len() == 2 {
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?
+                } else {
+                    0.0
+                };
+                let res = if num >= step { 1.0 } else { 0.0 };
+                Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+            }
+            "sign" if arguments.len() == 1 => {
+                let num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let res = if num > 0.0 {
+                    1.0
+                } else if num < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                };
+                Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+            }
             "take" | "drop" | "chooserows" | "choosecols" | "torow" | "tocol" | "expand"
             | "wraprows" | "wrapcols" | "filter" | "sort" | "sortby" | "unique" | "arraytotext"
             | "valuetotext" | "vstack" | "hstack" | "sequence" | "single" | "transpose" => {
@@ -2515,7 +2550,8 @@ impl Evaluator<'_> {
             | "clean" | "t" | "n" | "find" | "search" | "hyperlink" | "proper" | "unichar"
             | "unicode" | "hex2dec" | "dec2hex" | "bin2dec" | "dec2bin" | "oct2dec" | "dec2oct"
             | "textjoin" | "textbefore" | "textafter" | "textsplit" | "base" | "decimal"
-            | "encodeurl" | "bin2hex" | "hex2bin" | "oct2hex" | "hex2oct" | "numbervalue" => {
+            | "encodeurl" | "bin2hex" | "hex2bin" | "oct2hex" | "hex2oct" | "numbervalue"
+            | "lenb" | "leftb" | "rightb" | "midb" => {
                 self.evaluate_string_function(name, arguments, depth + 1)
             }
             "map" | "reduce" | "scan" | "byrow" | "bycol" | "makearray" | "isomitted" => {
@@ -3248,6 +3284,76 @@ impl Evaluator<'_> {
                 };
                 let val = number_value(&text, dec_sep.as_deref(), grp_sep.as_deref());
                 Ok(EvalValue::Scalar(val))
+            }
+            "lenb" if arguments.len() == 1 => {
+                let text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let count = string_dbcs_bytes(&text);
+                Ok(EvalValue::Scalar(FormulaValue::Number(count as f64)))
+            }
+            "leftb" if arguments.len() == 1 || arguments.len() == 2 => {
+                let text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let max_bytes = if arguments.len() == 2 {
+                    nonnegative_count(&self.eval_scalar(&arguments[1], depth + 1)?)?
+                } else {
+                    1
+                };
+                let mut accumulated = 0;
+                let mut result = String::new();
+                for c in text.chars() {
+                    let w = char_dbcs_bytes(c);
+                    if accumulated + w > max_bytes {
+                        break;
+                    }
+                    accumulated += w;
+                    result.push(c);
+                }
+                self.check_string_size(&result)?;
+                Ok(EvalValue::Scalar(FormulaValue::String(result)))
+            }
+            "rightb" if arguments.len() == 1 || arguments.len() == 2 => {
+                let text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let max_bytes = if arguments.len() == 2 {
+                    nonnegative_count(&self.eval_scalar(&arguments[1], depth + 1)?)?
+                } else {
+                    1
+                };
+                let mut accumulated = 0;
+                let mut chars_rev = Vec::new();
+                for c in text.chars().rev() {
+                    let w = char_dbcs_bytes(c);
+                    if accumulated + w > max_bytes {
+                        break;
+                    }
+                    accumulated += w;
+                    chars_rev.push(c);
+                }
+                chars_rev.reverse();
+                let result: String = chars_rev.into_iter().collect();
+                self.check_string_size(&result)?;
+                Ok(EvalValue::Scalar(FormulaValue::String(result)))
+            }
+            "midb" if arguments.len() == 3 => {
+                let text = to_string(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let start_byte = nonnegative_count(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let num_bytes = nonnegative_count(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                if start_byte == 0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                let end_byte = start_byte.saturating_add(num_bytes).saturating_sub(1);
+                let mut current_byte = 1;
+                let mut result = String::new();
+                for c in text.chars() {
+                    let w = char_dbcs_bytes(c);
+                    let char_start = current_byte;
+                    let char_end = current_byte + w - 1;
+                    current_byte += w;
+
+                    if char_start >= start_byte && char_end <= end_byte {
+                        result.push(c);
+                    }
+                }
+                self.check_string_size(&result)?;
+                Ok(EvalValue::Scalar(FormulaValue::String(result)))
             }
             _ => Err("unsupported"),
         }
@@ -4926,6 +5032,18 @@ fn number_value(text: &str, decimal_sep: Option<&str>, group_sep: Option<&str>) 
         }
         _ => FormulaValue::Error("#VALUE!".into()),
     }
+}
+
+fn char_dbcs_bytes(c: char) -> usize {
+    match c as u32 {
+        0x0000..=0x007F => 1,
+        0xFF61..=0xFF9F => 1,
+        _ => 2,
+    }
+}
+
+fn string_dbcs_bytes(s: &str) -> usize {
+    s.chars().map(char_dbcs_bytes).sum()
 }
 
 fn compare_formula_values(a: &FormulaValue, b: &FormulaValue) -> std::cmp::Ordering {
@@ -7635,6 +7753,189 @@ mod tests {
             )
             .value,
             Some(FormulaValue::String("cmd".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_math_branchless_and_dbcs_string_functions() {
+        let test_cells = vec![];
+
+        // 1. DELTA (Kronecker delta)
+        assert_eq!(
+            evaluate_formula("=DELTA(5, 5)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=DELTA(5, 4)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=DELTA(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+
+        // 2. GESTEP (Step function)
+        assert_eq!(
+            evaluate_formula("=GESTEP(5, 4)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=GESTEP(5, 5)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=GESTEP(3, 5)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=GESTEP(1)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+
+        // 3. SIGN
+        assert_eq!(
+            evaluate_formula("=SIGN(42)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=SIGN(-15)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(-1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=SIGN(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+
+        // 4. TRUNC
+        assert_eq!(
+            evaluate_formula("=TRUNC(8.9)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(8.0))
+        );
+        assert_eq!(
+            evaluate_formula("=TRUNC(-8.9)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(-8.0))
+        );
+        assert_eq!(
+            evaluate_formula("=TRUNC(8.912, 2)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(8.91))
+        );
+        assert_eq!(
+            evaluate_formula("=TRUNC(128.456, -1)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(120.0))
+        );
+
+        // 5. DBCS string functions: LENB, LEFTB, RIGHTB, MIDB
+        // "abc" -> ASCII (3 bytes)
+        // "日本語" -> 3 full-width Kanji (6 bytes)
+        assert_eq!(
+            evaluate_formula("=LENB(\"abc\")", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(3.0))
+        );
+        assert_eq!(
+            evaluate_formula("=LENB(\"日本語\")", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(6.0))
+        );
+        assert_eq!(
+            evaluate_formula("=LENB(\"cmd 日本\")", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(8.0)) // 3 + 1 (space) + 4 = 8
+        );
+
+        // LEFTB
+        assert_eq!(
+            evaluate_formula(
+                "=LEFTB(\"日本語\", 2)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("日".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=LEFTB(\"日本語\", 3)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("日".into())) // 3 bytes cannot fit "本" (needs 4), so stops at "日"
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=LEFTB(\"日本語\", 4)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("日本".into()))
+        );
+
+        // RIGHTB
+        assert_eq!(
+            evaluate_formula(
+                "=RIGHTB(\"日本語\", 2)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("語".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=RIGHTB(\"日本語\", 3)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("語".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=RIGHTB(\"日本語\", 4)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("本語".into()))
+        );
+
+        // MIDB
+        assert_eq!(
+            evaluate_formula(
+                "=MIDB(\"日本語\", 3, 2)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("本".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=MIDB(\"日本語\", 2, 2)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("".into())) // Byte 2 is mid-character, skipped, next character starts at 3 so doesn't fit
+        );
+
+        // De-obfuscation pipeline using DELTA + GESTEP + MIDB + CONCAT
+        assert_eq!(
+            evaluate_formula(
+                "=CONCAT(IF(DELTA(1, 1), \"p\", \"\"), IF(GESTEP(10, 5), \"owershell\", \"\"))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("powershell".into()))
         );
     }
 }
