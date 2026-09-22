@@ -2420,7 +2420,7 @@ impl Evaluator<'_> {
             }
             "take" | "drop" | "chooserows" | "choosecols" | "torow" | "tocol" | "expand"
             | "wraprows" | "wrapcols" | "filter" | "sort" | "sortby" | "unique" | "arraytotext"
-            | "valuetotext" | "vstack" | "hstack" => {
+            | "valuetotext" | "vstack" | "hstack" | "sequence" | "single" => {
                 self.evaluate_array_manipulation(name, arguments, depth + 1)
             }
             "len" | "left" | "right" | "mid" | "concatenate" | "concat" | "value" | "trim"
@@ -3174,6 +3174,70 @@ impl Evaluator<'_> {
     ) -> Result<EvalValue, &'static str> {
         if arguments.is_empty() {
             return Err("unsupported");
+        }
+        if name == "single" {
+            if arguments.len() != 1 {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
+            return match self.evaluate(&arguments[0], depth + 1)? {
+                EvalValue::Scalar(s) => Ok(EvalValue::Scalar(s)),
+                EvalValue::Range { mut values, .. } => {
+                    let first = if values.is_empty() {
+                        FormulaValue::Blank
+                    } else {
+                        values.swap_remove(0)
+                    };
+                    Ok(EvalValue::Scalar(first))
+                }
+                EvalValue::Lambda { .. } => {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())))
+                }
+            };
+        }
+        if name == "sequence" {
+            if arguments.len() > 4 {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
+            let rows_num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
+            if rows_num <= 0 {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
+            let cols_num = if arguments.len() >= 2 {
+                to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64
+            } else {
+                1
+            };
+            if cols_num <= 0 {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
+            let start = if arguments.len() >= 3 {
+                to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?
+            } else {
+                1.0
+            };
+            let step = if arguments.len() >= 4 {
+                to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?
+            } else {
+                1.0
+            };
+            let r = rows_num as usize;
+            let c = cols_num as usize;
+            let total = r.saturating_mul(c);
+            if total > 100_000 || total > self.limits.max_range_cells {
+                return Err("resource_limit");
+            }
+            if r == 1 && c == 1 {
+                return Ok(EvalValue::Scalar(FormulaValue::Number(start)));
+            }
+            let mut seq_values = Vec::with_capacity(total);
+            for i in 0..total {
+                seq_values.push(FormulaValue::Number(start + (i as f64) * step));
+            }
+            return Ok(EvalValue::Range {
+                values: seq_values,
+                rows: r,
+                cols: c,
+            });
         }
         if name == "vstack" || name == "hstack" {
             let mut grids: Vec<EvalGrid> = Vec::new();
@@ -7272,6 +7336,79 @@ mod tests {
         assert_eq!(
             evaluate_formula("=XOR(FALSE, FALSE)", None, &test_cells, Default::default()).value,
             Some(FormulaValue::Boolean(false))
+        );
+    }
+
+    #[test]
+    fn evaluates_sequence_and_single() {
+        let test_cells = vec![];
+
+        // SEQUENCE 1D (rows only)
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(SEQUENCE(4), 3, 1)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(3.0))
+        );
+
+        // SEQUENCE 2D with custom start and step
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(SEQUENCE(2, 3, 10, 5), 2, 2)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(30.0))
+        );
+
+        // SEQUENCE combined with MAP and LAMBDA for de-obfuscating string characters
+        assert_eq!(
+            evaluate_formula(
+                "=CONCAT(MAP(SEQUENCE(3), LAMBDA(i, MID(\"cmd\", i, 1))))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cmd".into()))
+        );
+
+        // SEQUENCE invalid bounds returns #VALUE!
+        assert_eq!(
+            evaluate_formula("=SEQUENCE(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#VALUE!".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=SEQUENCE(2, -1)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#VALUE!".into()))
+        );
+
+        // SINGLE
+        assert_eq!(
+            evaluate_formula(
+                "=SINGLE({10, 20; 30, 40})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(10.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=SINGLE(\"payload\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("payload".into()))
         );
     }
 }
