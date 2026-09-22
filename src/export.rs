@@ -3078,6 +3078,11 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "RelationshipTargetCloakingOrEvasion" | "RelationshipCloakingAnomaly" => {
             ("VBA-CELL-043", "error")
         }
+        "SmartArtOrDiagramPayloadAnomaly" | "SmartArtAnomaly" | "DiagramPayloadAnomaly" => {
+            ("VBA-CELL-044", "error")
+        }
+        "MailMergeDataSourceOrCoercionAnomaly" | "MailMergeAnomaly" => ("VBA-CELL-045", "error"),
+        "QueryTableOrExternalQueryAnomaly" | "QueryTableAnomaly" => ("VBA-CELL-046", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3256,7 +3261,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-042\",\"name\":\"XsltTransformOrScriptInjection\",\"shortDescription\":{\"text\":\"XSLT Transform or Script Injection\"},\"fullDescription\":{\"text\":\"XML part or stylesheet contains executable MSXSL script elements, external saveThroughXslt transform targets, dangerous document() SSRF/NTLM coercion functions, or Windows Shell automation objects.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-043\",\"name\":\"RelationshipTargetCloakingOrEvasion\",\"shortDescription\":{\"text\":\"Relationship Target Cloaking or Evasion\"},\"fullDescription\":{\"text\":\"Relationship Target contains evasion characters (null bytes or Unicode bidirectional overrides), percent-encoded dangerous URI schemes, or local IPC named pipe / loopback coercion targets.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-043\",\"name\":\"RelationshipTargetCloakingOrEvasion\",\"shortDescription\":{\"text\":\"Relationship Target Cloaking or Evasion\"},\"fullDescription\":{\"text\":\"Relationship Target contains evasion characters (null bytes or Unicode bidirectional overrides), percent-encoded dangerous URI schemes, or local IPC named pipe / loopback coercion targets.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-044\",\"name\":\"SmartArtOrDiagramPayloadAnomaly\",\"shortDescription\":{\"text\":\"SmartArt or Diagram Payload or Action Anomaly\"},\"fullDescription\":{\"text\":\"SmartArt diagram parts or relationships contain interactive click/hover actions, dangerous URI protocol handlers, remote UNC paths, or embedded executable/command payloads.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-045\",\"name\":\"MailMergeDataSourceOrCoercionAnomaly\",\"shortDescription\":{\"text\":\"Word MailMerge Data Source or Coercion Anomaly\"},\"fullDescription\":{\"text\":\"Word MailMerge settings (word/settings.xml) or relationships contain remote UNC paths for NTLM credential coercion, database command injection queries, or dangerous external data source targets.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-046\",\"name\":\"QueryTableOrExternalQueryAnomaly\",\"shortDescription\":{\"text\":\"Excel QueryTable or External Query Anomaly\"},\"fullDescription\":{\"text\":\"Excel QueryTable definition or relationships contain automatic refresh to remote Web Queries (.iqy), UNC credential coercion paths, or database command execution.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

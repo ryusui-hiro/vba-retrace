@@ -4208,6 +4208,366 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_smartart_diagram_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        // 1. Interactive click or hover actions
+        if s_lower.contains("<dgm:hlinkclick")
+            || s_lower.contains("<a:hlinkclick")
+            || s_lower.contains("<a:hlinkhover")
+            || s_lower.contains("ppaction://program")
+            || s_lower.contains("ppaction://macro")
+        {
+            let sev = if s_lower.contains("ppaction://program")
+                || s_lower.contains("powershell")
+                || s_lower.contains("cmd.exe")
+            {
+                "Critical"
+            } else {
+                "High"
+            };
+            results.push((
+                sev,
+                entry_name.to_string(),
+                "diagram:interactiveAction".into(),
+                "SmartArt diagram markup defines interactive click or hover action trigger".into(),
+            ));
+        }
+
+        // 2. Dangerous URI protocol handlers
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "ms-appinstaller:",
+            "mhtml:",
+            "powershell:",
+            "cmd:",
+            "wscript:",
+            "cscript:",
+            "javascript:",
+            "vbscript:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "diagram:dangerousProtocol".into(),
+                    format!("SmartArt diagram markup references dangerous URI protocol handler '{proto}'"),
+                ));
+                break;
+            }
+        }
+
+        // 3. Remote UNC paths for NTLM credential coercion
+        if s_lower.contains(r"\\") {
+            let mut has_unc = false;
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find(r"\\") {
+                let actual_pos = search_idx + pos;
+                let rem = &s_lower[actual_pos + 2..];
+                if let Some(first_char) = rem.chars().next()
+                    && (first_char.is_ascii_alphanumeric()
+                        || first_char == '.'
+                        || first_char == '[')
+                    && rem.contains('\\')
+                {
+                    has_unc = true;
+                    break;
+                }
+                search_idx = actual_pos + 2;
+            }
+            if has_unc {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "diagram:uncCoercion".into(),
+                    "SmartArt diagram markup contains remote UNC path (NTLM credential coercion vector)".into(),
+                ));
+            }
+        }
+
+        // 4. Cloaked Windows PE Executable or Shell Link or Staged Script
+        if let Some(mz_idx) = data.windows(2).position(|w| w == b"MZ") {
+            let scan_window = &data[mz_idx..data.len().min(mz_idx + 1024)];
+            if scan_window.windows(4).any(|w| w == b"PE\0\0") {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "diagram:cloakedPeExecutable".into(),
+                    "SmartArt diagram part contains cloaked Windows PE executable binary".into(),
+                ));
+            }
+        }
+
+        const LNK_GUID: [u8; 16] = [
+            0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x46,
+        ];
+        if data.windows(16).any(|w| w == LNK_GUID) {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "diagram:embeddedShellLink".into(),
+                "SmartArt diagram part contains embedded Windows Shell Link (.lnk) shortcut payload".into(),
+            ));
+        }
+
+        for kw in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(kw) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "diagram:shellExecutionCommand".into(),
+                    format!(
+                        "SmartArt diagram part contains embedded shell execution command '{kw}'"
+                    ),
+                ));
+                break;
+            }
+        }
+
+        results
+    }
+
+    fn scan_mail_merge_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        // 1. Check for MailMerge block in settings.xml
+        if s_lower.contains("<w:mailmerge") {
+            let mut has_unc = false;
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find(r"\\") {
+                let actual_pos = search_idx + pos;
+                let rem = &s_lower[actual_pos + 2..];
+                if let Some(first_char) = rem.chars().next()
+                    && (first_char.is_ascii_alphanumeric()
+                        || first_char == '.'
+                        || first_char == '[')
+                    && rem.contains('\\')
+                {
+                    has_unc = true;
+                    break;
+                }
+                search_idx = actual_pos + 2;
+            }
+            if has_unc {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "mailMerge:uncCoercion".into(),
+                    "Word MailMerge configuration contains remote UNC path for NTLM credential coercion".into(),
+                ));
+            }
+
+            for cmd in &[
+                "xp_cmdshell",
+                "sp_oacreate",
+                "openrowset",
+                "exec master",
+                "exec(",
+            ] {
+                if s_lower.contains(cmd) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "mailMerge:commandInjection".into(),
+                        format!("Word MailMerge configuration contains database execution command '{cmd}'"),
+                    ));
+                    break;
+                }
+            }
+
+            if (s_lower.contains("destination") && s_lower.contains("newdocument"))
+                || s_lower.contains("<w:linktoquery")
+            {
+                results.push((
+                    "High",
+                    entry_name.to_string(),
+                    "mailMerge:autoExecution".into(),
+                    "Word MailMerge configured with automatic document merge execution trigger"
+                        .into(),
+                ));
+            }
+        }
+
+        // 2. Check for MailMerge relationships pointing to dangerous targets
+        if entry_name.to_ascii_lowercase().ends_with(".rels") {
+            let mut pos = 0;
+            while let Some(idx) = data[pos..]
+                .windows(13)
+                .position(|w| w.eq_ignore_ascii_case(b"<relationship"))
+            {
+                let rel_start = pos + idx;
+                pos = rel_start + 13;
+                let rel_end = match data[rel_start..]
+                    .windows(2)
+                    .position(|w| w == b"/>" || w == b"\">")
+                {
+                    Some(p) => rel_start + p + 2,
+                    None => break,
+                };
+                let rel_bytes = &data[rel_start..rel_end];
+                let rel_str = String::from_utf8_lossy(rel_bytes);
+                let rel_type = extract_attribute_value(&rel_str, "Type")
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if rel_type.contains("mailmerge") {
+                    let target = extract_attribute_value(&rel_str, "Target").unwrap_or_default();
+                    let target_id = extract_attribute_value(&rel_str, "Id").unwrap_or_default();
+                    let t_lower = target.to_ascii_lowercase();
+
+                    if t_lower.starts_with(r"\\") {
+                        results.push((
+                            "Critical",
+                            entry_name.to_string(),
+                            format!("mailMerge:remoteUncTarget:{}", target_id),
+                            format!("Word MailMerge relationship targets remote UNC path '{target}' (NTLM coercion vector)"),
+                        ));
+                    } else if t_lower.starts_with("http://") || t_lower.starts_with("https://") {
+                        results.push((
+                            "High",
+                            entry_name.to_string(),
+                            format!("mailMerge:remoteHttpTarget:{}", target_id),
+                            format!("Word MailMerge relationship targets external HTTP/HTTPS data source '{target}'"),
+                        ));
+                    }
+
+                    for ext in &[
+                        ".iqy", ".hta", ".vbs", ".bat", ".ps1", ".exe", ".cmd", ".dll", ".scr",
+                    ] {
+                        if t_lower.ends_with(ext) || t_lower.contains(&format!("{ext}?")) {
+                            results.push((
+                                "Critical",
+                                entry_name.to_string(),
+                                format!("mailMerge:executableTarget:{}", target_id),
+                                format!("Word MailMerge relationship targets dangerous executable or script file '{target}'"),
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    fn scan_query_table_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        let has_auto_refresh = s_lower.contains("refreshonload=\"1\"")
+            || s_lower.contains("refreshonload=\"true\"")
+            || s_lower.contains("autorefresh=\"1\"")
+            || s_lower.contains("autorefresh=\"true\"");
+
+        if s_lower.contains(r"\\") {
+            let mut has_unc = false;
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find(r"\\") {
+                let actual_pos = search_idx + pos;
+                let rem = &s_lower[actual_pos + 2..];
+                if let Some(first_char) = rem.chars().next()
+                    && (first_char.is_ascii_alphanumeric()
+                        || first_char == '.'
+                        || first_char == '[')
+                    && rem.contains('\\')
+                {
+                    has_unc = true;
+                    break;
+                }
+                search_idx = actual_pos + 2;
+            }
+            if has_unc {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "queryTable:uncCoercion".into(),
+                    "Excel QueryTable connection target specifies remote UNC path (NTLM credential coercion)".into(),
+                ));
+            }
+        }
+
+        for ext in &[".iqy", ".dqy", ".rqy", ".oqy"] {
+            if s_lower.contains(ext) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "queryTable:webQueryFile".into(),
+                    format!("Excel QueryTable references external Web Query file '{ext}' (remote payload vector)"),
+                ));
+                break;
+            }
+        }
+
+        for cmd in &[
+            "xp_cmdshell",
+            "sp_oacreate",
+            "openrowset",
+            "exec(",
+            "exec master",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "queryTable:commandExecution".into(),
+                    format!("Excel QueryTable contains database shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        for env_token in &["%username%", "%userdomain%", "%computername%"] {
+            if s_lower.contains(env_token) {
+                results.push((
+                    "High",
+                    entry_name.to_string(),
+                    "queryTable:envExfiltration".into(),
+                    format!("Excel QueryTable connection URL contains environment variable exfiltration token '{env_token}'"),
+                ));
+                break;
+            }
+        }
+
+        if has_auto_refresh
+            && (s_lower.contains("http://")
+                || s_lower.contains("https://")
+                || s_lower.contains("connection"))
+        {
+            results.push((
+                "High",
+                entry_name.to_string(),
+                "queryTable:autoRefreshEnabled".into(),
+                "Excel QueryTable configured to automatically refresh external connection upon opening without user interaction".into(),
+            ));
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -4549,6 +4909,88 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "RelationshipTargetCloakingOrEvasion".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for SmartArt / Diagram Manipulation & Payload Smuggling (VBA-CELL-044)
+        let is_diagram_part = name_lower.contains("/diagrams/")
+            || name_lower.starts_with("diagrams/")
+            || (name_lower.contains("diagram") && name_lower.ends_with(".xml"))
+            || (name_lower.contains("diagrams") && name_lower.ends_with(".rels"));
+        if is_diagram_part && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_smartart_diagram_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "SmartArt diagram payload or action anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Diagram".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "SmartArtOrDiagramPayloadAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word MailMerge Coercion & External Source Hijacking (VBA-CELL-045)
+        let is_mail_merge_part = name_lower.ends_with("settings.xml")
+            || name_lower.ends_with("settings.xml.rels")
+            || name_lower.contains("mailmerge");
+        if is_mail_merge_part && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in scan_mail_merge_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Word MailMerge data source or coercion anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "MailMerge".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "MailMergeDataSourceOrCoercionAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Excel QueryTable & External Query Threats (VBA-CELL-046)
+        let is_query_table_part = name_lower.contains("querytable");
+        if is_query_table_part && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_query_table_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Excel QueryTable or external query anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "QueryTable".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "QueryTableOrExternalQueryAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,

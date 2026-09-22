@@ -1367,6 +1367,163 @@ impl Evaluator<'_> {
                 let res = if n >= step { 1.0 } else { 0.0 };
                 Ok(EvalValue::Scalar(FormulaValue::Number(res)))
             }
+            "quotient" if arguments.len() == 2 => {
+                let num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let den = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                if den == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number((num / den).trunc())))
+                }
+            }
+            "even" if arguments.len() == 1 => {
+                let num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if num == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(0.0)))
+                } else if num > 0.0 {
+                    let ceil = num.ceil();
+                    let res = if (ceil as i64) % 2 != 0 {
+                        ceil + 1.0
+                    } else {
+                        ceil
+                    };
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                } else {
+                    let floor = num.floor();
+                    let res = if (floor as i64).abs() % 2 != 0 {
+                        floor - 1.0
+                    } else {
+                        floor
+                    };
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                }
+            }
+            "odd" if arguments.len() == 1 => {
+                let num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if num == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(1.0)))
+                } else if num > 0.0 {
+                    let ceil = num.ceil();
+                    let res = if (ceil as i64) % 2 == 0 {
+                        ceil + 1.0
+                    } else {
+                        ceil
+                    };
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                } else {
+                    let floor = num.floor();
+                    let res = if (floor as i64).abs() % 2 == 0 {
+                        floor - 1.0
+                    } else {
+                        floor
+                    };
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                }
+            }
+            "fact" if arguments.len() == 1 => {
+                let num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if !(0.0..=170.0).contains(&num) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    let n = num.trunc() as u64;
+                    let mut f: f64 = 1.0;
+                    for i in 2..=n {
+                        f *= i as f64;
+                    }
+                    Ok(EvalValue::Scalar(FormulaValue::Number(f)))
+                }
+            }
+            "factdouble" if arguments.len() == 1 => {
+                let num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let n = num.trunc() as i64;
+                if !(-1..=300).contains(&n) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else if n == -1 || n == 0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(1.0)))
+                } else {
+                    let mut f: f64 = 1.0;
+                    let mut curr = n;
+                    while curr > 1 {
+                        f *= curr as f64;
+                        curr -= 2;
+                    }
+                    Ok(EvalValue::Scalar(FormulaValue::Number(f)))
+                }
+            }
+            "gcd" if !arguments.is_empty() => {
+                let mut nums = Vec::new();
+                for arg in arguments {
+                    match self.evaluate(arg, depth + 1)? {
+                        EvalValue::Scalar(val) => {
+                            if let FormulaValue::Error(err) = val {
+                                return Ok(EvalValue::Scalar(FormulaValue::Error(err)));
+                            }
+                            nums.push(to_number(&val)?);
+                        }
+                        EvalValue::Range { values, .. } => {
+                            for val in values {
+                                if let FormulaValue::Error(err) = val {
+                                    return Ok(EvalValue::Scalar(FormulaValue::Error(err)));
+                                }
+                                if let Ok(n) = to_number(&val) {
+                                    nums.push(n);
+                                }
+                            }
+                        }
+                        EvalValue::Lambda { .. } => {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                        }
+                    }
+                }
+                if nums.is_empty() {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                if nums.iter().any(|&n| n < 0.0) {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let mut g = nums[0].trunc() as u64;
+                for n in &nums[1..] {
+                    g = calc_gcd(g, n.trunc() as u64);
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Number(g as f64)))
+            }
+            "lcm" if !arguments.is_empty() => {
+                let mut nums = Vec::new();
+                for arg in arguments {
+                    match self.evaluate(arg, depth + 1)? {
+                        EvalValue::Scalar(val) => {
+                            if let FormulaValue::Error(err) = val {
+                                return Ok(EvalValue::Scalar(FormulaValue::Error(err)));
+                            }
+                            nums.push(to_number(&val)?);
+                        }
+                        EvalValue::Range { values, .. } => {
+                            for val in values {
+                                if let FormulaValue::Error(err) = val {
+                                    return Ok(EvalValue::Scalar(FormulaValue::Error(err)));
+                                }
+                                if let Ok(n) = to_number(&val) {
+                                    nums.push(n);
+                                }
+                            }
+                        }
+                        EvalValue::Lambda { .. } => {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                        }
+                    }
+                }
+                if nums.is_empty() {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+                if nums.iter().any(|&n| n < 0.0) {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let mut l = nums[0].trunc() as u64;
+                for n in &nums[1..] {
+                    l = calc_lcm(l, n.trunc() as u64);
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Number(l as f64)))
+            }
             "pi" if arguments.is_empty() => Ok(EvalValue::Scalar(FormulaValue::Number(
                 std::f64::consts::PI,
             ))),
@@ -2503,41 +2660,6 @@ impl Evaluator<'_> {
                     return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
                 }
                 let res = (num / multiple).round() * multiple;
-                Ok(EvalValue::Scalar(FormulaValue::Number(res)))
-            }
-            "delta" if arguments.len() == 1 || arguments.len() == 2 => {
-                let n1 = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
-                let n2 = if arguments.len() == 2 {
-                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?
-                } else {
-                    0.0
-                };
-                let res = if (n1 - n2).abs() < f64::EPSILON {
-                    1.0
-                } else {
-                    0.0
-                };
-                Ok(EvalValue::Scalar(FormulaValue::Number(res)))
-            }
-            "gestep" if arguments.len() == 1 || arguments.len() == 2 => {
-                let num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
-                let step = if arguments.len() == 2 {
-                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?
-                } else {
-                    0.0
-                };
-                let res = if num >= step { 1.0 } else { 0.0 };
-                Ok(EvalValue::Scalar(FormulaValue::Number(res)))
-            }
-            "sign" if arguments.len() == 1 => {
-                let num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
-                let res = if num > 0.0 {
-                    1.0
-                } else if num < 0.0 {
-                    -1.0
-                } else {
-                    0.0
-                };
                 Ok(EvalValue::Scalar(FormulaValue::Number(res)))
             }
             "take" | "drop" | "chooserows" | "choosecols" | "torow" | "tocol" | "expand"
@@ -5229,6 +5351,23 @@ fn from_roman(raw: &str) -> FormulaValue {
     }
     let res = if is_negative { -total } else { total };
     FormulaValue::Number(res as f64)
+}
+
+fn calc_gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+fn calc_lcm(a: u64, b: u64) -> u64 {
+    if a == 0 || b == 0 {
+        0
+    } else {
+        (a / calc_gcd(a, b)).saturating_mul(b)
+    }
 }
 
 #[cfg(test)]
@@ -7936,6 +8075,117 @@ mod tests {
             )
             .value,
             Some(FormulaValue::String("powershell".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_quotient_even_odd_fact_gcd_lcm_functions() {
+        let test_cells = vec![];
+
+        // QUOTIENT
+        assert_eq!(
+            evaluate_formula("=QUOTIENT(10, 3)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(3.0))
+        );
+        assert_eq!(
+            evaluate_formula("=QUOTIENT(-10, 3)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(-3.0))
+        );
+        assert_eq!(
+            evaluate_formula("=QUOTIENT(5, 0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#DIV/0!".into()))
+        );
+
+        // EVEN
+        assert_eq!(
+            evaluate_formula("=EVEN(1.5)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula("=EVEN(3)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(4.0))
+        );
+        assert_eq!(
+            evaluate_formula("=EVEN(-1)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(-2.0))
+        );
+        assert_eq!(
+            evaluate_formula("=EVEN(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+
+        // ODD
+        assert_eq!(
+            evaluate_formula("=ODD(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ODD(1.5)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(3.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ODD(2)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(3.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ODD(-2)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(-3.0))
+        );
+
+        // FACT & FACTDOUBLE
+        assert_eq!(
+            evaluate_formula("=FACT(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=FACT(4)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(24.0))
+        );
+        assert_eq!(
+            evaluate_formula("=FACT(-1)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#NUM!".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=FACTDOUBLE(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=FACTDOUBLE(5)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(15.0))
+        );
+        assert_eq!(
+            evaluate_formula("=FACTDOUBLE(6)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(48.0))
+        );
+
+        // GCD & LCM
+        assert_eq!(
+            evaluate_formula("=GCD(24, 36)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(12.0))
+        );
+        assert_eq!(
+            evaluate_formula("=GCD(12, 18, 24)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(6.0))
+        );
+        assert_eq!(
+            evaluate_formula("=LCM(4, 6)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(12.0))
+        );
+        assert_eq!(
+            evaluate_formula("=LCM(3, 4, 5)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(60.0))
+        );
+
+        // Arithmetic De-obfuscation
+        assert_eq!(
+            evaluate_formula(
+                "=CONCAT(CHAR(GCD(130, 195)), CHAR(QUOTIENT(232, 2)), CHAR(FACT(4) + 43))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("AtC".into()))
         );
     }
 }
