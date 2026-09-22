@@ -3068,6 +3068,11 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "GlossaryDocumentAnomaly" => ("VBA-CELL-035", "error"),
         "EmbeddedFontObfuscation" | "EmbeddedFontSmuggling" => ("VBA-CELL-036", "error"),
         "DigitalInkDefinitionAnomaly" | "DigitalInkActionAnomaly" => ("VBA-CELL-037", "error"),
+        "DocumentPropertyPayloadSmuggling" | "DocumentPropertyAnomaly" => ("VBA-CELL-038", "error"),
+        "WebExtensionOrTaskpaneAnomaly" | "WebExtensionAnomaly" | "TaskpaneAnomaly" => {
+            ("VBA-CELL-039", "error")
+        }
+        "PivotCacheDataConnectionAnomaly" | "PivotCacheAnomaly" => ("VBA-CELL-040", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3228,7 +3233,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-036\",\"name\":\"EmbeddedFontObfuscationOrSmuggling\",\"shortDescription\":{\"text\":\"Embedded Font Obfuscation or Payload Smuggling\"},\"fullDescription\":{\"text\":\"Package font table or embedded font streams contain external UNC/HTTP links for credential coercion, or smuggled executable PE/script binaries cloaked within obfuscated font streams.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-037\",\"name\":\"DigitalInkDefinitionAnomaly\",\"shortDescription\":{\"text\":\"Digital Ink Definition Anomaly or Action Trigger\"},\"fullDescription\":{\"text\":\"Digital Ink annotations (ink*.xml, ink*.bin) contain hidden click/hover action triggers, external UNC/web targets, or embedded OLE/COM binary payloads.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-037\",\"name\":\"DigitalInkDefinitionAnomaly\",\"shortDescription\":{\"text\":\"Digital Ink Definition Anomaly or Action Trigger\"},\"fullDescription\":{\"text\":\"Digital Ink annotations (ink*.xml, ink*.bin) contain hidden click/hover action triggers, external UNC/web targets, or embedded OLE/COM binary payloads.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-038\",\"name\":\"DocumentPropertyPayloadSmuggling\",\"shortDescription\":{\"text\":\"Document Property Payload Smuggling or Staged Script\"},\"fullDescription\":{\"text\":\"Document properties (docProps/core.xml, custom.xml, app.xml) contain smuggled Base64 Windows PE binaries, shell execution commands, dangerous protocol schemes, or remote UNC paths.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-039\",\"name\":\"WebExtensionOrTaskpaneAnomaly\",\"shortDescription\":{\"text\":\"Web Extension or Taskpane Auto-Show Anomaly\"},\"fullDescription\":{\"text\":\"Office Web Add-in or Taskpane (webextensions/, taskpanes/) defines auto-show triggers (canAutoShow/visible), remote external web targets, dangerous URI schemes, or embedded script code.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-040\",\"name\":\"PivotCacheDataConnectionAnomaly\",\"shortDescription\":{\"text\":\"PivotCache Data Connection Anomaly or Command Injection\"},\"fullDescription\":{\"text\":\"Workbook PivotCache definition (xl/pivotCache/) contains external UNC connection paths for NTLM credential coercion, database shell execution commands (xp_cmdshell), or dangerous URI schemes.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

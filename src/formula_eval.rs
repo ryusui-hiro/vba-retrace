@@ -1743,6 +1743,93 @@ impl Evaluator<'_> {
                     }
                 }
             }
+            "lookup" => {
+                if !(2..=3).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let lookup_val = self.eval_scalar(&arguments[0], depth + 1)?;
+                if arguments.len() == 3 {
+                    // Vector form: LOOKUP(lookup_value, lookup_vector, result_vector)
+                    let lookup_target = self.evaluate(&arguments[1], depth + 1)?;
+                    let lookup_vals = match lookup_target {
+                        EvalValue::Range { values, .. } => values,
+                        EvalValue::Scalar(s) => vec![s],
+                        _ => return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                    };
+                    let result_target = self.evaluate(&arguments[2], depth + 1)?;
+                    let result_vals = match result_target {
+                        EvalValue::Range { values, .. } => values,
+                        EvalValue::Scalar(s) => vec![s],
+                        _ => return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                    };
+                    let mut best_idx: Option<usize> = None;
+                    for (i, v) in lookup_vals.iter().enumerate() {
+                        if values_less_than_or_equal(v, &lookup_val) {
+                            best_idx = Some(i);
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Some(idx) = best_idx {
+                        if idx < result_vals.len() {
+                            Ok(EvalValue::Scalar(result_vals[idx].clone()))
+                        } else {
+                            Ok(EvalValue::Scalar(FormulaValue::Error("#REF!".into())))
+                        }
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                    }
+                } else {
+                    // Array form: LOOKUP(lookup_value, array)
+                    let target = self.evaluate(&arguments[1], depth + 1)?;
+                    let (values, rows, cols) = match target {
+                        EvalValue::Range { values, rows, cols } => (values, rows, cols),
+                        EvalValue::Scalar(s) => (vec![s], 1, 1),
+                        _ => return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                    };
+                    if rows == 1 && cols == 1 {
+                        if values_equal(&lookup_val, &values[0])
+                            || values_less_than_or_equal(&values[0], &lookup_val)
+                        {
+                            return Ok(EvalValue::Scalar(values[0].clone()));
+                        } else {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())));
+                        }
+                    }
+                    if cols > rows {
+                        // Wide array: search first row, return from last row
+                        let mut best_col: Option<usize> = None;
+                        for (c, first_val) in values.iter().take(cols).enumerate() {
+                            if values_less_than_or_equal(first_val, &lookup_val) {
+                                best_col = Some(c);
+                            } else {
+                                break;
+                            }
+                        }
+                        if let Some(c) = best_col {
+                            Ok(EvalValue::Scalar(values[(rows - 1) * cols + c].clone()))
+                        } else {
+                            Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                        }
+                    } else {
+                        // Tall or square array: search first column, return from last column
+                        let mut best_row: Option<usize> = None;
+                        for r in 0..rows {
+                            let first_val = &values[r * cols];
+                            if values_less_than_or_equal(first_val, &lookup_val) {
+                                best_row = Some(r);
+                            } else {
+                                break;
+                            }
+                        }
+                        if let Some(r) = best_row {
+                            Ok(EvalValue::Scalar(values[r * cols + (cols - 1)].clone()))
+                        } else {
+                            Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
+                        }
+                    }
+                }
+            }
             "indirect" => {
                 if !(1..=2).contains(&arguments.len()) {
                     return Err("unsupported");
@@ -2420,7 +2507,7 @@ impl Evaluator<'_> {
             }
             "take" | "drop" | "chooserows" | "choosecols" | "torow" | "tocol" | "expand"
             | "wraprows" | "wrapcols" | "filter" | "sort" | "sortby" | "unique" | "arraytotext"
-            | "valuetotext" | "vstack" | "hstack" | "sequence" | "single" => {
+            | "valuetotext" | "vstack" | "hstack" | "sequence" | "single" | "transpose" => {
                 self.evaluate_array_manipulation(name, arguments, depth + 1)
             }
             "len" | "left" | "right" | "mid" | "concatenate" | "concat" | "value" | "trim"
@@ -3188,6 +3275,37 @@ impl Evaluator<'_> {
                         values.swap_remove(0)
                     };
                     Ok(EvalValue::Scalar(first))
+                }
+                EvalValue::Lambda { .. } => {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())))
+                }
+            };
+        }
+        if name == "transpose" {
+            if arguments.len() != 1 {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
+            return match self.evaluate(&arguments[0], depth + 1)? {
+                EvalValue::Scalar(s) => Ok(EvalValue::Scalar(s)),
+                EvalValue::Range { values, rows, cols } => {
+                    if rows == 1 && cols == 1 {
+                        return Ok(EvalValue::Scalar(
+                            values.into_iter().next().unwrap_or(FormulaValue::Blank),
+                        ));
+                    }
+                    let new_rows = cols;
+                    let new_cols = rows;
+                    let mut transposed = Vec::with_capacity(values.len());
+                    for r_new in 0..new_rows {
+                        for c_new in 0..new_cols {
+                            transposed.push(values[c_new * cols + r_new].clone());
+                        }
+                    }
+                    Ok(EvalValue::Range {
+                        values: transposed,
+                        rows: new_rows,
+                        cols: new_cols,
+                    })
                 }
                 EvalValue::Lambda { .. } => {
                     Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())))
@@ -7409,6 +7527,114 @@ mod tests {
             )
             .value,
             Some(FormulaValue::String("payload".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_transpose_and_lookup() {
+        let test_cells = vec![];
+
+        // 1. TRANSPOSE matrix 2x2
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(TRANSPOSE({10, 20; 30, 40}), 1, 2)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(30.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(TRANSPOSE({10, 20; 30, 40}), 2, 1)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(20.0))
+        );
+
+        // TRANSPOSE scalar
+        assert_eq!(
+            evaluate_formula(
+                "=TRANSPOSE(\"scalar\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("scalar".into()))
+        );
+
+        // 2. LOOKUP vector form (3 arguments)
+        assert_eq!(
+            evaluate_formula(
+                "=LOOKUP(2, {1, 2, 3}, {\"c\", \"m\", \"d\"})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("m".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=LOOKUP(2.5, {1, 2, 3}, {\"c\", \"m\", \"d\"})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("m".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=LOOKUP(0.5, {1, 2, 3}, {\"c\", \"m\", \"d\"})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Error("#N/A".into()))
+        );
+
+        // 3. LOOKUP array form (2 arguments)
+        // Wide array (cols > rows): searches row 1, returns last row
+        assert_eq!(
+            evaluate_formula(
+                "=LOOKUP(3, {1, 2, 3; \"c\", \"m\", \"d\"})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("d".into()))
+        );
+
+        // Tall array (rows >= cols): searches col 1, returns last col
+        assert_eq!(
+            evaluate_formula(
+                "=LOOKUP(2, {1, \"c\"; 2, \"m\"; 3, \"d\"})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("m".into()))
+        );
+
+        // De-obfuscation pipeline with CONCAT, TRANSPOSE, and LOOKUP
+        assert_eq!(
+            evaluate_formula(
+                "=CONCAT(LOOKUP(1, {1, \"c\"; 2, \"m\"; 3, \"d\"}), LOOKUP(2, {1, \"c\"; 2, \"m\"; 3, \"d\"}), LOOKUP(3, {1, \"c\"; 2, \"m\"; 3, \"d\"}))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cmd".into()))
         );
     }
 }
