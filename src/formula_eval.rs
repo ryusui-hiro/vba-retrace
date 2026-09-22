@@ -134,7 +134,10 @@ enum Token {
     Operator(String),
     LParen,
     RParen,
+    LBrace,
+    RBrace,
     Comma,
+    Semicolon,
     Colon,
 }
 
@@ -157,7 +160,19 @@ fn tokenize(input: &str, max_tokens: usize) -> Result<Vec<Token>, &'static str> 
                 index += 1;
                 Token::RParen
             }
-            ',' | ';' => {
+            '{' => {
+                index += 1;
+                Token::LBrace
+            }
+            '}' => {
+                index += 1;
+                Token::RBrace
+            }
+            ';' => {
+                index += 1;
+                Token::Semicolon
+            }
+            ',' => {
                 index += 1;
                 Token::Comma
             }
@@ -323,6 +338,11 @@ enum Expr {
         arguments: Vec<Expr>,
     },
     Variable(String),
+    ArrayLiteral {
+        elements: Vec<Expr>,
+        rows: usize,
+        cols: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -410,7 +430,10 @@ impl Parser<'_> {
                 if !matches!(self.tokens.get(self.position), Some(Token::RParen)) {
                     loop {
                         invoke_args.push(self.parse_expression(0, depth + 1)?);
-                        if !matches!(self.tokens.get(self.position), Some(Token::Comma)) {
+                        if !matches!(
+                            self.tokens.get(self.position),
+                            Some(Token::Comma | Token::Semicolon)
+                        ) {
                             break;
                         }
                         self.position += 1;
@@ -446,6 +469,48 @@ impl Parser<'_> {
             }
             return Ok(value);
         }
+        if matches!(self.tokens.get(self.position), Some(Token::LBrace)) {
+            self.position += 1;
+            let mut row_count = 0usize;
+            let mut col_count = 0usize;
+            let mut elements = Vec::new();
+            if !matches!(self.tokens.get(self.position), Some(Token::RBrace)) {
+                let mut current_row_len = 0usize;
+                row_count = 1;
+                loop {
+                    elements.push(self.parse_expression(0, depth + 1)?);
+                    current_row_len += 1;
+                    if matches!(self.tokens.get(self.position), Some(Token::Comma)) {
+                        self.position += 1;
+                    } else if matches!(self.tokens.get(self.position), Some(Token::Semicolon)) {
+                        self.position += 1;
+                        if col_count == 0 {
+                            col_count = current_row_len;
+                        } else if col_count != current_row_len {
+                            return Err("invalid_formula");
+                        }
+                        current_row_len = 0;
+                        row_count += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if col_count == 0 {
+                    col_count = current_row_len;
+                } else if col_count != current_row_len {
+                    return Err("invalid_formula");
+                }
+            }
+            if !matches!(self.tokens.get(self.position), Some(Token::RBrace)) {
+                return Err("invalid_formula");
+            }
+            self.position += 1;
+            return Ok(Expr::ArrayLiteral {
+                elements,
+                rows: row_count,
+                cols: col_count,
+            });
+        }
         let token = self
             .tokens
             .get(self.position)
@@ -462,7 +527,10 @@ impl Parser<'_> {
                     if !matches!(self.tokens.get(self.position), Some(Token::RParen)) {
                         loop {
                             arguments.push(self.parse_expression(0, depth + 1)?);
-                            if !matches!(self.tokens.get(self.position), Some(Token::Comma)) {
+                            if !matches!(
+                                self.tokens.get(self.position),
+                                Some(Token::Comma | Token::Semicolon)
+                            ) {
                                 break;
                             }
                             self.position += 1;
@@ -482,7 +550,10 @@ impl Parser<'_> {
                         if !matches!(self.tokens.get(self.position), Some(Token::RParen)) {
                             loop {
                                 invoke_args.push(self.parse_expression(0, depth + 1)?);
-                                if !matches!(self.tokens.get(self.position), Some(Token::Comma)) {
+                                if !matches!(
+                                    self.tokens.get(self.position),
+                                    Some(Token::Comma | Token::Semicolon)
+                                ) {
                                     break;
                                 }
                                 self.position += 1;
@@ -694,6 +765,8 @@ struct Evaluator<'a> {
     variables: Vec<(String, EvalValue)>,
 }
 
+type EvalGrid = (Vec<FormulaValue>, usize, usize);
+
 impl Evaluator<'_> {
     fn evaluate(&mut self, expression: &Expr, depth: usize) -> Result<EvalValue, &'static str> {
         self.steps = self.steps.saturating_add(1);
@@ -774,6 +847,29 @@ impl Evaluator<'_> {
                     self.limits.max_string_bytes,
                 )?))
             }
+            Expr::ArrayLiteral {
+                elements,
+                rows,
+                cols,
+            } => {
+                let count = elements.len();
+                if count > self.limits.max_range_cells {
+                    return Err("resource_limit");
+                }
+                let mut values = Vec::with_capacity(count);
+                for elem in elements {
+                    values.push(self.eval_scalar(elem, depth + 1)?);
+                }
+                if *rows <= 1 && *cols <= 1 && !values.is_empty() {
+                    Ok(EvalValue::Scalar(values.swap_remove(0)))
+                } else {
+                    Ok(EvalValue::Range {
+                        values,
+                        rows: *rows,
+                        cols: *cols,
+                    })
+                }
+            }
             Expr::Call { name, arguments } => self.evaluate_call(name, arguments, depth + 1),
         }
     }
@@ -834,6 +930,61 @@ impl Evaluator<'_> {
         }
     }
 
+    fn eval_lambda_instance(
+        &mut self,
+        parameters: &[String],
+        body: &Expr,
+        args: Vec<EvalValue>,
+        depth: usize,
+    ) -> Result<EvalValue, &'static str> {
+        if parameters.len() != args.len() {
+            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+        }
+        let prev_len = self.variables.len();
+        for (param, val) in parameters.iter().cloned().zip(args) {
+            self.variables.push((param, val));
+        }
+        let res = self.evaluate(body, depth + 1);
+        self.variables.truncate(prev_len);
+        res
+    }
+
+    fn eval_lambda_to_scalar(
+        &mut self,
+        lambda_val: &EvalValue,
+        args: Vec<EvalValue>,
+        depth: usize,
+    ) -> Result<FormulaValue, &'static str> {
+        let (parameters, body) = match lambda_val {
+            EvalValue::Lambda { parameters, body } => (parameters, body),
+            _ => return Ok(FormulaValue::Error("#VALUE!".into())),
+        };
+        let eval_res = self.eval_lambda_instance(parameters, body, args, depth)?;
+        match eval_res {
+            EvalValue::Scalar(s) => Ok(s),
+            EvalValue::Range { mut values, .. } => {
+                if values.is_empty() {
+                    Ok(FormulaValue::Blank)
+                } else {
+                    Ok(values.swap_remove(0))
+                }
+            }
+            EvalValue::Lambda { .. } => Ok(FormulaValue::Error("#VALUE!".into())),
+        }
+    }
+
+    fn eval_to_grid(
+        &mut self,
+        expr: &Expr,
+        depth: usize,
+    ) -> Result<Option<EvalGrid>, &'static str> {
+        match self.evaluate(expr, depth)? {
+            EvalValue::Scalar(s) => Ok(Some((vec![s], 1, 1))),
+            EvalValue::Range { values, rows, cols } => Ok(Some((values, rows, cols))),
+            EvalValue::Lambda { .. } => Ok(None),
+        }
+    }
+
     fn evaluate_call(
         &mut self,
         name: &str,
@@ -852,20 +1003,11 @@ impl Evaluator<'_> {
             }
         });
         if let Some((parameters, body)) = lambda_match {
-            if parameters.len() != arguments.len() {
-                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
-            }
             let mut evaled_args = Vec::with_capacity(arguments.len());
             for arg in arguments {
                 evaled_args.push(self.evaluate(arg, depth + 1)?);
             }
-            let prev_len = self.variables.len();
-            for (param, val) in parameters.into_iter().zip(evaled_args) {
-                self.variables.push((param, val));
-            }
-            let res = self.evaluate(&body, depth + 1);
-            self.variables.truncate(prev_len);
-            return res;
+            return self.eval_lambda_instance(&parameters, &body, evaled_args, depth);
         }
 
         match name {
@@ -2286,6 +2428,9 @@ impl Evaluator<'_> {
             | "textjoin" | "textbefore" | "textafter" | "textsplit" | "base" | "decimal"
             | "encodeurl" | "bin2hex" | "hex2bin" | "oct2hex" | "hex2oct" | "numbervalue" => {
                 self.evaluate_string_function(name, arguments, depth + 1)
+            }
+            "map" | "reduce" | "scan" | "byrow" | "bycol" | "makearray" | "isomitted" => {
+                self.evaluate_lambda_helper(name, arguments, depth + 1)
             }
             _ => Err("unsupported"),
         }
@@ -3719,6 +3864,295 @@ impl Evaluator<'_> {
                             cols: orig_cols,
                         })
                     }
+                }
+            }
+            _ => Err("unsupported"),
+        }
+    }
+
+    fn evaluate_lambda_helper(
+        &mut self,
+        name: &str,
+        arguments: &[Expr],
+        depth: usize,
+    ) -> Result<EvalValue, &'static str> {
+        match name {
+            "map" => {
+                if arguments.len() < 2 {
+                    return Err("unsupported");
+                }
+                let num_arrays = arguments.len() - 1;
+                let lambda_val = self.evaluate(&arguments[num_arrays], depth + 1)?;
+                let (params_len, is_lambda) = match &lambda_val {
+                    EvalValue::Lambda { parameters, .. } => (parameters.len(), true),
+                    _ => (0, false),
+                };
+                if !is_lambda || params_len != num_arrays {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+
+                let mut grids = Vec::with_capacity(num_arrays);
+                for arg in &arguments[..num_arrays] {
+                    match self.eval_to_grid(arg, depth + 1)? {
+                        Some(grid) => grids.push(grid),
+                        None => {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                        }
+                    }
+                }
+
+                let (rows, cols) = (grids[0].1, grids[0].2);
+                for g in &grids[1..] {
+                    if g.1 != rows || g.2 != cols {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                }
+
+                let total = rows.saturating_mul(cols);
+                if total > 10_000 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#CALC!".into())));
+                }
+
+                let mut results = Vec::with_capacity(total);
+                for i in 0..total {
+                    let cell_args: Vec<EvalValue> = grids
+                        .iter()
+                        .map(|(vals, _, _)| EvalValue::Scalar(vals[i].clone()))
+                        .collect();
+                    let res = self.eval_lambda_to_scalar(&lambda_val, cell_args, depth + 1)?;
+                    results.push(res);
+                }
+
+                if rows == 1 && cols == 1 {
+                    Ok(EvalValue::Scalar(results.swap_remove(0)))
+                } else {
+                    Ok(EvalValue::Range {
+                        values: results,
+                        rows,
+                        cols,
+                    })
+                }
+            }
+            "reduce" => {
+                if !(2..=3).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let (init_val, array_arg, lambda_arg) = if arguments.len() == 3 {
+                    (
+                        self.eval_scalar(&arguments[0], depth + 1)?,
+                        &arguments[1],
+                        &arguments[2],
+                    )
+                } else {
+                    (FormulaValue::Blank, &arguments[0], &arguments[1])
+                };
+
+                let lambda_val = self.evaluate(lambda_arg, depth + 1)?;
+                if !matches!(&lambda_val, EvalValue::Lambda { parameters, .. } if parameters.len() == 2)
+                {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+
+                let Some((values, _, _)) = self.eval_to_grid(array_arg, depth + 1)? else {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                };
+
+                if values.len() > 10_000 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#CALC!".into())));
+                }
+
+                let mut acc = init_val;
+                for val in values {
+                    acc = self.eval_lambda_to_scalar(
+                        &lambda_val,
+                        vec![EvalValue::Scalar(acc), EvalValue::Scalar(val)],
+                        depth + 1,
+                    )?;
+                }
+
+                Ok(EvalValue::Scalar(acc))
+            }
+            "scan" => {
+                if !(2..=3).contains(&arguments.len()) {
+                    return Err("unsupported");
+                }
+                let (init_val, array_arg, lambda_arg) = if arguments.len() == 3 {
+                    (
+                        self.eval_scalar(&arguments[0], depth + 1)?,
+                        &arguments[1],
+                        &arguments[2],
+                    )
+                } else {
+                    (FormulaValue::Blank, &arguments[0], &arguments[1])
+                };
+
+                let lambda_val = self.evaluate(lambda_arg, depth + 1)?;
+                if !matches!(&lambda_val, EvalValue::Lambda { parameters, .. } if parameters.len() == 2)
+                {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+
+                let Some((values, rows, cols)) = self.eval_to_grid(array_arg, depth + 1)? else {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                };
+
+                if values.len() > 10_000 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#CALC!".into())));
+                }
+
+                let mut acc = init_val;
+                let mut results = Vec::with_capacity(values.len());
+                for val in values {
+                    acc = self.eval_lambda_to_scalar(
+                        &lambda_val,
+                        vec![EvalValue::Scalar(acc), EvalValue::Scalar(val)],
+                        depth + 1,
+                    )?;
+                    results.push(acc.clone());
+                }
+
+                if rows == 1 && cols == 1 {
+                    Ok(EvalValue::Scalar(results.swap_remove(0)))
+                } else {
+                    Ok(EvalValue::Range {
+                        values: results,
+                        rows,
+                        cols,
+                    })
+                }
+            }
+            "byrow" => {
+                if arguments.len() != 2 {
+                    return Err("unsupported");
+                }
+                let lambda_val = self.evaluate(&arguments[1], depth + 1)?;
+                if !matches!(&lambda_val, EvalValue::Lambda { parameters, .. } if parameters.len() == 1)
+                {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+
+                let Some((values, rows, cols)) = self.eval_to_grid(&arguments[0], depth + 1)?
+                else {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                };
+
+                let mut results = Vec::with_capacity(rows);
+                for r in 0..rows {
+                    let row_vals = values[r * cols..(r + 1) * cols].to_vec();
+                    let row_arg = EvalValue::Range {
+                        values: row_vals,
+                        rows: 1,
+                        cols,
+                    };
+                    let res = self.eval_lambda_to_scalar(&lambda_val, vec![row_arg], depth + 1)?;
+                    results.push(res);
+                }
+
+                if rows == 1 {
+                    Ok(EvalValue::Scalar(results.swap_remove(0)))
+                } else {
+                    Ok(EvalValue::Range {
+                        values: results,
+                        rows,
+                        cols: 1,
+                    })
+                }
+            }
+            "bycol" => {
+                if arguments.len() != 2 {
+                    return Err("unsupported");
+                }
+                let lambda_val = self.evaluate(&arguments[1], depth + 1)?;
+                if !matches!(&lambda_val, EvalValue::Lambda { parameters, .. } if parameters.len() == 1)
+                {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+
+                let Some((values, rows, cols)) = self.eval_to_grid(&arguments[0], depth + 1)?
+                else {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                };
+
+                let mut results = Vec::with_capacity(cols);
+                for c in 0..cols {
+                    let mut col_vals = Vec::with_capacity(rows);
+                    for r in 0..rows {
+                        col_vals.push(values[r * cols + c].clone());
+                    }
+                    let col_arg = EvalValue::Range {
+                        values: col_vals,
+                        rows,
+                        cols: 1,
+                    };
+                    let res = self.eval_lambda_to_scalar(&lambda_val, vec![col_arg], depth + 1)?;
+                    results.push(res);
+                }
+
+                if cols == 1 {
+                    Ok(EvalValue::Scalar(results.swap_remove(0)))
+                } else {
+                    Ok(EvalValue::Range {
+                        values: results,
+                        rows: 1,
+                        cols,
+                    })
+                }
+            }
+            "makearray" => {
+                if arguments.len() != 3 {
+                    return Err("unsupported");
+                }
+                let r_num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
+                let c_num = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
+                if r_num <= 0
+                    || c_num <= 0
+                    || r_num > 1000
+                    || c_num > 1000
+                    || (r_num * c_num) > 10_000
+                {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#CALC!".into())));
+                }
+                let (rows, cols) = (r_num as usize, c_num as usize);
+
+                let lambda_val = self.evaluate(&arguments[2], depth + 1)?;
+                if !matches!(&lambda_val, EvalValue::Lambda { parameters, .. } if parameters.len() == 2)
+                {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+
+                let mut results = Vec::with_capacity(rows * cols);
+                for r in 1..=rows {
+                    for c in 1..=cols {
+                        let res = self.eval_lambda_to_scalar(
+                            &lambda_val,
+                            vec![
+                                EvalValue::Scalar(FormulaValue::Number(r as f64)),
+                                EvalValue::Scalar(FormulaValue::Number(c as f64)),
+                            ],
+                            depth + 1,
+                        )?;
+                        results.push(res);
+                    }
+                }
+
+                if rows == 1 && cols == 1 {
+                    Ok(EvalValue::Scalar(results.swap_remove(0)))
+                } else {
+                    Ok(EvalValue::Range {
+                        values: results,
+                        rows,
+                        cols,
+                    })
+                }
+            }
+            "isomitted" => {
+                if arguments.len() != 1 {
+                    return Err("unsupported");
+                }
+                match self.eval_scalar(&arguments[0], depth + 1) {
+                    Ok(FormulaValue::Blank) => Ok(EvalValue::Scalar(FormulaValue::Boolean(true))),
+                    Ok(_) => Ok(EvalValue::Scalar(FormulaValue::Boolean(false))),
+                    Err(_) => Ok(EvalValue::Scalar(FormulaValue::Boolean(true))),
                 }
             }
             _ => Err("unsupported"),
@@ -6378,6 +6812,243 @@ mod tests {
             )
             .value,
             Some(FormulaValue::Number(0.25))
+        );
+    }
+
+    #[test]
+    fn evaluates_lambda_helpers_map_reduce_scan_byrow_bycol_makearray() {
+        let test_cells = vec![
+            cell_on_sheet("Data", "A1", "10", "n"),
+            cell_on_sheet("Data", "A2", "20", "n"),
+            cell_on_sheet("Data", "A3", "30", "n"),
+        ];
+
+        // MAP with single array and inline LAMBDA
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(MAP({1, 2, 3}, LAMBDA(x, x * 10)), 1, 2)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(20.0))
+        );
+
+        // MAP with multiple arrays
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(MAP({1, 2}, {10, 20}, LAMBDA(a, b, a + b)), 1, 2)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(22.0))
+        );
+
+        // MAP on scalar
+        assert_eq!(
+            evaluate_formula(
+                "=MAP(7, LAMBDA(x, x * 3))",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(21.0))
+        );
+
+        // REDUCE with string concatenation (malware de-obfuscation pattern)
+        assert_eq!(
+            evaluate_formula(
+                "=REDUCE(\"\", {\"c\", \"m\", \"d\"}, LAMBDA(a, b, a & b))",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("cmd".into()))
+        );
+
+        // REDUCE with accumulator
+        assert_eq!(
+            evaluate_formula(
+                "=REDUCE(100, {1, 2, 3}, LAMBDA(acc, val, acc + val))",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(106.0))
+        );
+
+        // REDUCE with default accumulator
+        assert_eq!(
+            evaluate_formula(
+                "=REDUCE({1, 2, 3}, LAMBDA(acc, val, acc + val))",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(6.0))
+        );
+
+        // SCAN running accumulation
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(SCAN(0, {1, 2, 3}, LAMBDA(acc, val, acc + val)), 1, 3)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(6.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ARRAYTOTEXT(SCAN(0, {1, 2, 3}, LAMBDA(acc, val, acc + val)))",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("1, 3, 6".into()))
+        );
+
+        // BYROW row-level aggregation
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(BYROW({1, 2; 3, 4}, LAMBDA(r, SUM(r))), 1, 1)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(3.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(BYROW({1, 2; 3, 4}, LAMBDA(r, SUM(r))), 2, 1)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(7.0))
+        );
+
+        // BYCOL column-level aggregation
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(BYCOL({1, 2; 3, 4}, LAMBDA(c, SUM(c))), 1, 1)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(4.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(BYCOL({1, 2; 3, 4}, LAMBDA(c, SUM(c))), 1, 2)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(6.0))
+        );
+
+        // MAKEARRAY grid generation
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(MAKEARRAY(2, 3, LAMBDA(r, c, r * 10 + c)), 2, 3)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(23.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ROWS(MAKEARRAY(4, 5, LAMBDA(r, c, 1)))",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(4.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=COLUMNS(MAKEARRAY(4, 5, LAMBDA(r, c, 1)))",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(5.0))
+        );
+
+        // LET with named LAMBDA passed to MAP
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(LET(doubler, LAMBDA(x, x * 2), MAP({3, 5, 7}, doubler)), 1, 2)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(10.0))
+        );
+
+        // ISOMITTED
+        assert_eq!(
+            evaluate_formula(
+                "=ISOMITTED(\"test\")",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Boolean(false))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ISOMITTED(Data!Z99)",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Boolean(true))
+        );
+
+        // Error cases: parameter count mismatch in MAP
+        assert_eq!(
+            evaluate_formula(
+                "=MAP({1, 2}, LAMBDA(x, y, x + y))",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Error("#VALUE!".into()))
+        );
+
+        // Error cases: out-of-bounds MAKEARRAY
+        assert_eq!(
+            evaluate_formula(
+                "=MAKEARRAY(2000, 2000, LAMBDA(r, c, 1))",
+                Some("Data"),
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Error("#CALC!".into()))
         );
     }
 }

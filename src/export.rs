@@ -3059,6 +3059,9 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "CustomUiRibbon" => ("VBA-CELL-026", "error"),
         "LegacyDialogSheet" => ("VBA-CELL-027", "error"),
         "ContentTypeAnomaly" => ("VBA-CELL-028", "error"),
+        "ExternalLinkTarget" => ("VBA-CELL-029", "error"),
+        "WebSettingsScriptOrReload" => ("VBA-CELL-030", "error"),
+        "WorkbookProtectionEvasion" => ("VBA-CELL-031", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3192,7 +3195,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-027\",\"name\":\"LegacyDialogSheetMacro\",\"shortDescription\":{\"text\":\"Legacy Excel 5.0/95 Dialog Sheet Macro\"},\"fullDescription\":{\"text\":\"Workbook contains legacy Excel 5.0/95 dialog sheet (xl/dialogsheets/sheet*.xml) with embedded macro bindings (<x:FmlaMacro>) or dialog controls.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-028\",\"name\":\"ContentTypeAnomaly\",\"shortDescription\":{\"text\":\"Content Types Package Anomaly or MIME Spoofing\"},\"fullDescription\":{\"text\":\"[Content_Types].xml contains dangerous executable MIME types, path traversal part names, or extension spoofing (cloaking vbaProject or macrosheets under image/innocuous extensions).\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-028\",\"name\":\"ContentTypeAnomaly\",\"shortDescription\":{\"text\":\"Content Types Package Anomaly or MIME Spoofing\"},\"fullDescription\":{\"text\":\"[Content_Types].xml contains dangerous executable MIME types, path traversal part names, or extension spoofing (cloaking vbaProject or macrosheets under image/innocuous extensions).\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-029\",\"name\":\"ExternalLinkTargetAnomaly\",\"shortDescription\":{\"text\":\"External Link Target Anomaly or Remote Payload\"},\"fullDescription\":{\"text\":\"Workbook external link cache or relationship (xl/externalLinks/) references remote UNC paths, dangerous executable files, exploit protocols, or hidden DDE/OLE server links.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-030\",\"name\":\"WebSettingsScriptOrReload\",\"shortDescription\":{\"text\":\"Web Settings Remote Frameset or Script Injection\"},\"fullDescription\":{\"text\":\"Document web settings (word/webSettings.xml) contains suspicious remote framesets, frame injections, or script/exploit protocol targets triggered during web layout rendering.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-031\",\"name\":\"WorkbookProtectionEvasion\",\"shortDescription\":{\"text\":\"Workbook Protection Evasion or VeryHidden Sheet Cloaking\"},\"fullDescription\":{\"text\":\"Workbook contains cloaked worksheets (state=\\\"veryHidden\\\"), workbook structure lock evasion, or anomalous password protection hashes designed to impede analysis.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));
