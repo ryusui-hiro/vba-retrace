@@ -647,6 +647,18 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("leftb")
                 || f_lower.contains("rightb")
                 || f_lower.contains("midb")
+                || f_lower.contains("quotient")
+                || f_lower.contains("even")
+                || f_lower.contains("odd")
+                || f_lower.contains("fact")
+                || f_lower.contains("gcd")
+                || f_lower.contains("lcm")
+                || f_lower.contains("combin")
+                || f_lower.contains("permut")
+                || f_lower.contains("sumproduct")
+                || f_lower.contains("exp")
+                || f_lower.contains("log")
+                || f_lower.contains("ln")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -4568,6 +4580,313 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_power_query_mashup_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        let is_mashup_or_pq = entry_name.to_ascii_lowercase().contains("powerquery")
+            || entry_name.to_ascii_lowercase().contains("datamashup")
+            || entry_name.to_ascii_lowercase().contains("mashup")
+            || s_lower.contains("datamashup")
+            || s_lower.contains("microsoft.data.mashup")
+            || s_lower.contains("section section1;");
+
+        if !is_mashup_or_pq {
+            return results;
+        }
+
+        if s_lower.contains("web.page") {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "powerQuery:webPageExecution".into(),
+                "Power Query M formula uses Web.Page(...) enabling arbitrary HTML/JavaScript/ActiveX execution within Excel host".into(),
+            ));
+        }
+
+        if s_lower.contains("web.contents")
+            && (s_lower.contains("http://") || s_lower.contains("https://"))
+        {
+            results.push((
+                "High",
+                entry_name.to_string(),
+                "powerQuery:webContentsOutbound".into(),
+                "Power Query M formula uses Web.Contents(...) targeting external URL (remote data exfiltration or payload download)".into(),
+            ));
+        }
+
+        if s_lower.contains("file.contents") || s_lower.contains(r"\\") {
+            let mut has_unc = false;
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find(r"\\") {
+                let actual_pos = search_idx + pos;
+                let rem = &s_lower[actual_pos + 2..];
+                if let Some(first_char) = rem.chars().next()
+                    && (first_char.is_ascii_alphanumeric()
+                        || first_char == '.'
+                        || first_char == '[')
+                    && rem.contains('\\')
+                {
+                    has_unc = true;
+                    break;
+                }
+                search_idx = actual_pos + 2;
+            }
+            if has_unc {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "powerQuery:uncCoercion".into(),
+                    "Power Query M formula references remote UNC path for NTLM credential coercion"
+                        .into(),
+                ));
+            }
+        }
+
+        if s_lower.contains("binary.fromtext")
+            && s_lower.contains("binaryencoding.base64")
+            && (s_lossy.contains("TVqQ")
+                || s_lower.contains("this program cannot be run in dos mode"))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "powerQuery:smuggledBinary".into(),
+                "Power Query M formula reconstructs smuggled Windows executable binary via Binary.FromText".into(),
+            ));
+        }
+
+        for cmd in &[
+            "xp_cmdshell",
+            "sp_oacreate",
+            "openrowset",
+            "exec master",
+            "exec(",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "powerQuery:commandInjection".into(),
+                    format!("Power Query M formula contains database execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        for env_func in &[
+            "environment.username",
+            "environment.machinename",
+            "diagnostics.activityid",
+        ] {
+            if s_lower.contains(env_func) {
+                results.push((
+                    "High",
+                    entry_name.to_string(),
+                    "powerQuery:envExfiltration".into(),
+                    format!("Power Query M formula accesses host environment profiling token '{env_func}' for exfiltration"),
+                ));
+                break;
+            }
+        }
+
+        results
+    }
+
+    fn scan_package_moniker_activation_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        for proto in &[
+            "script:",
+            "moniker:",
+            "composite:",
+            "file:",
+            "ms-msdt:",
+            "search-ms:",
+            "ms-appinstaller:",
+        ] {
+            if s_lower.contains(proto)
+                && (entry_name.to_ascii_lowercase().ends_with(".rels")
+                    || s_lower.contains("<o:oleobject")
+                    || s_lower.contains("<w:object")
+                    || s_lower.contains("<p:oleobj")
+                    || s_lower.contains("<a:hlinkclick"))
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    format!("moniker:suspiciousProtocol:{}", proto.trim_end_matches(':')),
+                    format!("OLE object or package relationship specifies dangerous Moniker protocol handler '{proto}'"),
+                ));
+                break;
+            }
+        }
+
+        let has_auto_activate = s_lower.contains("updatemode=\"always\"")
+            || s_lower.contains("autoupdate=\"1\"")
+            || s_lower.contains("autoupdate=\"true\"")
+            || s_lower.contains("autoactivate=\"1\"")
+            || s_lower.contains("autoactivate=\"true\"");
+
+        if has_auto_activate
+            && (s_lower.contains("<o:oleobject")
+                || s_lower.contains("<w:object")
+                || s_lower.contains("<p:oleobj")
+                || s_lower.contains("package"))
+        {
+            results.push((
+                "High",
+                entry_name.to_string(),
+                "moniker:autoActivation".into(),
+                "OLE object configured with automatic silent activation upon document opening"
+                    .into(),
+            ));
+        }
+
+        let has_icon_aspect = s_lower.contains("drawaspect=\"icon\"");
+        if has_icon_aspect {
+            for ext in &[
+                ".exe", ".bat", ".scr", ".vbs", ".js", ".cmd", ".ps1", ".hta",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "moniker:iconCloaking".into(),
+                        format!("OLE object cloaks executable/package payload ('{ext}') with deceptive document icon aspect"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        for (clsid, name) in &[
+            (
+                "{f20be578-230c-1380-1a29-e3f84c071110}",
+                "Packager Shell Object",
+            ),
+            ("{0000031a-0000-0000-c000-000000000046}", "FileMoniker"),
+            ("{79eac9e0-baf9-11ce-8c82-00aa004ba90b}", "URLMoniker"),
+            (
+                "{00020820-0000-0000-c000-000000000046}",
+                "Excel.Sheet.8 Moniker",
+            ),
+            (
+                "{00020906-0000-0000-c000-000000000046}",
+                "Word.Document.8 Moniker",
+            ),
+        ] {
+            if s_lower.contains(clsid) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    format!("moniker:weaponizedClsid:{clsid}"),
+                    format!(
+                        "OLE object specifies weaponized Packager/Moniker CLSID '{clsid}' ({name})"
+                    ),
+                ));
+                break;
+            }
+        }
+
+        results
+    }
+
+    fn scan_namespace_cloaking_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        if (s_lower.contains("xmlns:") || s_lower.contains("schemalocation"))
+            && s_lower.contains(r"\\")
+        {
+            let mut has_unc = false;
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find(r"\\") {
+                let actual_pos = search_idx + pos;
+                let rem = &s_lower[actual_pos + 2..];
+                if let Some(first_char) = rem.chars().next()
+                    && (first_char.is_ascii_alphanumeric()
+                        || first_char == '.'
+                        || first_char == '[')
+                    && rem.contains('\\')
+                {
+                    has_unc = true;
+                    break;
+                }
+                search_idx = actual_pos + 2;
+            }
+            if has_unc {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "namespace:uncCoercion".into(),
+                    "XML part declares namespace or schemaLocation with remote UNC path enabling NTLM credential coercion".into(),
+                ));
+            }
+        }
+
+        if s_lower.contains("<!doctype") || s_lower.contains("<!entity") {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "namespace:xxeInjection".into(),
+                "XML part contains Document Type Definition (DTD) or external entity declaration (XXE injection vector)".into(),
+            ));
+        }
+
+        if s_lossy.contains("schemas.") {
+            let mut search_idx = 0;
+            while let Some(pos) = s_lossy[search_idx..].find("xmlns") {
+                let start = search_idx + pos;
+                search_idx = start + 5;
+                if let Some(quote_start) = s_lossy[start..]
+                    .find('"')
+                    .or_else(|| s_lossy[start..].find('\''))
+                {
+                    let q_char = s_lossy.as_bytes()[start + quote_start];
+                    let uri_start = start + quote_start + 1;
+                    if let Some(quote_end) = s_lossy[uri_start..].find(q_char as char) {
+                        let uri_str = &s_lossy[uri_start..uri_start + quote_end];
+                        let has_spoofed_keyword =
+                            uri_str.to_ascii_lowercase().contains("openxmlformats")
+                                || uri_str.to_ascii_lowercase().contains("microsoft.com")
+                                || uri_str
+                                    .to_ascii_lowercase()
+                                    .contains("schemas-microsoft-com");
+                        let has_non_ascii = !uri_str.is_ascii();
+                        let has_zero_width = uri_str.chars().any(|c| {
+                            c == '\u{200B}' || c == '\u{FEFF}' || c == '\u{200C}' || c == '\u{200D}'
+                        });
+                        if (has_spoofed_keyword && has_non_ascii) || has_zero_width {
+                            results.push((
+                                "Critical",
+                                entry_name.to_string(),
+                                "namespace:homoglyphCloaking".into(),
+                                format!("XML namespace URI '{uri_str}' uses Unicode homoglyph or zero-width character cloaking to spoof standard Office schemas"),
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -4991,6 +5310,95 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "QueryTableOrExternalQueryAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Excel Data Mashup / Power Query Formula Anomaly (VBA-CELL-047)
+        let is_pq_candidate = name_lower.contains("powerquery")
+            || name_lower.contains("datamashup")
+            || name_lower.contains("mashup")
+            || name_lower.contains("customxml")
+            || name_lower.contains("customdata");
+        if is_pq_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_power_query_mashup_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Power Query formula or Data Mashup anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "PowerQuery".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "PowerQueryFormulaOrMashupAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for OLE Object / Package Moniker CLSID Activation Anomaly (VBA-CELL-048)
+        let is_moniker_candidate = name_lower.contains("document.xml")
+            || name_lower.contains("sheet")
+            || name_lower.contains("slide")
+            || name_lower.contains("drawing")
+            || name_lower.contains("oleobject")
+            || name_lower.contains("package")
+            || name_lower.contains("embeddings/")
+            || name_lower.ends_with(".rels");
+        if is_moniker_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_package_moniker_activation_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "OLE Package Moniker or activation anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Moniker".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "PackageMonikerOrActivationAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for XML Namespace Cloaking & Schema Spoofing Anomaly (VBA-CELL-049)
+        let is_xml_part = name_lower.ends_with(".xml") || name_lower.ends_with(".rels");
+        if is_xml_part && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_namespace_cloaking_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "XML namespace cloaking or schema spoofing detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Namespace".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "NamespaceCloakingOrSchemaSpoofingAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,

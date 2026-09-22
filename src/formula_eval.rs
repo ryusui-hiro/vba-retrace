@@ -723,15 +723,6 @@ fn column_to_letters(mut col: u32) -> String {
     s.chars().rev().collect()
 }
 
-fn gcd_pair(mut a: u64, mut b: u64) -> u64 {
-    while b != 0 {
-        let t = b;
-        b = a % b;
-        a = t;
-    }
-    a
-}
-
 #[derive(Clone, Debug, PartialEq)]
 enum EvalValue {
     Scalar(FormulaValue),
@@ -2191,76 +2182,121 @@ impl Evaluator<'_> {
                     Ok(EvalValue::Scalar(FormulaValue::Number(ratio.floor() * sig)))
                 }
             }
-            "even" if arguments.len() == 1 => {
+            "pi" if arguments.is_empty() => Ok(EvalValue::Scalar(FormulaValue::Number(
+                std::f64::consts::PI,
+            ))),
+            "exp" if arguments.len() == 1 => {
                 let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
-                let abs_ceil = n.abs().ceil() as i64;
-                let even = if abs_ceil % 2 == 0 {
-                    abs_ceil
-                } else {
-                    abs_ceil + 1
-                };
-                let res = if n < 0.0 { -even } else { even };
-                Ok(EvalValue::Scalar(FormulaValue::Number(res as f64)))
+                Ok(EvalValue::Scalar(FormulaValue::Number(n.exp())))
             }
-            "odd" if arguments.len() == 1 => {
+            "ln" if arguments.len() == 1 => {
                 let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
-                let abs_ceil = n.abs().ceil() as i64;
-                let odd = if abs_ceil % 2 != 0 {
-                    abs_ceil
-                } else {
-                    abs_ceil + 1
-                };
-                let res = if n < 0.0 { -odd } else { odd };
-                Ok(EvalValue::Scalar(FormulaValue::Number(res as f64)))
-            }
-            "fact" if arguments.len() == 1 => {
-                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
-                if !(0.0..=170.0).contains(&n) {
+                if n <= 0.0 {
                     Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
                 } else {
-                    let count = n.floor() as u64;
+                    Ok(EvalValue::Scalar(FormulaValue::Number(n.ln())))
+                }
+            }
+            "log10" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if n <= 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(n.log10())))
+                }
+            }
+            "log" if arguments.len() == 1 || arguments.len() == 2 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let base = if arguments.len() == 2 {
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?
+                } else {
+                    10.0
+                };
+                if n <= 0.0 || base <= 0.0 || (base - 1.0).abs() < 1e-12 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(n.log(base))))
+                }
+            }
+            "combin" if arguments.len() == 2 => {
+                let n_val = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let k_val = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let n = n_val.trunc() as i64;
+                let k = k_val.trunc() as i64;
+                if n < 0 || k < 0 || n < k {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else if k == 0 || k == n {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(1.0)))
+                } else {
+                    let k_eff = k.min(n - k);
                     let mut res = 1.0f64;
-                    for i in 2..=count {
-                        res *= i as f64;
+                    for i in 1..=k_eff {
+                        res = res * ((n - k_eff + i) as f64) / (i as f64);
                     }
-                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res.round())))
                 }
             }
-            "gcd" if !arguments.is_empty() => {
-                let mut current = 0u64;
-                for arg in arguments {
-                    let n = to_number(&self.eval_scalar(arg, depth + 1)?)?;
-                    if n < 0.0 {
-                        return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+            "permut" if arguments.len() == 2 => {
+                let n_val = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let k_val = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let n = n_val.trunc() as i64;
+                let k = k_val.trunc() as i64;
+                if n < 0 || k < 0 || n < k {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else if k == 0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(1.0)))
+                } else {
+                    let mut res = 1.0f64;
+                    for i in 0..k {
+                        res *= (n - i) as f64;
                     }
-                    let val = n.floor() as u64;
-                    current = if current == 0 {
-                        val
-                    } else {
-                        gcd_pair(current, val)
-                    };
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res.round())))
                 }
-                Ok(EvalValue::Scalar(FormulaValue::Number(current as f64)))
             }
-            "lcm" if !arguments.is_empty() => {
-                let mut current = 1u64;
+            "sumproduct" if !arguments.is_empty() => {
+                let mut arg_matrices: Vec<(Vec<FormulaValue>, usize, usize)> = Vec::new();
                 for arg in arguments {
-                    let n = to_number(&self.eval_scalar(arg, depth + 1)?)?;
-                    if n < 0.0 {
-                        return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
-                    }
-                    let val = n.floor() as u64;
-                    if val == 0 {
-                        return Ok(EvalValue::Scalar(FormulaValue::Number(0.0)));
-                    }
-                    let g = gcd_pair(current, val);
-                    if let Some(next) = (current / g).checked_mul(val) {
-                        current = next;
-                    } else {
-                        return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                    match self.evaluate(arg, depth + 1)? {
+                        EvalValue::Scalar(val) => {
+                            if let FormulaValue::Error(err) = val {
+                                return Ok(EvalValue::Scalar(FormulaValue::Error(err)));
+                            }
+                            arg_matrices.push((vec![val], 1, 1));
+                        }
+                        EvalValue::Range { values, rows, cols } => {
+                            arg_matrices.push((values, rows, cols));
+                        }
+                        EvalValue::Lambda { .. } => {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                        }
                     }
                 }
-                Ok(EvalValue::Scalar(FormulaValue::Number(current as f64)))
+                let target_rows = arg_matrices[0].1;
+                let target_cols = arg_matrices[0].2;
+                for (_, r, c) in &arg_matrices {
+                    if *r != target_rows || *c != target_cols {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                }
+                let cell_count = target_rows * target_cols;
+                let mut sum = 0.0f64;
+                for i in 0..cell_count {
+                    let mut cell_prod = 1.0f64;
+                    for (vals, _, _) in &arg_matrices {
+                        match &vals[i] {
+                            FormulaValue::Number(n) => cell_prod *= n,
+                            FormulaValue::Error(err) => {
+                                return Ok(EvalValue::Scalar(FormulaValue::Error(err.clone())));
+                            }
+                            _ => {
+                                cell_prod = 0.0;
+                                break;
+                            }
+                        }
+                    }
+                    sum += cell_prod;
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Number(sum)))
             }
             "degrees" if arguments.len() == 1 => {
                 let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
@@ -8186,6 +8222,108 @@ mod tests {
             )
             .value,
             Some(FormulaValue::String("AtC".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_exp_ln_log_combin_permut_sumproduct_functions() {
+        let test_cells = vec![];
+
+        // PI
+        if let Some(FormulaValue::Number(pi)) =
+            evaluate_formula("=PI()", None, &test_cells, Default::default()).value
+        {
+            assert!((pi - std::f64::consts::PI).abs() < 1e-10);
+        } else {
+            panic!("PI() did not return a number");
+        }
+
+        // EXP
+        assert_eq!(
+            evaluate_formula("=EXP(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+
+        // LN & LOG10 & LOG
+        assert_eq!(
+            evaluate_formula("=LN(1)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=LOG10(100)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula("=LOG(8, 2)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(3.0))
+        );
+        assert_eq!(
+            evaluate_formula("=LOG(100)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula("=LN(-5)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#NUM!".into()))
+        );
+
+        // COMBIN & PERMUT
+        assert_eq!(
+            evaluate_formula("=COMBIN(5, 2)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(10.0))
+        );
+        assert_eq!(
+            evaluate_formula("=COMBIN(4, 0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=COMBIN(4, 5)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#NUM!".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=PERMUT(5, 2)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(20.0))
+        );
+        assert_eq!(
+            evaluate_formula("=PERMUT(4, 0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=PERMUT(3, 4)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#NUM!".into()))
+        );
+
+        // SUMPRODUCT with array literals
+        assert_eq!(
+            evaluate_formula(
+                "=SUMPRODUCT({1, 2, 3}, {4, 5, 6})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(32.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=SUMPRODUCT({2, 3; 4, 5}, {1, 2; 3, 4})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(40.0))
+        );
+
+        // De-obfuscation formula combining math functions
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(SUMPRODUCT({10, 5}, {6, 1}) + COMBIN(5, 2) - PERMUT(3, 1) - 2)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("F".into()))
         );
     }
 }

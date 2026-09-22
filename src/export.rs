@@ -3083,6 +3083,15 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         }
         "MailMergeDataSourceOrCoercionAnomaly" | "MailMergeAnomaly" => ("VBA-CELL-045", "error"),
         "QueryTableOrExternalQueryAnomaly" | "QueryTableAnomaly" => ("VBA-CELL-046", "error"),
+        "PowerQueryFormulaOrMashupAnomaly" | "PowerQueryAnomaly" | "MashupAnomaly" => {
+            ("VBA-CELL-047", "error")
+        }
+        "PackageMonikerOrActivationAnomaly" | "PackageMonikerAnomaly" | "MonikerAnomaly" => {
+            ("VBA-CELL-048", "error")
+        }
+        "NamespaceCloakingOrSchemaSpoofingAnomaly"
+        | "NamespaceCloakingAnomaly"
+        | "SchemaSpoofingAnomaly" => ("VBA-CELL-049", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3270,7 +3279,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-045\",\"name\":\"MailMergeDataSourceOrCoercionAnomaly\",\"shortDescription\":{\"text\":\"Word MailMerge Data Source or Coercion Anomaly\"},\"fullDescription\":{\"text\":\"Word MailMerge settings (word/settings.xml) or relationships contain remote UNC paths for NTLM credential coercion, database command injection queries, or dangerous external data source targets.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-046\",\"name\":\"QueryTableOrExternalQueryAnomaly\",\"shortDescription\":{\"text\":\"Excel QueryTable or External Query Anomaly\"},\"fullDescription\":{\"text\":\"Excel QueryTable definition or relationships contain automatic refresh to remote Web Queries (.iqy), UNC credential coercion paths, or database command execution.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-046\",\"name\":\"QueryTableOrExternalQueryAnomaly\",\"shortDescription\":{\"text\":\"Excel QueryTable or External Query Anomaly\"},\"fullDescription\":{\"text\":\"Excel QueryTable definition or relationships contain automatic refresh to remote Web Queries (.iqy), UNC credential coercion paths, or database command execution.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-047\",\"name\":\"PowerQueryFormulaOrMashupAnomaly\",\"shortDescription\":{\"text\":\"Excel Power Query Formula or Mashup Anomaly\"},\"fullDescription\":{\"text\":\"Excel Power Query M formulas or Data Mashup parts contain Web.Page arbitrary HTML/script execution, Web.Contents exfiltration, remote UNC paths, database command execution, or smuggled Base64 executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-048\",\"name\":\"PackageMonikerOrActivationAnomaly\",\"shortDescription\":{\"text\":\"OLE Package Moniker or Activation Anomaly\"},\"fullDescription\":{\"text\":\"OLE object or package relationship specifies dangerous Moniker protocol handlers, automatic silent activation, deceptive icon aspect cloaking, or weaponized Packager CLSIDs.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-049\",\"name\":\"NamespaceCloakingOrSchemaSpoofingAnomaly\",\"shortDescription\":{\"text\":\"XML Namespace Cloaking or Schema Spoofing Anomaly\"},\"fullDescription\":{\"text\":\"XML package parts declare remote UNC namespaces for NTLM credential coercion, DTD/XXE entity declarations, or Unicode homoglyph/zero-width character cloaking spoofing standard Office schemas.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));
