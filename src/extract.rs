@@ -624,6 +624,13 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("oct2hex")
                 || f_lower.contains("hex2oct")
                 || f_lower.contains("numbervalue")
+                || f_lower.contains("map")
+                || f_lower.contains("reduce")
+                || f_lower.contains("scan")
+                || f_lower.contains("byrow")
+                || f_lower.contains("bycol")
+                || f_lower.contains("makearray")
+                || f_lower.contains("isomitted")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -1377,6 +1384,9 @@ pub fn extract_macro_container(data: &[u8], limits: &Limits) -> Result<Extracted
 /// - Custom UI Ribbon onLoad auto-execution and onAction callbacks (`VBA-CELL-026`, Critical)
 /// - Legacy Excel 5.0/95 Dialog Sheet macro bindings (`VBA-CELL-027`, High)
 /// - Content Types package anomaly, path traversal, and MIME spoofing (`VBA-CELL-028`, Critical)
+/// - External link cache, remote UNC, DDE/OLE link anomaly (`VBA-CELL-029`, Critical)
+/// - Word web settings remote frameset or reload injection (`VBA-CELL-030`, Critical)
+/// - Workbook protection evasion and locked structure cloaking (`VBA-CELL-031`, High)
 pub fn scan_ooxml_package_threats(
     zip: &ZipArchive<'_>,
     threats: &mut Vec<CellThreat>,
@@ -2271,6 +2281,242 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_external_link_content(xml_str: &str) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = xml_str.to_ascii_lowercase();
+
+        // 1. Scan tags for <ddeLink> and <oleLink>
+        let mut cursor = 0;
+        while cursor < xml_str.len() {
+            if let Some(tag_open) = xml_str[cursor..].find('<') {
+                let tag_start = cursor + tag_open;
+                let Some(tag_close) = xml_str[tag_start..].find('>') else {
+                    break;
+                };
+                let tag_end = tag_start + tag_close + 1;
+                let tag_str = &xml_str[tag_start..tag_end];
+                let tag_lower = tag_str.to_ascii_lowercase();
+
+                if tag_lower.starts_with("<ddelink") {
+                    let dde_service =
+                        extract_attribute_value(tag_str, "ddeservice").unwrap_or_default();
+                    let dde_topic =
+                        extract_attribute_value(tag_str, "ddetopic").unwrap_or_default();
+                    let service_lower = dde_service.to_ascii_lowercase();
+                    let is_dangerous = matches!(
+                        service_lower.as_str(),
+                        "cmd"
+                            | "cmd.exe"
+                            | "powershell"
+                            | "powershell.exe"
+                            | "pwsh"
+                            | "mshta"
+                            | "mshta.exe"
+                            | "cscript"
+                            | "wscript"
+                            | "rundll32"
+                            | "regsvr32"
+                            | "certutil"
+                            | "bitsadmin"
+                            | "bash"
+                            | "curl"
+                    );
+                    let sev = if is_dangerous { "Critical" } else { "High" };
+                    results.push((
+                        sev,
+                        format!("{dde_service}|{dde_topic}"),
+                        format!("dde:{dde_service}"),
+                        format!("External link cache registers DDE server execution link ('{dde_service}|{dde_topic}')"),
+                    ));
+                }
+
+                if tag_lower.starts_with("<olelink") {
+                    let prog_id = extract_attribute_value(tag_str, "progid")
+                        .unwrap_or_else(|| "Unknown".into());
+                    results.push((
+                        "High",
+                        prog_id.clone(),
+                        format!("ole:{prog_id}"),
+                        format!("External link cache registers OLE object link ('{prog_id}')"),
+                    ));
+                }
+
+                cursor = tag_end;
+            } else {
+                break;
+            }
+        }
+
+        // 2. Scan for exploit protocols directly in XML
+        for &proto in &["ms-msdt:", "search-ms:", "ms-appinstaller:", "mhtml:"] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    proto.to_string(),
+                    format!("proto:{proto}"),
+                    format!("External link cache contains exploit protocol handler '{proto}'"),
+                ));
+            }
+        }
+
+        results
+    }
+
+    fn scan_websettings_content(xml_str: &str) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = xml_str.to_ascii_lowercase();
+
+        // 1. Scan for <w:frame> or <w:frameset> or <w:source>
+        let mut cursor = 0;
+        while cursor < xml_str.len() {
+            if let Some(tag_open) = xml_str[cursor..].find('<') {
+                let tag_start = cursor + tag_open;
+                let Some(tag_close) = xml_str[tag_start..].find('>') else {
+                    break;
+                };
+                let tag_end = tag_start + tag_close + 1;
+                let tag_str = &xml_str[tag_start..tag_end];
+                let tag_lower = tag_str.to_ascii_lowercase();
+
+                if tag_lower.starts_with("<w:source") || tag_lower.starts_with("<w:frame ") {
+                    let source_val = extract_attribute_value(tag_str, "w:val")
+                        .or_else(|| extract_attribute_value(tag_str, "target"))
+                        .unwrap_or_default();
+                    let trimmed = source_val.trim();
+                    if !trimmed.is_empty() {
+                        let t_lower = trimmed.to_ascii_lowercase();
+                        let is_dangerous = t_lower.starts_with("ms-msdt:")
+                            || t_lower.starts_with("search-ms:")
+                            || t_lower.starts_with("mhtml:")
+                            || t_lower.starts_with("\\\\")
+                            || t_lower.starts_with("//")
+                            || t_lower.starts_with("file:////")
+                            || t_lower.starts_with("file://\\\\")
+                            || [".exe", ".dll", ".hta", ".ps1", ".bat", ".cmd", ".vbs"]
+                                .iter()
+                                .any(|ext| {
+                                    t_lower.ends_with(ext) || t_lower.contains(&format!("{ext}?"))
+                                });
+                        let sev = if is_dangerous { "Critical" } else { "High" };
+                        results.push((
+                            sev,
+                            trimmed.to_string(),
+                            format!("frame:{trimmed}"),
+                            format!("Word web settings defines frameset linking to external source ('{trimmed}')"),
+                        ));
+                    }
+                }
+
+                cursor = tag_end;
+            } else {
+                break;
+            }
+        }
+
+        // 2. Scan for script tags or reload directives
+        if s_lower.contains("<script") {
+            results.push((
+                "Critical",
+                "script".into(),
+                "script:embedded".into(),
+                "Word web settings contains embedded script tag ('<script')".into(),
+            ));
+        }
+        if s_lower.contains("<w:reload") || s_lower.contains("<w:refresh") {
+            results.push((
+                "High",
+                "reload".into(),
+                "reload:directive".into(),
+                "Word web settings contains automatic frame reload/refresh directive".into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_workbook_protection_and_evasion(
+        xml_str: &str,
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = xml_str.to_ascii_lowercase();
+
+        // Collect veryHidden sheets
+        let mut very_hidden_sheets = Vec::new();
+        let mut cursor = 0;
+        while cursor < xml_str.len() {
+            if let Some(tag_open) = xml_str[cursor..].find('<') {
+                let tag_start = cursor + tag_open;
+                let Some(tag_close) = xml_str[tag_start..].find('>') else {
+                    break;
+                };
+                let tag_end = tag_start + tag_close + 1;
+                let tag_str = &xml_str[tag_start..tag_end];
+                let tag_lower = tag_str.to_ascii_lowercase();
+
+                if (tag_lower.starts_with("<sheet ") || tag_lower.starts_with("<sheet>"))
+                    && let Some(state) = extract_attribute_value(tag_str, "state")
+                    && state.eq_ignore_ascii_case("veryhidden")
+                {
+                    let name = extract_attribute_value(tag_str, "name")
+                        .unwrap_or_else(|| "Unknown".into());
+                    very_hidden_sheets.push(name);
+                }
+
+                cursor = tag_end;
+            } else {
+                break;
+            }
+        }
+
+        // Scan for <workbookProtection>
+        if let Some(prot_start) = s_lower.find("<workbookprotection") {
+            let prot_rest = &xml_str[prot_start..];
+            if let Some(prot_end_idx) = prot_rest.find('>') {
+                let prot_tag = &prot_rest[..=prot_end_idx];
+                let prot_lower = prot_tag.to_ascii_lowercase();
+
+                let lock_struct = extract_attribute_value(prot_tag, "lockstructure")
+                    .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+                let lock_windows = extract_attribute_value(prot_tag, "lockwindows")
+                    .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+
+                let has_hash = extract_attribute_value(prot_tag, "hashvalue");
+                let has_pwd = extract_attribute_value(prot_tag, "password");
+
+                if lock_struct || lock_windows {
+                    if !very_hidden_sheets.is_empty() {
+                        for sheet_name in &very_hidden_sheets {
+                            results.push((
+                                "High",
+                                sheet_name.clone(),
+                                format!("evasion:veryHidden:{sheet_name}"),
+                                format!("Workbook protection locks structure ('lockStructure=1') while cloaking veryHidden sheet '{sheet_name}' to prevent user inspection"),
+                            ));
+                        }
+                    } else if let Some(ref hash) = has_hash {
+                        if hash.is_empty() || hash.chars().all(|c| c == '0' || c == 'F') {
+                            results.push((
+                                "High",
+                                "dummy_hash".into(),
+                                "protection:dummyHash".into(),
+                                "Workbook protection locks structure with dummy or hollowed hash to prevent UI inspection".into(),
+                            ));
+                        }
+                    } else if has_pwd.is_some() || prot_lower.contains("workbookalgorithmname") {
+                        results.push((
+                            "Medium",
+                            "lockStructure".into(),
+                            "protection:lockStructure".into(),
+                            "Workbook protection locks workbook structure to impede sheet inspection".into(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -2814,6 +3060,81 @@ pub fn scan_ooxml_package_threats(
                 }
             }
         }
+
+        // Check for Excel External Links (xl/externalLinks/externalLink*.xml)
+        let is_external_link = (name_lower.contains("externallinks/externallink")
+            || name_lower.contains("\\externallinks\\externallink")
+            || name_lower.starts_with("xl/externallinks/"))
+            && name_lower.ends_with(".xml");
+        if is_external_link {
+            let Ok(data) = zip.read(entry) else { continue };
+            let xml_str = String::from_utf8_lossy(&data);
+            for (sev, cell_ref, coord_key, desc) in scan_external_link_content(&xml_str) {
+                let coord = format!("part:{}:{}", entry.name, coord_key);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "ExternalLink".into(),
+                        cell_ref: cell_ref.clone(),
+                        coordinate: coord,
+                        threat_kind: "ExternalLinkTarget".into(),
+                        severity: sev.into(),
+                        formula: cell_ref,
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word Web Settings (word/webSettings.xml)
+        let is_web_settings = (name_lower.ends_with("websettings.xml")
+            || name_lower.contains("/websettings")
+            || name_lower.contains("\\websettings"))
+            && name_lower.ends_with(".xml");
+        if is_web_settings {
+            let Ok(data) = zip.read(entry) else { continue };
+            let xml_str = String::from_utf8_lossy(&data);
+            for (sev, cell_ref, coord_key, desc) in scan_websettings_content(&xml_str) {
+                let coord = format!("part:{}:{}", entry.name, coord_key);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "WebSettings".into(),
+                        cell_ref: cell_ref.clone(),
+                        coordinate: coord,
+                        threat_kind: "WebSettingsScriptOrReload".into(),
+                        severity: sev.into(),
+                        formula: cell_ref,
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Workbook Protection and Evasion (xl/workbook.xml)
+        let is_workbook = (name_lower.ends_with("workbook.xml")
+            || name_lower.contains("/workbook.xml")
+            || name_lower.contains("\\workbook.xml"))
+            && name_lower.ends_with(".xml");
+        if is_workbook {
+            let Ok(data) = zip.read(entry) else { continue };
+            let xml_str = String::from_utf8_lossy(&data);
+            for (sev, cell_ref, coord_key, desc) in scan_workbook_protection_and_evasion(&xml_str) {
+                let coord = format!("part:{}:{}", entry.name, coord_key);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Workbook".into(),
+                        cell_ref: cell_ref.clone(),
+                        coordinate: coord,
+                        threat_kind: "WorkbookProtectionEvasion".into(),
+                        severity: sev.into(),
+                        formula: cell_ref,
+                        description: desc,
+                    });
+                }
+            }
+        }
     }
 
     // 2. Inspect all OPC relationship parts (.rels) for external references
@@ -2874,7 +3195,10 @@ pub fn scan_ooxml_package_threats(
                 }
 
                 // Check for External Subdocument / Frame references
-                if (rel_type.contains("subdocument") || rel_type.contains("frame")) && is_ext {
+                if (rel_type.contains("subdocument") || rel_type.contains("frame"))
+                    && !rels_part.to_ascii_lowercase().contains("websettings")
+                    && is_ext
+                {
                     let coord = format!("rel:{}->{}", rels_part, rel.id);
                     if !threats.iter().any(|t| t.coordinate == coord) {
                         let desc = format!(
@@ -2967,6 +3291,75 @@ pub fn scan_ooxml_package_threats(
                     }
                 }
 
+                // Check for External Link Target relationships (xl/externalLinks/_rels/externalLink*.xml.rels)
+                let is_external_link_rel = rels_part.to_ascii_lowercase().contains("externallink")
+                    || rel_type.contains("externallinkpath")
+                    || rel_type.contains("externallink");
+                if is_external_link_rel && is_ext {
+                    let coord = format!("rel:{}->{}", rels_part, rel.id);
+                    if !threats.iter().any(|t| t.coordinate == coord) {
+                        let is_critical = target_lower.starts_with("ms-msdt:")
+                            || target_lower.starts_with("search-ms:")
+                            || target_lower.starts_with("mhtml:")
+                            || target_lower.starts_with("\\\\")
+                            || target_lower.starts_with("//")
+                            || target_lower.starts_with("file:////")
+                            || target_lower.starts_with("file://\\\\")
+                            || [
+                                ".exe", ".dll", ".bat", ".ps1", ".cmd", ".vbs", ".hta", ".cpl",
+                                ".msi", ".iso", ".scr", ".vbe", ".wsf",
+                            ]
+                            .iter()
+                            .any(|ext| {
+                                target_lower.ends_with(ext)
+                                    || target_lower.contains(&format!("{ext}?"))
+                            });
+                        let sev = if is_critical { "Critical" } else { "High" };
+                        let desc = format!(
+                            "External link target anomaly detected: relationship '{}' in '{}' targets external resource '{}'",
+                            rel.id, rels_part, rel.target
+                        );
+                        diagnostics.push(format!("Security warning: {desc}"));
+                        threats.push(CellThreat {
+                            sheet_name: "Package".into(),
+                            cell_ref: rel.id.clone(),
+                            coordinate: coord,
+                            threat_kind: "ExternalLinkTarget".into(),
+                            severity: sev.into(),
+                            formula: rel.target.clone(),
+                            description: desc,
+                        });
+                    }
+                }
+
+                // Check for Web Settings relationships (word/_rels/webSettings.xml.rels)
+                let is_websettings_rel = rels_part.to_ascii_lowercase().contains("websettings");
+                if is_websettings_rel && is_ext {
+                    let coord = format!("rel:{}->{}", rels_part, rel.id);
+                    if !threats.iter().any(|t| t.coordinate == coord) {
+                        let is_critical = target_lower.starts_with("ms-msdt:")
+                            || target_lower.starts_with("search-ms:")
+                            || target_lower.starts_with("mhtml:")
+                            || target_lower.starts_with("\\\\")
+                            || target_lower.starts_with("//");
+                        let sev = if is_critical { "Critical" } else { "High" };
+                        let desc = format!(
+                            "Web settings remote frameset or external link detected: relationship '{}' in '{}' targets external resource '{}'",
+                            rel.id, rels_part, rel.target
+                        );
+                        diagnostics.push(format!("Security warning: {desc}"));
+                        threats.push(CellThreat {
+                            sheet_name: "Package".into(),
+                            cell_ref: rel.id.clone(),
+                            coordinate: coord,
+                            threat_kind: "WebSettingsScriptOrReload".into(),
+                            severity: sev.into(),
+                            formula: rel.target.clone(),
+                            description: desc,
+                        });
+                    }
+                }
+
                 // Check for Suspicious Protocol Handler (ms-msdt, search-ms, ms-appinstaller, mhtml, javascript, vbscript, remote file://)
                 let is_suspicious_proto = target_lower.starts_with("ms-msdt:")
                     || target_lower.starts_with("search-ms:")
@@ -2986,6 +3379,8 @@ pub fn scan_ooxml_package_threats(
                     && !rel_type.contains("altchunk")
                     && !rel_type.contains("ui/extensibility")
                     && !rel_type.contains("customui")
+                    && !is_external_link_rel
+                    && !is_websettings_rel
                 {
                     let coord = format!("rel:{}->{}", rels_part, rel.id);
                     if !threats.iter().any(|t| t.coordinate == coord) {
