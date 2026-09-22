@@ -631,6 +631,11 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("bycol")
                 || f_lower.contains("makearray")
                 || f_lower.contains("isomitted")
+                || f_lower.contains("vstack")
+                || f_lower.contains("hstack")
+                || f_lower.contains("ifs")
+                || f_lower.contains("switch")
+                || f_lower.contains("xor")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -1387,6 +1392,9 @@ pub fn extract_macro_container(data: &[u8], limits: &Limits) -> Result<Extracted
 /// - External link cache, remote UNC, DDE/OLE link anomaly (`VBA-CELL-029`, Critical)
 /// - Word web settings remote frameset or reload injection (`VBA-CELL-030`, Critical)
 /// - Workbook protection evasion and locked structure cloaking (`VBA-CELL-031`, High)
+/// - Smuggled container payload binary, cloaked PE, or staged script (`VBA-CELL-032`, Critical)
+/// - Worksheet view evasion, hidden row/col cloaking, displaced view (`VBA-CELL-033`, High)
+/// - ActiveX XML object declaration anomaly and weaponized CLSID (`VBA-CELL-034`, Critical)
 pub fn scan_ooxml_package_threats(
     zip: &ZipArchive<'_>,
     threats: &mut Vec<CellThreat>,
@@ -2517,12 +2525,603 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn col_letters_to_num(letters: &str) -> Option<u32> {
+        let mut num = 0u32;
+        for b in letters.bytes() {
+            if !b.is_ascii_alphabetic() {
+                return None;
+            }
+            let val = (b.to_ascii_uppercase() - b'A' + 1) as u32;
+            num = num.checked_mul(26)?.checked_add(val)?;
+        }
+        if num > 0 { Some(num) } else { None }
+    }
+
+    fn scan_container_smuggled_payload(
+        name: &str,
+        data: Option<&[u8]>,
+    ) -> Option<(&'static str, &'static str, String)> {
+        let name_lower = name.to_ascii_lowercase();
+
+        // 1. Dangerous executable / script / package file extensions
+        let dangerous_extensions: &[(&str, &'static str, &'static str)] = &[
+            (".exe", "Critical", "Windows Executable (.exe)"),
+            (".dll", "Critical", "Dynamic Link Library (.dll)"),
+            (".sys", "Critical", "System Driver (.sys)"),
+            (".drv", "Critical", "System Driver (.drv)"),
+            (".ocx", "Critical", "OLE Control Extension (.ocx)"),
+            (".cpl", "Critical", "Control Panel Applet (.cpl)"),
+            (".scr", "Critical", "Screensaver Executable (.scr)"),
+            (".pif", "Critical", "Program Information File (.pif)"),
+            (".com", "Critical", "DOS Executable (.com)"),
+            (".bat", "Critical", "Batch script (.bat)"),
+            (".cmd", "Critical", "Command script (.cmd)"),
+            (".ps1", "Critical", "PowerShell script (.ps1)"),
+            (".psm1", "Critical", "PowerShell module (.psm1)"),
+            (".vbs", "Critical", "VBScript file (.vbs)"),
+            (".vbe", "Critical", "Encoded VBScript file (.vbe)"),
+            (".js", "Critical", "JavaScript file (.js)"),
+            (".jse", "Critical", "Encoded JavaScript file (.jse)"),
+            (".wsf", "Critical", "Windows Script File (.wsf)"),
+            (".wsh", "Critical", "Windows Script Host settings (.wsh)"),
+            (".hta", "Critical", "HTML Application (.hta)"),
+            (".msi", "Critical", "Windows Installer package (.msi)"),
+            (".msp", "Critical", "Windows Installer patch (.msp)"),
+            (".mst", "Critical", "Windows Installer transform (.mst)"),
+            (".inf", "Critical", "Setup Information script (.inf)"),
+            (".reg", "Critical", "Registry script (.reg)"),
+            (".lnk", "Critical", "Windows Shell Link shortcut (.lnk)"),
+            (".iso", "Critical", "Disk image (.iso)"),
+            (".img", "Critical", "Disk image (.img)"),
+            (".vhd", "Critical", "Virtual Hard Disk (.vhd)"),
+            (".vhdx", "Critical", "Virtual Hard Disk (.vhdx)"),
+        ];
+
+        for (ext, sev, desc) in dangerous_extensions {
+            if name_lower.ends_with(ext) {
+                return Some((
+                    *sev,
+                    "SmuggledExecutableExtension",
+                    format!(
+                        "Dangerous standalone payload file with extension '{ext}' ({desc}) bundled inside OOXML container"
+                    ),
+                ));
+            }
+        }
+
+        // 2. Binary Magic Header Analysis on all non-OLE-package parts
+        let is_standard_ole_package =
+            name_lower.contains("oleobject") || name_lower.contains("package");
+        if let Some(bytes) = data {
+            if !is_standard_ole_package && bytes.len() >= 64 {
+                // A. Windows PE Header: MZ header at 0, and e_lfanew at 0x3C pointing to PE\0\0
+                if bytes.starts_with(b"MZ") {
+                    let e_lfanew =
+                        u32::from_le_bytes([bytes[0x3c], bytes[0x3d], bytes[0x3e], bytes[0x3f]])
+                            as usize;
+                    if e_lfanew + 4 <= bytes.len() && &bytes[e_lfanew..e_lfanew + 4] == b"PE\0\0" {
+                        return Some((
+                            "Critical",
+                            "SmuggledPeExecutableBinary",
+                            "Smuggled Windows PE executable binary (MZ/PE header) detected in container part".into(),
+                        ));
+                    }
+                }
+                // B. Windows Shell Link (.LNK) magic header
+                if bytes.len() >= 20
+                    && bytes[0..8] == [0x4c, 0x00, 0x00, 0x00, 0x01, 0x14, 0x02, 0x00]
+                {
+                    return Some((
+                        "Critical",
+                        "SmuggledShellLinkShortcut",
+                        "Smuggled Windows Shell Link shortcut (.lnk binary) detected in container part".into(),
+                    ));
+                }
+                // C. ELF or Mach-O executable
+                if bytes.starts_with(b"\x7fELF") {
+                    return Some((
+                        "Critical",
+                        "SmuggledElfBinary",
+                        "Smuggled Linux/Unix ELF binary detected in container part".into(),
+                    ));
+                }
+                if bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xce])
+                    || bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xcf])
+                    || bytes.starts_with(&[0xce, 0xfa, 0xed, 0xfe])
+                    || bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+                {
+                    return Some((
+                        "Critical",
+                        "SmuggledMachOBinary",
+                        "Smuggled macOS Mach-O executable binary detected in container part".into(),
+                    ));
+                }
+            }
+
+            // 3. Staged script payload in arbitrary non-standard non-XML part
+            if !name_lower.ends_with(".xml")
+                && !name_lower.ends_with(".rels")
+                && !name_lower.ends_with(".bin")
+                && bytes.len() >= 10
+                && bytes.len() <= 100_000
+            {
+                let s = String::from_utf8_lossy(bytes);
+                let s_lower = s.to_ascii_lowercase();
+                if s_lower.starts_with("#!/bin/") || s_lower.starts_with("#!/usr/bin/") {
+                    return Some((
+                        "High",
+                        "SmuggledUnixScript",
+                        "Smuggled Unix shell script with shebang directive detected in container part".into(),
+                    ));
+                }
+                if (s_lower.contains("powershell")
+                    || s_lower.contains("cmd.exe")
+                    || s_lower.contains("wscript.shell"))
+                    && (s_lower.contains("-enc")
+                        || s_lower.contains("-encodedcommand")
+                        || s_lower.contains("invoke-expression")
+                        || s_lower.contains("downloadstring")
+                        || s_lower.contains("wscript.sleep"))
+                {
+                    return Some((
+                        "High",
+                        "SmuggledScriptPayload",
+                        "Smuggled command execution script payload detected in container part"
+                            .into(),
+                    ));
+                }
+            }
+        }
+
+        None
+    }
+
+    fn scan_worksheet_view_evasion(xml_str: &str) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = xml_str.to_ascii_lowercase();
+
+        // 1. Scan <cols> for hidden columns
+        let mut hidden_cols: Vec<(u32, u32)> = Vec::new();
+        if let Some(cols_start) = s_lower.find("<cols") {
+            let cols_end = s_lower[cols_start..]
+                .find("</cols>")
+                .map(|idx| cols_start + idx)
+                .unwrap_or(xml_str.len());
+            let cols_slice = &xml_str[cols_start..cols_end];
+            let mut c_cursor = 0;
+            while c_cursor < cols_slice.len() {
+                if let Some(tag_open) = cols_slice[c_cursor..].find("<col ") {
+                    let start = c_cursor + tag_open;
+                    let Some(tag_close) = cols_slice[start..].find('>') else {
+                        break;
+                    };
+                    let tag = &cols_slice[start..=start + tag_close];
+                    let is_hidden = extract_attribute_value(tag, "hidden")
+                        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        || extract_attribute_value(tag, "width")
+                            .is_some_and(|v| v == "0" || v == "0.0");
+                    if is_hidden {
+                        let min = extract_attribute_value(tag, "min")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .unwrap_or(0);
+                        let max = extract_attribute_value(tag, "max")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .unwrap_or(min);
+                        if min > 0 {
+                            hidden_cols.push((min, max));
+                        }
+                    }
+                    c_cursor = start + tag_close + 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // 2. Scan <sheetData> for hidden rows
+        let mut hidden_rows = std::collections::BTreeSet::new();
+        let mut cursor = 0;
+        while cursor < xml_str.len() {
+            if let Some(pos) = xml_str[cursor..].find("<row ") {
+                let start = cursor + pos;
+                let Some(end_idx) = xml_str[start..].find('>') else {
+                    break;
+                };
+                let tag = &xml_str[start..=start + end_idx];
+                let is_hidden = extract_attribute_value(tag, "hidden")
+                    .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    || extract_attribute_value(tag, "ht").is_some_and(|v| v == "0" || v == "0.0");
+                if is_hidden
+                    && let Some(r_str) = extract_attribute_value(tag, "r")
+                    && let Ok(r_num) = r_str.parse::<u32>()
+                {
+                    hidden_rows.insert(r_num);
+                }
+                cursor = start + end_idx + 1;
+            } else {
+                break;
+            }
+        }
+
+        // 3. Scan for formula cells in hidden rows/cols
+        if !hidden_rows.is_empty() || !hidden_cols.is_empty() {
+            let mut cell_cursor = 0;
+            let mut findings_count = 0;
+            while cell_cursor < xml_str.len() && findings_count < 10 {
+                if let Some(pos) = xml_str[cell_cursor..].find("<c ") {
+                    let start = cell_cursor + pos;
+                    let cell_close = if let Some(close_idx) = xml_str[start..].find("</c>") {
+                        start + close_idx + 4
+                    } else if let Some(self_close) = xml_str[start..].find("/>") {
+                        start + self_close + 2
+                    } else {
+                        break;
+                    };
+                    let cell_content = &xml_str[start..cell_close];
+                    let cell_lower = cell_content.to_ascii_lowercase();
+
+                    if let Some(f_start) = cell_lower.find("<f")
+                        && let Some(f_tag_close) = cell_content[f_start..].find('>')
+                    {
+                        let f_body_start = f_start + f_tag_close + 1;
+                        let f_body_end = cell_lower[f_body_start..]
+                            .find("</f>")
+                            .map(|idx| f_body_start + idx)
+                            .unwrap_or(cell_content.len());
+                        let formula_text = cell_content[f_body_start..f_body_end].trim();
+
+                        if !formula_text.is_empty() {
+                            let tag_end = cell_content.find('>').unwrap_or(cell_content.len());
+                            let open_tag = &cell_content[..tag_end];
+                            if let Some(cell_ref) = extract_attribute_value(open_tag, "r") {
+                                let split_idx = cell_ref
+                                    .find(|c: char| c.is_ascii_digit())
+                                    .unwrap_or(cell_ref.len());
+                                let (col_part, row_part) = cell_ref.split_at(split_idx);
+                                let row_num = row_part.parse::<u32>().ok();
+                                let col_num = col_letters_to_num(col_part);
+
+                                let in_hidden_row =
+                                    row_num.is_some_and(|r| hidden_rows.contains(&r));
+                                let in_hidden_col = col_num.is_some_and(|c| {
+                                    hidden_cols.iter().any(|(min, max)| c >= *min && c <= *max)
+                                });
+
+                                if in_hidden_row || in_hidden_col {
+                                    let f_low = formula_text.to_ascii_lowercase();
+                                    let is_suspicious = f_low.contains("dde")
+                                        || f_low.contains("cmd")
+                                        || f_low.contains("powershell")
+                                        || f_low.contains("http:")
+                                        || f_low.contains("https:")
+                                        || f_low.contains("\\\\")
+                                        || f_low.contains("wscript")
+                                        || f_low.contains("cscript")
+                                        || f_low.contains("mshta")
+                                        || f_low.contains("certutil")
+                                        || f_low.contains("shell")
+                                        || f_low.contains("exec")
+                                        || f_low.contains("char(")
+                                        || f_low.contains("unichar(")
+                                        || f_low.contains("xor(")
+                                        || f_low.contains("bitxor(");
+
+                                    let sev = if is_suspicious { "High" } else { "Medium" };
+                                    let reason = if in_hidden_row && in_hidden_col {
+                                        format!(
+                                            "Worksheet cloaks formula in both hidden row and column at {cell_ref} ('{formula_text}')"
+                                        )
+                                    } else if in_hidden_row {
+                                        format!(
+                                            "Worksheet cloaks formula in hidden row at {cell_ref} ('{formula_text}')"
+                                        )
+                                    } else {
+                                        format!(
+                                            "Worksheet cloaks formula in hidden column at {cell_ref} ('{formula_text}')"
+                                        )
+                                    };
+                                    results.push((
+                                        sev,
+                                        cell_ref.clone(),
+                                        format!("evasion:hiddenCell:{cell_ref}"),
+                                        reason,
+                                    ));
+                                    findings_count += 1;
+                                }
+                            }
+                        }
+                    }
+
+                    cell_cursor = cell_close;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // 4. Scan <sheetViews> for extreme scrolling or cloaked layout
+        let mut sv_cursor = 0;
+        while sv_cursor < xml_str.len() {
+            if let Some(pos) = s_lower[sv_cursor..].find("<sheetview ") {
+                let sv_start = sv_cursor + pos;
+                let Some(end_idx) = xml_str[sv_start..].find('>') else {
+                    break;
+                };
+                let sv_tag = &xml_str[sv_start..=sv_start + end_idx];
+
+                if let Some(top_left) = extract_attribute_value(sv_tag, "topleftcell") {
+                    let split_idx = top_left
+                        .find(|c: char| c.is_ascii_digit())
+                        .unwrap_or(top_left.len());
+                    let (col_part, row_part) = top_left.split_at(split_idx);
+                    let row_num = row_part.parse::<u32>().unwrap_or(0);
+                    let col_num = col_letters_to_num(col_part).unwrap_or(0);
+
+                    if row_num >= 1000 || col_num >= 50 {
+                        results.push((
+                            "High",
+                            top_left.clone(),
+                            format!("sheetView:topLeftCell:{top_left}"),
+                            format!("Worksheet view sets extreme topLeftCell scroll ('{top_left}') displacing viewport to evade visual inspection"),
+                        ));
+                    }
+                }
+
+                let hide_grid = extract_attribute_value(sv_tag, "showgridlines")
+                    .is_some_and(|v| v == "0" || v.eq_ignore_ascii_case("false"));
+                let hide_headers = extract_attribute_value(sv_tag, "showrowcolheaders")
+                    .is_some_and(|v| v == "0" || v.eq_ignore_ascii_case("false"));
+                if hide_grid && hide_headers {
+                    results.push((
+                        "Medium",
+                        "view".into(),
+                        "sheetView:cloakedHeaders".into(),
+                        "Worksheet view suppresses row/column headers and grid lines to conceal layout and coordinates".into(),
+                    ));
+                }
+
+                sv_cursor = sv_start + end_idx + 1;
+            } else {
+                break;
+            }
+        }
+
+        results
+    }
+
+    fn scan_activex_xml_declarations(xml_str: &str) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = xml_str.to_ascii_lowercase();
+
+        // 1. Weaponized ActiveX CLSIDs
+        let weaponized_clsids: &[(&str, &'static str, &'static str)] = &[
+            (
+                "{72c24dd5-d70a-438b-8a42-98424b88afb8}",
+                "Critical",
+                "WScript.Shell command execution COM object",
+            ),
+            (
+                "{f935dc22-1cf0-11d0-adb9-00c04fd58a0b}",
+                "Critical",
+                "WScript.Network COM automation object",
+            ),
+            (
+                "{bd96c556-65a3-11d0-983a-00c04fc29e30}",
+                "Critical",
+                "RDS.DataSpace / XMLHTTP drive-by command execution",
+            ),
+            (
+                "{13709620-c279-11ce-a49e-444553540000}",
+                "Critical",
+                "Shell.Explorer web browser / script execution control",
+            ),
+            (
+                "{233c1501-e770-11ce-9f5b-00aa00402709}",
+                "Critical",
+                "Scriptlet.TypeLib scriptlet moniker execution (CVE-2017-0199)",
+            ),
+            (
+                "{00000566-0000-0010-8000-00aa006d2ea4}",
+                "Critical",
+                "ADODB.Stream binary payload drop and write object",
+            ),
+            (
+                "{00021a20-0000-0000-c000-000000000046}",
+                "Critical",
+                "Equation Editor 3.0 vulnerability exploit (CVE-2017-11882 / CVE-2018-0802)",
+            ),
+            (
+                "{d27cdb6e-ae6d-11cf-96b8-444553540000}",
+                "Critical",
+                "Shockwave Flash remote code execution vector",
+            ),
+            (
+                "{0002e005-0000-0000-c000-000000000046}",
+                "Critical",
+                "MSComctlLib TreeView/ListView control vulnerability (CVE-2012-0158)",
+            ),
+            (
+                "{27909e9c-03a0-47a6-8415-352c57eb1f9b}",
+                "Critical",
+                ".NET Windows Forms deserialization attack vector",
+            ),
+        ];
+
+        for (clsid, sev, desc) in weaponized_clsids {
+            if s_lower.contains(clsid) {
+                results.push((
+                    *sev,
+                    clsid.to_string(),
+                    format!("clsid:{clsid}"),
+                    format!(
+                        "ActiveX control declaration specifies weaponized CLSID {clsid} ({desc})"
+                    ),
+                ));
+            }
+        }
+
+        // 2. Scan properties in <ocx:ocxPr ...>, <ax:ocxPr ...>, or <param ...>
+        let mut cursor = 0;
+        while cursor < xml_str.len() {
+            if let Some(pos) = xml_str[cursor..].find('<') {
+                let start = cursor + pos;
+                let Some(end_idx) = xml_str[start..].find('>') else {
+                    break;
+                };
+                let tag = &xml_str[start..=start + end_idx];
+                let tag_lower = tag.to_ascii_lowercase();
+
+                if tag_lower.contains("ocxpr")
+                    || tag_lower.starts_with("<param ")
+                    || tag_lower.contains(":param ")
+                {
+                    let prop_name =
+                        extract_attribute_value(tag, "name").unwrap_or_else(|| "property".into());
+                    let prop_val = extract_attribute_value(tag, "value").unwrap_or_default();
+                    let v_lower = prop_val.to_ascii_lowercase();
+
+                    if v_lower.starts_with("\\\\") || v_lower.starts_with("//") {
+                        results.push((
+                            "High",
+                            prop_name.clone(),
+                            format!("prop:{prop_name}"),
+                            format!("ActiveX property '{prop_name}' specifies remote UNC path '{prop_val}' (NTLM coercion vector)"),
+                        ));
+                    } else if v_lower.starts_with("http://")
+                        || v_lower.starts_with("https://")
+                        || v_lower.starts_with("ftp://")
+                    {
+                        results.push((
+                            "High",
+                            prop_name.clone(),
+                            format!("prop:{prop_name}"),
+                            format!("ActiveX property '{prop_name}' specifies remote URL payload '{prop_val}'"),
+                        ));
+                    } else if v_lower.contains(".exe")
+                        || v_lower.contains(".dll")
+                        || v_lower.contains(".ps1")
+                        || v_lower.contains(".vbs")
+                        || v_lower.contains(".hta")
+                        || v_lower.contains("powershell")
+                        || v_lower.contains("cmd.exe")
+                    {
+                        results.push((
+                            "High",
+                            prop_name.clone(),
+                            format!("prop:{prop_name}"),
+                            format!("ActiveX property '{prop_name}' references executable file or shell command ('{prop_val}')"),
+                        ));
+                    } else if v_lower.starts_with("ms-msdt:")
+                        || v_lower.starts_with("search-ms:")
+                        || v_lower.starts_with("mhtml:")
+                        || v_lower.starts_with("javascript:")
+                        || v_lower.starts_with("vbscript:")
+                    {
+                        results.push((
+                            "Critical",
+                            prop_name.clone(),
+                            format!("prop:{prop_name}"),
+                            format!("ActiveX property '{prop_name}' references dangerous exploit protocol scheme ('{prop_val}')"),
+                        ));
+                    }
+                }
+                cursor = start + end_idx + 1;
+            } else {
+                break;
+            }
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
         let is_dir = entry.name.ends_with('/') || entry.name.ends_with('\\');
         if is_dir {
             continue;
+        }
+
+        // Check for smuggled standalone payload binaries or scripts (VBA-CELL-032)
+        let entry_bytes_res = zip.read(entry);
+        let entry_bytes_opt = entry_bytes_res.as_deref().ok();
+        if let Some((sev, subtype, reason)) =
+            scan_container_smuggled_payload(&entry.name, entry_bytes_opt)
+        {
+            let coord = format!("part:{}", entry.name);
+            if !threats.iter().any(|t| t.coordinate == coord) {
+                let desc = format!(
+                    "Smuggled container payload or executable binary detected in part '{}': {reason}",
+                    entry.name
+                );
+                diagnostics.push(format!("Security warning: {desc}"));
+                threats.push(CellThreat {
+                    sheet_name: "Package".into(),
+                    cell_ref: entry.name.clone(),
+                    coordinate: coord,
+                    threat_kind: "SmuggledContainerPayload".into(),
+                    severity: sev.into(),
+                    formula: subtype.into(),
+                    description: desc,
+                });
+            }
+        }
+
+        // Check for Worksheet View Evasion (VBA-CELL-033)
+        let is_worksheet_xml = (name_lower.starts_with("xl/worksheets/sheet")
+            || name_lower.contains("/xl/worksheets/sheet")
+            || name_lower.contains("\\xl\\worksheets\\sheet")
+            || name_lower.starts_with("worksheets/sheet"))
+            && name_lower.ends_with(".xml");
+        if is_worksheet_xml && let Ok(ref data) = entry_bytes_res {
+            let s = String::from_utf8_lossy(data);
+            for (sev, cell_ref, coord_suffix, reason) in scan_worksheet_view_evasion(&s) {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Worksheet view evasion detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: entry.name.clone(),
+                        cell_ref,
+                        coordinate: coord,
+                        threat_kind: "WorksheetViewEvasion".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for ActiveX XML declaration anomalies (VBA-CELL-034)
+        let is_activex_xml = (name_lower.contains("/activex/")
+            || name_lower.starts_with("activex/")
+            || name_lower.contains("\\activex\\"))
+            && name_lower.ends_with(".xml");
+        if is_activex_xml && let Ok(ref data) = entry_bytes_res {
+            let s = String::from_utf8_lossy(data);
+            for (sev, target_id, coord_suffix, reason) in scan_activex_xml_declarations(&s) {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "ActiveX object declaration anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "ActiveX".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "ActiveXObjectDeclaration".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
         }
 
         // Check for embedded OLE / executable packages (e.g. xl/embeddings/oleObject1.bin, word/embeddings/package.bin)

@@ -3062,6 +3062,9 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "ExternalLinkTarget" => ("VBA-CELL-029", "error"),
         "WebSettingsScriptOrReload" => ("VBA-CELL-030", "error"),
         "WorkbookProtectionEvasion" => ("VBA-CELL-031", "error"),
+        "SmuggledContainerPayload" => ("VBA-CELL-032", "error"),
+        "WorksheetViewEvasion" => ("VBA-CELL-033", "warning"),
+        "ActiveXObjectDeclaration" => ("VBA-CELL-034", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3204,7 +3207,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-030\",\"name\":\"WebSettingsScriptOrReload\",\"shortDescription\":{\"text\":\"Web Settings Remote Frameset or Script Injection\"},\"fullDescription\":{\"text\":\"Document web settings (word/webSettings.xml) contains suspicious remote framesets, frame injections, or script/exploit protocol targets triggered during web layout rendering.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-031\",\"name\":\"WorkbookProtectionEvasion\",\"shortDescription\":{\"text\":\"Workbook Protection Evasion or VeryHidden Sheet Cloaking\"},\"fullDescription\":{\"text\":\"Workbook contains cloaked worksheets (state=\\\"veryHidden\\\"), workbook structure lock evasion, or anomalous password protection hashes designed to impede analysis.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-031\",\"name\":\"WorkbookProtectionEvasion\",\"shortDescription\":{\"text\":\"Workbook Protection Evasion or VeryHidden Sheet Cloaking\"},\"fullDescription\":{\"text\":\"Workbook contains cloaked worksheets (state=\\\"veryHidden\\\"), workbook structure lock evasion, or anomalous password protection hashes designed to impede analysis.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-032\",\"name\":\"SmuggledContainerPayload\",\"shortDescription\":{\"text\":\"Smuggled Container Payload or Executable Binary\"},\"fullDescription\":{\"text\":\"OOXML container package contains standalone executable files (.exe, .dll, .bat, .ps1, .lnk, .iso, etc.), raw Windows PE binaries, or smuggled staging scripts.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-033\",\"name\":\"WorksheetViewEvasion\",\"shortDescription\":{\"text\":\"Worksheet View Evasion or Hidden Formula Cloaking\"},\"fullDescription\":{\"text\":\"Worksheet contains formulas cloaked in hidden rows or columns, extreme viewport scrolling (topLeftCell), or display header suppression to evade visual inspection.\"},\"defaultConfiguration\":{\"level\":\"warning\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-034\",\"name\":\"ActiveXObjectDeclarationAnomaly\",\"shortDescription\":{\"text\":\"ActiveX Object Declaration Anomaly or Weaponized CLSID\"},\"fullDescription\":{\"text\":\"ActiveX definition XML part (activeX*.xml) registers weaponized ActiveX CLSIDs (WScript.Shell, Equation Editor, Shell.Explorer, ADODB.Stream, Scriptlet.TypeLib) or properties with remote UNC/URL targets.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

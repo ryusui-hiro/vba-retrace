@@ -2420,7 +2420,9 @@ impl Evaluator<'_> {
             }
             "take" | "drop" | "chooserows" | "choosecols" | "torow" | "tocol" | "expand"
             | "wraprows" | "wrapcols" | "filter" | "sort" | "sortby" | "unique" | "arraytotext"
-            | "valuetotext" => self.evaluate_array_manipulation(name, arguments, depth + 1),
+            | "valuetotext" | "vstack" | "hstack" => {
+                self.evaluate_array_manipulation(name, arguments, depth + 1)
+            }
             "len" | "left" | "right" | "mid" | "concatenate" | "concat" | "value" | "trim"
             | "upper" | "lower" | "exact" | "rept" | "substitute" | "replace" | "char" | "code"
             | "clean" | "t" | "n" | "find" | "search" | "hyperlink" | "proper" | "unichar"
@@ -3172,6 +3174,72 @@ impl Evaluator<'_> {
     ) -> Result<EvalValue, &'static str> {
         if arguments.is_empty() {
             return Err("unsupported");
+        }
+        if name == "vstack" || name == "hstack" {
+            let mut grids: Vec<EvalGrid> = Vec::new();
+            for arg in arguments {
+                let grid = match self.evaluate(arg, depth + 1)? {
+                    EvalValue::Scalar(s) => (vec![s], 1, 1),
+                    EvalValue::Range { values, rows, cols } => (values, rows, cols),
+                    EvalValue::Lambda { .. } => {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                };
+                grids.push(grid);
+            }
+            if name == "vstack" {
+                let total_rows: usize = grids.iter().map(|(_, r, _)| *r).sum();
+                let max_cols: usize = grids.iter().map(|(_, _, c)| *c).max().unwrap_or(0);
+                if total_rows == 0 || max_cols == 0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#CALC!".into())));
+                }
+                if total_rows.saturating_mul(max_cols) > 100_000 {
+                    return Err("resource_limit");
+                }
+                let mut out_values = Vec::with_capacity(total_rows * max_cols);
+                for (vals, r, c) in grids {
+                    for row_idx in 0..r {
+                        for col_idx in 0..max_cols {
+                            if col_idx < c {
+                                out_values.push(vals[row_idx * c + col_idx].clone());
+                            } else {
+                                out_values.push(FormulaValue::Error("#N/A".into()));
+                            }
+                        }
+                    }
+                }
+                return Ok(EvalValue::Range {
+                    values: out_values,
+                    rows: total_rows,
+                    cols: max_cols,
+                });
+            } else {
+                let max_rows: usize = grids.iter().map(|(_, r, _)| *r).max().unwrap_or(0);
+                let total_cols: usize = grids.iter().map(|(_, _, c)| *c).sum();
+                if max_rows == 0 || total_cols == 0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#CALC!".into())));
+                }
+                if max_rows.saturating_mul(total_cols) > 100_000 {
+                    return Err("resource_limit");
+                }
+                let mut out_values = Vec::with_capacity(max_rows * total_cols);
+                for row_idx in 0..max_rows {
+                    for (vals, r, c) in &grids {
+                        for col_idx in 0..*c {
+                            if row_idx < *r {
+                                out_values.push(vals[row_idx * *c + col_idx].clone());
+                            } else {
+                                out_values.push(FormulaValue::Error("#N/A".into()));
+                            }
+                        }
+                    }
+                }
+                return Ok(EvalValue::Range {
+                    values: out_values,
+                    rows: max_rows,
+                    cols: total_cols,
+                });
+            }
         }
         let (values, orig_rows, orig_cols) = match self.evaluate(&arguments[0], depth + 1)? {
             EvalValue::Scalar(s) => (vec![s], 1, 1),
@@ -7049,6 +7117,161 @@ mod tests {
             )
             .value,
             Some(FormulaValue::Error("#CALC!".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_vstack_hstack_ifs_switch_and_xor() {
+        let test_cells = vec![];
+
+        // VSTACK
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(VSTACK({1, 2}, {3, 4}), 2, 1)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(3.0))
+        );
+        // VSTACK with uneven columns pads with #N/A
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(VSTACK({1, 2}, {3, 4, 5}), 1, 3)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Error("#N/A".into()))
+        );
+
+        // HSTACK
+        assert_eq!(
+            evaluate_formula(
+                "=CONCAT(HSTACK({\"powershell\", \" -enc \"}, {\"JAB4...\"}))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("powershell -enc JAB4...".into()))
+        );
+        // HSTACK with uneven rows pads with #N/A
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(HSTACK({1; 2}, {3; 4; 5}), 3, 1)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Error("#N/A".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=INDEX(HSTACK({1; 2}, {3; 4; 5}), 3, 2)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(5.0))
+        );
+
+        // Combined with LET
+        assert_eq!(
+            evaluate_formula(
+                "=LET(parts, VSTACK(\"calc\", \".exe\"), CONCAT(parts))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("calc.exe".into()))
+        );
+
+        // IFS
+        assert_eq!(
+            evaluate_formula(
+                "=IFS(1 = 2, \"no\", 2 = 3, \"nope\", 4 = 4, \"hit\", 1 = 1, \"unreached\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("hit".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=IFS(1 = 2, \"no\")", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#N/A".into()))
+        );
+
+        // SWITCH
+        assert_eq!(
+            evaluate_formula(
+                "=SWITCH(2, 1, \"one\", 2, \"two\", 3, \"three\", \"default\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("two".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=SWITCH(\"ps\", \"cmd\", \"command\", \"ps\", \"powershell\", \"other\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("powershell".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=SWITCH(99, 1, \"one\", 2, \"two\", \"fallback\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("fallback".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=SWITCH(99, 1, \"one\", 2, \"two\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Error("#N/A".into()))
+        );
+
+        // XOR
+        assert_eq!(
+            evaluate_formula("=XOR(TRUE, FALSE)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula("=XOR(TRUE, TRUE)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Boolean(false))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=XOR(TRUE, TRUE, TRUE)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula("=XOR(FALSE, FALSE)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Boolean(false))
         );
     }
 }
