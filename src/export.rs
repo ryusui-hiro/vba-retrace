@@ -3130,6 +3130,18 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "ScenarioManagerOrConsolidationAnomaly"
         | "ScenarioManagerAnomaly"
         | "DataConsolidationAnomaly" => ("VBA-CELL-061", "error"),
+        "PowerPointAnimationOrTimeNodeAnomaly"
+        | "PowerPointAnimationAnomaly"
+        | "PptAnimationAnomaly"
+        | "TimeNodeAnomaly" => ("VBA-CELL-062", "error"),
+        "WordHeaderFooterOrWatermarkAnomaly"
+        | "WordHeaderFooterAnomaly"
+        | "HeaderFooterAnomaly"
+        | "WatermarkAnomaly" => ("VBA-CELL-063", "error"),
+        "ExcelDataModelOrFormulaCacheAnomaly"
+        | "ExcelDataModelAnomaly"
+        | "DataModelAnomaly"
+        | "FormulaCacheAnomaly" => ("VBA-CELL-064", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3362,7 +3374,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-060\",\"name\":\"PowerPointTagsOrMastersAnomaly\",\"shortDescription\":{\"text\":\"PowerPoint Tags, Masters, and Font Table Anomaly\"},\"fullDescription\":{\"text\":\"PowerPoint programmable tags, presentation relationships, masters, or font tables contain smuggled Windows PE binaries, shell execution commands, remote template injection, or remote UNC paths.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-061\",\"name\":\"ScenarioManagerOrConsolidationAnomaly\",\"shortDescription\":{\"text\":\"Excel Scenario Manager and Data Consolidation Anomaly\"},\"fullDescription\":{\"text\":\"Excel Scenario Manager replacement cells or Data Consolidation definitions contain cloaked DDE execution formulas, Excel 4.0 macros, shell commands, or remote UNC workbook paths enabling NTLM credential coercion.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-061\",\"name\":\"ScenarioManagerOrConsolidationAnomaly\",\"shortDescription\":{\"text\":\"Excel Scenario Manager and Data Consolidation Anomaly\"},\"fullDescription\":{\"text\":\"Excel Scenario Manager replacement cells or Data Consolidation definitions contain cloaked DDE execution formulas, Excel 4.0 macros, shell commands, or remote UNC workbook paths enabling NTLM credential coercion.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-062\",\"name\":\"PowerPointAnimationOrTimeNodeAnomaly\",\"shortDescription\":{\"text\":\"PowerPoint Animation and TimeNode Anomaly\"},\"fullDescription\":{\"text\":\"PowerPoint slide animation timing nodes, media nodes, or slide relationships contain shell command execution triggers, remote UNC media streams, dangerous exploit URI schemes, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-063\",\"name\":\"WordHeaderFooterOrWatermarkAnomaly\",\"shortDescription\":{\"text\":\"Word Header, Footer, and Watermark Anomaly\"},\"fullDescription\":{\"text\":\"Word headers, footers, watermarks, or their relationships configure remote UNC paths enabling NTLM credential coercion, dangerous exploit URI schemes, executable or script targets, shell commands, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-064\",\"name\":\"ExcelDataModelOrFormulaCacheAnomaly\",\"shortDescription\":{\"text\":\"Excel DataModel and Shared Formula Cache Anomaly\"},\"fullDescription\":{\"text\":\"Excel DataModel definitions or worksheet shared formula caches contain remote UNC connections enabling NTLM credential coercion, database command execution strings, XXE declarations, cloaked DDE execution, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

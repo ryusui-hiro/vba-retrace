@@ -1238,6 +1238,32 @@ impl Evaluator<'_> {
                     FormulaValue::String(_)
                 ))))
             }
+            "isodd" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                if let FormulaValue::Error(e) = val {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                match to_number(&val) {
+                    Ok(n) => {
+                        let int_val = n.trunc() as i64;
+                        Ok(EvalValue::Scalar(FormulaValue::Boolean(int_val % 2 != 0)))
+                    }
+                    Err(_) => Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                }
+            }
+            "iseven" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                if let FormulaValue::Error(e) = val {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                match to_number(&val) {
+                    Ok(n) => {
+                        let int_val = n.trunc() as i64;
+                        Ok(EvalValue::Scalar(FormulaValue::Boolean(int_val % 2 == 0)))
+                    }
+                    Err(_) => Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                }
+            }
             "type" if arguments.len() == 1 => {
                 let eval_res = self.evaluate(&arguments[0], depth + 1)?;
                 let type_code = match eval_res {
@@ -2636,6 +2662,359 @@ impl Evaluator<'_> {
                         Ok(EvalValue::Scalar(FormulaValue::String(s)))
                     }
                     Err(_) => Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into()))),
+                }
+            }
+            "imsum" if !arguments.is_empty() => {
+                let mut sum_r = 0.0f64;
+                let mut sum_im = 0.0f64;
+                let mut suffix = "i";
+                for arg in arguments {
+                    match self.evaluate(arg, depth + 1)? {
+                        EvalValue::Scalar(s) => {
+                            if let FormulaValue::Error(e) = s {
+                                return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                            }
+                            if let FormulaValue::String(ref str_val) = s
+                                && (str_val.ends_with('j') || str_val.ends_with('J'))
+                            {
+                                suffix = "j";
+                            }
+                            match parse_complex(&s) {
+                                Ok((r, im)) => {
+                                    sum_r += r;
+                                    sum_im += im;
+                                }
+                                Err(_) => {
+                                    return Ok(EvalValue::Scalar(FormulaValue::Error(
+                                        "#NUM!".into(),
+                                    )));
+                                }
+                            }
+                        }
+                        EvalValue::Range { values, .. } => {
+                            for v in values {
+                                if let FormulaValue::Error(e) = v {
+                                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                                }
+                                if let FormulaValue::String(ref str_val) = v
+                                    && (str_val.ends_with('j') || str_val.ends_with('J'))
+                                {
+                                    suffix = "j";
+                                }
+                                match parse_complex(&v) {
+                                    Ok((r, im)) => {
+                                        sum_r += r;
+                                        sum_im += im;
+                                    }
+                                    Err(_) => {
+                                        return Ok(EvalValue::Scalar(FormulaValue::Error(
+                                            "#NUM!".into(),
+                                        )));
+                                    }
+                                }
+                            }
+                        }
+                        EvalValue::Lambda { .. } => {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                        }
+                    }
+                }
+                let s = format_complex(sum_r, sum_im, suffix);
+                Ok(EvalValue::Scalar(FormulaValue::String(s)))
+            }
+            "imsub" if arguments.len() == 2 => {
+                let v1 = self.eval_scalar(&arguments[0], depth + 1)?;
+                if let FormulaValue::Error(e) = v1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                let v2 = self.eval_scalar(&arguments[1], depth + 1)?;
+                if let FormulaValue::Error(e) = v2 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                let suffix = if let FormulaValue::String(ref s) = v1 {
+                    if s.ends_with('j') || s.ends_with('J') {
+                        "j"
+                    } else {
+                        "i"
+                    }
+                } else if let FormulaValue::String(ref s) = v2 {
+                    if s.ends_with('j') || s.ends_with('J') {
+                        "j"
+                    } else {
+                        "i"
+                    }
+                } else {
+                    "i"
+                };
+                match (parse_complex(&v1), parse_complex(&v2)) {
+                    (Ok((r1, im1)), Ok((r2, im2))) => {
+                        let s = format_complex(r1 - r2, im1 - im2, suffix);
+                        Ok(EvalValue::Scalar(FormulaValue::String(s)))
+                    }
+                    _ => Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into()))),
+                }
+            }
+            "improduct" if !arguments.is_empty() => {
+                let mut prod_r = 1.0f64;
+                let mut prod_im = 0.0f64;
+                let mut suffix = "i";
+                for arg in arguments {
+                    match self.evaluate(arg, depth + 1)? {
+                        EvalValue::Scalar(s) => {
+                            if let FormulaValue::Error(e) = s {
+                                return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                            }
+                            if let FormulaValue::String(ref str_val) = s
+                                && (str_val.ends_with('j') || str_val.ends_with('J'))
+                            {
+                                suffix = "j";
+                            }
+                            match parse_complex(&s) {
+                                Ok((r, im)) => {
+                                    let new_r = prod_r * r - prod_im * im;
+                                    let new_im = prod_r * im + prod_im * r;
+                                    prod_r = new_r;
+                                    prod_im = new_im;
+                                }
+                                Err(_) => {
+                                    return Ok(EvalValue::Scalar(FormulaValue::Error(
+                                        "#NUM!".into(),
+                                    )));
+                                }
+                            }
+                        }
+                        EvalValue::Range { values, .. } => {
+                            for v in values {
+                                if let FormulaValue::Error(e) = v {
+                                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                                }
+                                if let FormulaValue::String(ref str_val) = v
+                                    && (str_val.ends_with('j') || str_val.ends_with('J'))
+                                {
+                                    suffix = "j";
+                                }
+                                match parse_complex(&v) {
+                                    Ok((r, im)) => {
+                                        let new_r = prod_r * r - prod_im * im;
+                                        let new_im = prod_r * im + prod_im * r;
+                                        prod_r = new_r;
+                                        prod_im = new_im;
+                                    }
+                                    Err(_) => {
+                                        return Ok(EvalValue::Scalar(FormulaValue::Error(
+                                            "#NUM!".into(),
+                                        )));
+                                    }
+                                }
+                            }
+                        }
+                        EvalValue::Lambda { .. } => {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                        }
+                    }
+                }
+                let s = format_complex(prod_r, prod_im, suffix);
+                Ok(EvalValue::Scalar(FormulaValue::String(s)))
+            }
+            "imdiv" if arguments.len() == 2 => {
+                let v1 = self.eval_scalar(&arguments[0], depth + 1)?;
+                if let FormulaValue::Error(e) = v1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                let v2 = self.eval_scalar(&arguments[1], depth + 1)?;
+                if let FormulaValue::Error(e) = v2 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                let suffix = if let FormulaValue::String(ref s) = v1 {
+                    if s.ends_with('j') || s.ends_with('J') {
+                        "j"
+                    } else {
+                        "i"
+                    }
+                } else if let FormulaValue::String(ref s) = v2 {
+                    if s.ends_with('j') || s.ends_with('J') {
+                        "j"
+                    } else {
+                        "i"
+                    }
+                } else {
+                    "i"
+                };
+                match (parse_complex(&v1), parse_complex(&v2)) {
+                    (Ok((r1, im1)), Ok((r2, im2))) => {
+                        let den = r2 * r2 + im2 * im2;
+                        if den == 0.0 {
+                            Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                        } else {
+                            let r = (r1 * r2 + im1 * im2) / den;
+                            let im = (im1 * r2 - r1 * im2) / den;
+                            let s = format_complex(r, im, suffix);
+                            Ok(EvalValue::Scalar(FormulaValue::String(s)))
+                        }
+                    }
+                    _ => Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into()))),
+                }
+            }
+            "impower" if arguments.len() == 2 => {
+                let v1 = self.eval_scalar(&arguments[0], depth + 1)?;
+                if let FormulaValue::Error(e) = v1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                let p = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let suffix = if let FormulaValue::String(ref s) = v1 {
+                    if s.ends_with('j') || s.ends_with('J') {
+                        "j"
+                    } else {
+                        "i"
+                    }
+                } else {
+                    "i"
+                };
+                match parse_complex(&v1) {
+                    Ok((r, im)) => {
+                        let m = (r * r + im * im).sqrt();
+                        let theta = im.atan2(r);
+                        let new_m = m.powf(p);
+                        let new_theta = p * theta;
+                        let new_r = new_m * new_theta.cos();
+                        let new_im = new_m * new_theta.sin();
+                        if !new_r.is_finite() || !new_im.is_finite() {
+                            Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                        } else {
+                            let s = format_complex(new_r, new_im, suffix);
+                            Ok(EvalValue::Scalar(FormulaValue::String(s)))
+                        }
+                    }
+                    Err(_) => Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into()))),
+                }
+            }
+            "imexp" if arguments.len() == 1 => {
+                let v = self.eval_scalar(&arguments[0], depth + 1)?;
+                if let FormulaValue::Error(e) = v {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                let suffix = if let FormulaValue::String(ref s) = v {
+                    if s.ends_with('j') || s.ends_with('J') {
+                        "j"
+                    } else {
+                        "i"
+                    }
+                } else {
+                    "i"
+                };
+                match parse_complex(&v) {
+                    Ok((x, y)) => {
+                        let exp_x = x.exp();
+                        if !exp_x.is_finite() {
+                            Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                        } else {
+                            let r = exp_x * y.cos();
+                            let im = exp_x * y.sin();
+                            let s = format_complex(r, im, suffix);
+                            Ok(EvalValue::Scalar(FormulaValue::String(s)))
+                        }
+                    }
+                    Err(_) => Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into()))),
+                }
+            }
+            "imln" if arguments.len() == 1 => {
+                let v = self.eval_scalar(&arguments[0], depth + 1)?;
+                if let FormulaValue::Error(e) = v {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                let suffix = if let FormulaValue::String(ref s) = v {
+                    if s.ends_with('j') || s.ends_with('J') {
+                        "j"
+                    } else {
+                        "i"
+                    }
+                } else {
+                    "i"
+                };
+                match parse_complex(&v) {
+                    Ok((x, y)) => {
+                        if x == 0.0 && y == 0.0 {
+                            Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                        } else {
+                            let m = (x * x + y * y).sqrt();
+                            let r = m.ln();
+                            let im = y.atan2(x);
+                            let s = format_complex(r, im, suffix);
+                            Ok(EvalValue::Scalar(FormulaValue::String(s)))
+                        }
+                    }
+                    Err(_) => Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into()))),
+                }
+            }
+            "imsqrt" if arguments.len() == 1 => {
+                let v = self.eval_scalar(&arguments[0], depth + 1)?;
+                if let FormulaValue::Error(e) = v {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                let suffix = if let FormulaValue::String(ref s) = v {
+                    if s.ends_with('j') || s.ends_with('J') {
+                        "j"
+                    } else {
+                        "i"
+                    }
+                } else {
+                    "i"
+                };
+                match parse_complex(&v) {
+                    Ok((x, y)) => {
+                        let m = (x * x + y * y).sqrt();
+                        let theta = y.atan2(x);
+                        let sqrt_m = m.sqrt();
+                        let r = sqrt_m * (theta / 2.0).cos();
+                        let im = sqrt_m * (theta / 2.0).sin();
+                        let s = format_complex(r, im, suffix);
+                        Ok(EvalValue::Scalar(FormulaValue::String(s)))
+                    }
+                    Err(_) => Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into()))),
+                }
+            }
+            "combina" if arguments.len() == 2 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc();
+                let k = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc();
+                if n < 0.0 || k < 0.0 || (n + k - 1.0 < 0.0 && k > 0.0) {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                if k == 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Number(1.0)));
+                }
+                let big_n = (n + k - 1.0) as u64;
+                let big_k = k as u64;
+                if big_k > big_n {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let k_eff = big_k.min(big_n - big_k);
+                let mut res = 1.0f64;
+                for j in 1..=k_eff {
+                    res = res * ((big_n - k_eff + j) as f64) / (j as f64);
+                }
+                if !res.is_finite() {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res.round())))
+                }
+            }
+            "permutationa" if arguments.len() == 2 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc();
+                let k = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc();
+                if n < 0.0 || k < 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                if n == 0.0 && k == 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Number(1.0)));
+                }
+                if n == 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Number(0.0)));
+                }
+                let res = n.powf(k);
+                if !res.is_finite() {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res.round())))
                 }
             }
             "sumxmy2" | "sumx2my2" | "sumx2py2" if arguments.len() == 2 => {
@@ -5366,7 +5745,18 @@ fn to_number(value: &FormulaValue) -> Result<f64, &'static str> {
     }
 }
 
-fn format_complex(real: f64, imag: f64, suffix: &str) -> String {
+fn format_complex(mut real: f64, mut imag: f64, suffix: &str) -> String {
+    if real.abs() < 1e-13 {
+        real = 0.0;
+    } else if (real - real.round()).abs() < 1e-12 {
+        real = real.round();
+    }
+    if imag.abs() < 1e-13 {
+        imag = 0.0;
+    } else if (imag - imag.round()).abs() < 1e-12 {
+        imag = imag.round();
+    }
+
     fn fmt_num(n: f64) -> String {
         if n.fract() == 0.0 && n.abs() < 1e15 {
             format!("{}", n as i64)
@@ -9382,6 +9772,121 @@ mod tests {
         assert_eq!(
             evaluate_formula(
                 "=CHAR(IMREAL(\"65+10i\"))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_complex_arithmetic_combinatorics_and_predicates() {
+        let test_cells = vec![];
+
+        // IMSUM & IMSUB
+        assert_eq!(
+            evaluate_formula(
+                "=IMSUM(\"3+4i\", \"1+2i\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("4+6i".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=IMSUB(\"5+7i\", \"2+3i\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("3+4i".into()))
+        );
+
+        // IMPRODUCT & IMDIV
+        assert_eq!(
+            evaluate_formula(
+                "=IMPRODUCT(\"1+2i\", \"3+4i\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("-5+10i".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=IMDIV(\"-5+10i\", \"1+2i\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("3+4i".into()))
+        );
+
+        // IMPOWER & IMSQRT
+        assert_eq!(
+            evaluate_formula(
+                "=IMPOWER(\"0+2i\", 2)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("-4".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=IMSQRT(\"-4\")", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::String("2i".into()))
+        );
+
+        // IMEXP & IMLN
+        assert_eq!(
+            evaluate_formula("=IMEXP(\"0\")", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::String("1".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=IMLN(\"1\")", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::String("0".into()))
+        );
+
+        // COMBINA & PERMUTATIONA
+        assert_eq!(
+            evaluate_formula("=COMBINA(4, 3)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(20.0))
+        );
+        assert_eq!(
+            evaluate_formula("=PERMUTATIONA(3, 2)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(9.0))
+        );
+
+        // ISODD & ISEVEN
+        assert_eq!(
+            evaluate_formula("=ISODD(3)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula("=ISODD(4)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Boolean(false))
+        );
+        assert_eq!(
+            evaluate_formula("=ISEVEN(4)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula("=ISEVEN(5)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Boolean(false))
+        );
+
+        // De-obfuscation: CHAR(IMREAL(IMSUM("60+2i", "5+3i"))) = CHAR(65) = "A"
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(IMREAL(IMSUM(\"60+2i\", \"5+3i\")))",
                 None,
                 &test_cells,
                 Default::default()
