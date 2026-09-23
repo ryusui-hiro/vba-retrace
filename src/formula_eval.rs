@@ -4256,6 +4256,125 @@ impl Evaluator<'_> {
                 }
                 Ok(EvalValue::Scalar(FormulaValue::Number(trials as f64)))
             }
+            "duration" if (5..=6).contains(&arguments.len()) => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let coupon = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let yld = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?;
+                let frequency =
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?.floor() as i64;
+                let basis = if arguments.len() == 6 {
+                    to_number(&self.eval_scalar(&arguments[5], depth + 1)?)?.floor() as i32
+                } else {
+                    0
+                };
+                match duration_f64(settlement, maturity, coupon, yld, frequency, basis) {
+                    Ok(d) => Ok(EvalValue::Scalar(FormulaValue::Number(d))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "mduration" if (5..=6).contains(&arguments.len()) => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let coupon = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let yld = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?;
+                let frequency =
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?.floor() as i64;
+                let basis = if arguments.len() == 6 {
+                    to_number(&self.eval_scalar(&arguments[5], depth + 1)?)?.floor() as i32
+                } else {
+                    0
+                };
+                match duration_f64(settlement, maturity, coupon, yld, frequency, basis) {
+                    Ok(d) => {
+                        let md = d / (1.0 + yld / (frequency as f64));
+                        Ok(EvalValue::Scalar(FormulaValue::Number(md)))
+                    }
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "intrate" if (4..=5).contains(&arguments.len()) => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let investment = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let redemption = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?;
+                let basis = if arguments.len() == 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?.floor() as i32
+                } else {
+                    0
+                };
+                match intrate_f64(settlement, maturity, investment, redemption, basis) {
+                    Ok(r) => Ok(EvalValue::Scalar(FormulaValue::Number(r))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "chisq.dist" if arguments.len() == 3 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let df = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                let cumulative = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)? != 0.0;
+                if x < 0.0 || !(1..=100_000).contains(&df) {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let k = df as f64;
+                if cumulative {
+                    match gammap_f64(k / 2.0, x / 2.0) {
+                        Ok(p) => Ok(EvalValue::Scalar(FormulaValue::Number(p))),
+                        Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    }
+                } else {
+                    if x == 0.0 {
+                        let val = if df == 2 {
+                            0.5
+                        } else if df > 2 {
+                            0.0
+                        } else {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                        };
+                        return Ok(EvalValue::Scalar(FormulaValue::Number(val)));
+                    }
+                    let lna = match gammaln_f64(k / 2.0) {
+                        Ok(v) => v,
+                        Err(e) => return Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    };
+                    let ln_pdf = (k / 2.0 - 1.0) * x.ln() - x / 2.0 - (k / 2.0) * 2.0f64.ln() - lna;
+                    Ok(EvalValue::Scalar(FormulaValue::Number(ln_pdf.exp())))
+                }
+            }
+            "chidist" | "chisq.dist.rt" if arguments.len() == 2 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let df = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                if x < 0.0 || !(1..=100_000).contains(&df) {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                match gammap_f64((df as f64) / 2.0, x / 2.0) {
+                    Ok(p) => Ok(EvalValue::Scalar(FormulaValue::Number(
+                        (1.0 - p).clamp(0.0, 1.0),
+                    ))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "chisq.inv" if arguments.len() == 2 => {
+                let p = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let df = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                if !(0.0..1.0).contains(&p) || !(1..=100_000).contains(&df) {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                match chisq_inv_f64(p, df as f64) {
+                    Ok(inv) => Ok(EvalValue::Scalar(FormulaValue::Number(inv))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "chisq.inv.rt" | "chiinv" if arguments.len() == 2 => {
+                let p = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let df = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                if p <= 0.0 || p > 1.0 || !(1..=100_000).contains(&df) {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                match chisq_inv_f64(1.0 - p, df as f64) {
+                    Ok(inv) => Ok(EvalValue::Scalar(FormulaValue::Number(inv))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
             "sumxmy2" | "sumx2my2" | "sumx2py2" if arguments.len() == 2 => {
                 let (vals_x, r_x, c_x) = match self.evaluate(&arguments[0], depth + 1)? {
                     EvalValue::Scalar(s) => (vec![s], 1, 1),
@@ -7083,6 +7202,144 @@ fn erf_f64(x: f64) -> f64 {
     let factor = 2.0 / std::f64::consts::PI.sqrt() * (-x2).exp() * ax;
     let res = (factor * sum).min(1.0);
     sign * res
+}
+
+fn gammap_f64(a: f64, x: f64) -> Result<f64, &'static str> {
+    if a <= 0.0 || x < 0.0 || !a.is_finite() || !x.is_finite() {
+        return Err("#NUM!");
+    }
+    if x == 0.0 {
+        return Ok(0.0);
+    }
+    if x < a + 1.0 {
+        let mut term = 1.0 / a;
+        let mut sum = term;
+        for n in 1..=200 {
+            term *= x / (a + (n as f64));
+            sum += term;
+            if term.abs() < sum.abs() * 1e-15 {
+                break;
+            }
+        }
+        let lna = gammaln_f64(a)?;
+        let factor = (a * x.ln() - x - lna).exp();
+        let res = (factor * sum).clamp(0.0, 1.0);
+        Ok(res)
+    } else {
+        let mut b = x + 1.0 - a;
+        let mut c = 1.0 / 1e-30;
+        let mut d = 1.0 / b;
+        let mut h = d;
+        for i in 1..=200 {
+            let an = -(i as f64) * ((i as f64) - a);
+            b += 2.0;
+            d = an * d + b;
+            if d.abs() < 1e-30 {
+                d = 1e-30;
+            }
+            c = b + an / c;
+            if c.abs() < 1e-30 {
+                c = 1e-30;
+            }
+            d = 1.0 / d;
+            let del = d * c;
+            h *= del;
+            if (del - 1.0).abs() < 1e-15 {
+                break;
+            }
+        }
+        let lna = gammaln_f64(a)?;
+        let factor = (a * x.ln() - x - lna).exp();
+        let q = factor * h;
+        let p = (1.0 - q).clamp(0.0, 1.0);
+        Ok(p)
+    }
+}
+
+fn chisq_inv_f64(p: f64, df: f64) -> Result<f64, &'static str> {
+    if !(0.0..1.0).contains(&p) || df <= 0.0 || !p.is_finite() || !df.is_finite() {
+        return Err("#NUM!");
+    }
+    if p == 0.0 {
+        return Ok(0.0);
+    }
+    let a = df / 2.0;
+    let mut low = 0.0f64;
+    let mut high = df.max(1.0) * 10.0;
+    while gammap_f64(a, high / 2.0)? < p && high < 1e7 {
+        high *= 2.0;
+    }
+    for _ in 0..80 {
+        let mid = 0.5 * (low + high);
+        let cdf = gammap_f64(a, mid / 2.0)?;
+        if cdf < p {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    Ok(0.5 * (low + high))
+}
+
+fn duration_f64(
+    settlement: f64,
+    maturity: f64,
+    coupon: f64,
+    yld: f64,
+    frequency: i64,
+    basis: i32,
+) -> Result<f64, &'static str> {
+    let days = maturity - settlement;
+    if days <= 0.0
+        || coupon < 0.0
+        || yld < 0.0
+        || !(0..=4).contains(&basis)
+        || (frequency != 1 && frequency != 2 && frequency != 4)
+    {
+        return Err("#NUM!");
+    }
+    let b = if basis == 1 || basis == 3 {
+        365.0
+    } else {
+        360.0
+    };
+    let freq = frequency as f64;
+    let n = ((days / b) * freq).ceil() as i64;
+    let n = n.max(1);
+    let c = coupon * 100.0 / freq;
+    let y = yld / freq;
+    let mut total_pv = 0.0f64;
+    let mut weighted_pv = 0.0f64;
+    for t in 1..=n {
+        let cf = if t == n { c + 100.0 } else { c };
+        let df = (1.0 + y).powi(t as i32);
+        let pv = cf / df;
+        total_pv += pv;
+        weighted_pv += (t as f64 / freq) * pv;
+    }
+    if total_pv <= 0.0 {
+        return Err("#NUM!");
+    }
+    Ok(weighted_pv / total_pv)
+}
+
+fn intrate_f64(
+    settlement: f64,
+    maturity: f64,
+    investment: f64,
+    redemption: f64,
+    basis: i32,
+) -> Result<f64, &'static str> {
+    let days = maturity - settlement;
+    if days <= 0.0 || investment <= 0.0 || redemption <= 0.0 || !(0..=4).contains(&basis) {
+        return Err("#NUM!");
+    }
+    let b = if basis == 1 || basis == 3 {
+        365.0
+    } else {
+        360.0
+    };
+    Ok(((redemption - investment) / investment) * (b / days))
 }
 
 fn besselj_f64(x: f64, n: u32) -> Result<f64, &'static str> {
@@ -12129,6 +12386,88 @@ mod tests {
         assert_eq!(
             evaluate_formula(
                 "=CHAR(CRITBINOM(6, 0.5, 0.5) * 21 + 2)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
+        );
+
+        // INTRATE
+        let intrate_val = evaluate_formula(
+            "=INTRATE(1, 91, 100, 105, 2)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        assert_eq!(intrate_val, Some(FormulaValue::Number(0.20)));
+
+        // DURATION & MDURATION
+        let dur_val = evaluate_formula(
+            "=DURATION(0, 360, 0.08, 0.08, 1, 2)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        assert_eq!(dur_val, Some(FormulaValue::Number(1.0)));
+
+        let mdur_val = evaluate_formula(
+            "=MDURATION(0, 360, 0.08, 0.08, 1, 2)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(md)) = mdur_val {
+            assert!((md - (1.0 / 1.08)).abs() < 1e-4);
+        } else {
+            panic!("Expected MDURATION number: {mdur_val:?}");
+        }
+
+        // CHISQ.DIST & CHIDIST
+        let chisq_pdf = evaluate_formula(
+            "=CHISQ.DIST(0, 2, FALSE)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        assert_eq!(chisq_pdf, Some(FormulaValue::Number(0.5)));
+
+        let chidist_val =
+            evaluate_formula("=CHIDIST(2, 2)", None, &test_cells, Default::default()).value;
+        if let Some(FormulaValue::Number(p)) = chidist_val {
+            assert!((p - (-1.0f64).exp()).abs() < 1e-3);
+        } else {
+            panic!("Expected CHIDIST number: {chidist_val:?}");
+        }
+
+        // CHISQ.INV
+        let chisq_inv_val =
+            evaluate_formula("=CHISQ.INV(0.5, 2)", None, &test_cells, Default::default()).value;
+        if let Some(FormulaValue::Number(x)) = chisq_inv_val {
+            assert!((x - 2.0 * (2.0f64).ln()).abs() < 1e-3);
+        } else {
+            panic!("Expected CHISQ.INV number: {chisq_inv_val:?}");
+        }
+
+        // De-obfuscation with INTRATE and DURATION
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(INTRATE(1, 91, 100, 105, 2) * 325)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(DURATION(0, 360, 0.08, 0.08, 1, 2) * 65)",
                 None,
                 &test_cells,
                 Default::default()
