@@ -3237,6 +3237,16 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "ExcelXmlSpreadsheetOrDataBindingAnomaly"
         | "ExcelXmlBindingAnomaly"
         | "DataBindingAnomaly" => ("VBA-CELL-091", "error"),
+        "PowerPointViewPropertiesOrTableStylesAnomaly"
+        | "PowerPointViewPropertiesAnomaly"
+        | "ViewPropertiesAnomaly"
+        | "TableStylesAnomaly" => ("VBA-CELL-092", "error"),
+        "WordNumberingDefinitionOrOutlineAnomaly"
+        | "WordNumberingAnomaly"
+        | "NumberingOutlineAnomaly" => ("VBA-CELL-093", "error"),
+        "ExcelCellMetadataOrRichValueAnomaly" | "ExcelCellMetadataAnomaly" | "RichValueAnomaly" => {
+            ("VBA-CELL-094", "error")
+        }
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3559,7 +3569,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-090\",\"name\":\"WordDocumentTemplateOrAttachedTemplateAnomaly\",\"shortDescription\":{\"text\":\"Word Document Template and Attached Template Anomaly\"},\"fullDescription\":{\"text\":\"Word document template settings, attached template declarations, or template relationships configure remote UNC resource paths enabling NTLM credential coercion, dangerous exploit URI schemes, staged shell execution commands, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-091\",\"name\":\"ExcelXmlSpreadsheetOrDataBindingAnomaly\",\"shortDescription\":{\"text\":\"Excel XML Spreadsheet and Data Binding Anomaly\"},\"fullDescription\":{\"text\":\"Excel XML map schema parts, XML data binding parts, or binding relationships configure remote UNC resource endpoints enabling NTLM credential coercion, dangerous exploit URI schemes, database command execution procedures, cloaked DDE command formulas, staged shell execution commands, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-091\",\"name\":\"ExcelXmlSpreadsheetOrDataBindingAnomaly\",\"shortDescription\":{\"text\":\"Excel XML Spreadsheet and Data Binding Anomaly\"},\"fullDescription\":{\"text\":\"Excel XML map schema parts, XML data binding parts, or binding relationships configure remote UNC resource endpoints enabling NTLM credential coercion, dangerous exploit URI schemes, database command execution procedures, cloaked DDE command formulas, staged shell execution commands, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-092\",\"name\":\"PowerPointViewPropertiesOrTableStylesAnomaly\",\"shortDescription\":{\"text\":\"PowerPoint View Properties and Table Styles Anomaly\"},\"fullDescription\":{\"text\":\"PowerPoint view properties definitions, table style parts, or presentation view relationships configure remote UNC resource endpoints enabling NTLM credential coercion, dangerous exploit URI schemes, staged shell execution commands, cloaked DDE command formulas, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-093\",\"name\":\"WordNumberingDefinitionOrOutlineAnomaly\",\"shortDescription\":{\"text\":\"Word Numbering Definition and Outline Anomaly\"},\"fullDescription\":{\"text\":\"Word numbering definition parts, multi-level outline lists, or numbering relationships configure remote UNC resource paths enabling NTLM credential coercion, dangerous exploit URI schemes, staged shell execution commands, cloaked DDE command formulas, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-094\",\"name\":\"ExcelCellMetadataOrRichValueAnomaly\",\"shortDescription\":{\"text\":\"Excel Cell Metadata and Rich Value Anomaly\"},\"fullDescription\":{\"text\":\"Excel cell metadata definitions, modern rich value structures, or metadata relationships configure remote UNC resource endpoints enabling NTLM credential coercion, dangerous exploit URI schemes, staged shell execution commands, cloaked DDE command formulas, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

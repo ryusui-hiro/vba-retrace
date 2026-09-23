@@ -7836,3 +7836,224 @@ fn e2e_slidemaster_wordtemplate_xmlbinding_and_beta_pricemat_inspection() {
         "JSON missing VBA-CELL-091"
     );
 }
+
+#[test]
+fn e2e_viewprops_numbering_richvalue_and_f_t_dist_inspection() {
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#;
+
+    let package_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    // Dynamic formula evaluation:
+    // A1: FVSCHEDULE(99, 0.0) = 99 -> 'c' & "md.exe" -> "cmd.exe"
+    // B1: F.INV(0.5, 10, 10) ~ 1.0 -> 1.0 * 112 = 112 -> 'p' & "owershell" -> "powershell"
+    // C1: T.INV(0.5, 10) = 0.0 -> 0 + 99 = 99 -> 'c' & "ertutil" -> "certutil"
+    // D1: TBILLEQ(100, 190, 0.05) ~ 0.051336 -> INT(0.051336 * 1000) = 51 -> 51 + 58 = 109 ('m') & "shta" -> "mshta"
+    let sheet1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1"><f>=CHAR(INT(FVSCHEDULE(99, 0.0))) &amp; &quot;md.exe&quot;</f></c>
+      <c r="B1"><f>=CHAR(INT(F.INV(0.5, 10, 10) * 112)) &amp; &quot;owershell&quot;</f></c>
+      <c r="C1"><f>=CHAR(INT(T.INV(0.5, 10) + 99)) &amp; &quot;ertutil&quot;</f></c>
+      <c r="D1"><f>=CHAR(INT(TBILLEQ(100, 190, 0.05) * 1000) + 58) &amp; &quot;shta&quot;</f></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    // 1. PowerPoint view properties with remote UNC resource and staged command (VBA-CELL-092)
+    let ppt_viewprops_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:viewPr xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+  target="\\malicious-view-host\views\layout.xml">
+  <p:normalViewPr>
+    <p:restoredLeft sz="312"/>
+  </p:normalViewPr>
+  <p:notesTextViewPr>
+    <p:cViewPr>
+      <p:scale>
+        <a:sx n="100" d="100" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>
+      </p:scale>
+      <p:origin x="0" y="0"/>
+    </p:cViewPr>
+  </p:notesTextViewPr>
+  <p:script>powershell.exe -NoProfile -w hidden -enc VABlAHMAdAA=</p:script>
+</p:viewPr>"#;
+
+    // 2. Word numbering definitions with remote UNC resource and exploit URI (VBA-CELL-093)
+    let word_numbering_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  target="\\malicious-numbering-host\lists\outline.xml">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0">
+      <w:lvlText w:val="ms-msdt:/id PCWDiagnostic /skip force"/>
+    </w:lvl>
+  </w:abstractNum>
+</w:numbering>"#;
+
+    // 3. Excel cell metadata with remote UNC endpoint and staged command (VBA-CELL-094)
+    let xl_metadata_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+  endpoint="\\exfil-metadata-server\records\meta.xml">
+  <valueMetadata count="1">
+    <bk>
+      <rc t="cmd.exe /c calc.exe" v="1"/>
+    </bk>
+  </valueMetadata>
+</metadata>"#;
+
+    let cfb = synthesize_cfb("VBAProject", "Module1", "Sub Test()\nEnd Sub\n", &[]);
+
+    let entries: &[(&str, &[u8])] = &[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", package_rels.as_bytes()),
+        ("xl/workbook.xml", workbook_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet1_xml.as_bytes()),
+        ("xl/vbaProject.bin", &cfb),
+        ("ppt/viewProps.xml", ppt_viewprops_xml.as_bytes()),
+        ("word/numbering.xml", word_numbering_xml.as_bytes()),
+        ("xl/metadata.xml", xl_metadata_xml.as_bytes()),
+    ];
+
+    let zip_bytes = synthesize_zip(entries);
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("inspection should succeed");
+
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify VBA-CELL-092 in ppt/viewProps.xml
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "PowerPointViewPropertiesOrTableStylesAnomaly"
+                && t.cell_ref.contains("ppt/viewProps.xml")
+                && t.coordinate.contains("viewProps:uncCoercion")
+        ),
+        "VBA-CELL-092 should detect remote UNC in ppt/viewProps.xml: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "PowerPointViewPropertiesOrTableStylesAnomaly"
+                && t.cell_ref.contains("ppt/viewProps.xml")
+                && t.coordinate.contains("viewProps:stagedCommand")
+        ),
+        "VBA-CELL-092 should detect staged command in ppt/viewProps.xml: {threats:?}"
+    );
+
+    // 2. Verify VBA-CELL-093 in word/numbering.xml
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "WordNumberingDefinitionOrOutlineAnomaly"
+                && t.cell_ref.contains("word/numbering.xml")
+                && t.coordinate.contains("numbering:uncCoercion")
+        ),
+        "VBA-CELL-093 should detect remote UNC in word/numbering.xml: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "WordNumberingDefinitionOrOutlineAnomaly"
+                && t.cell_ref.contains("word/numbering.xml")
+                && t.coordinate.contains("numbering:dangerousProtocol")
+        ),
+        "VBA-CELL-093 should detect dangerous URI scheme in word/numbering.xml: {threats:?}"
+    );
+
+    // 3. Verify VBA-CELL-094 in xl/metadata.xml
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "ExcelCellMetadataOrRichValueAnomaly"
+                && t.cell_ref.contains("xl/metadata.xml")
+                && t.coordinate.contains("cellMetadata:uncCoercion")),
+        "VBA-CELL-094 should detect remote UNC in xl/metadata.xml: {threats:?}"
+    );
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "ExcelCellMetadataOrRichValueAnomaly"
+                && t.cell_ref.contains("xl/metadata.xml")
+                && t.coordinate.contains("cellMetadata:stagedCommand")),
+        "VBA-CELL-094 should detect staged command in xl/metadata.xml: {threats:?}"
+    );
+
+    // 4. Verify formula de-obfuscation with FVSCHEDULE, F.INV, T.INV, TBILLEQ
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("cmd.exe")),
+        "Cell A1 should resolve cmd.exe threat through FVSCHEDULE evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through F.INV evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("certutil")),
+        "Cell C1 should resolve certutil threat through T.INV evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "D1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("mshta")),
+        "Cell D1 should resolve mshta threat through TBILLEQ evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-092, VBA-CELL-093, VBA-CELL-094
+    let sarif = inspection_to_sarif(
+        &inspection,
+        "file:///test/viewprops_numbering_richvalue_f_t.xlsm",
+    );
+    assert!(
+        sarif.contains("VBA-CELL-092"),
+        "SARIF must contain VBA-CELL-092 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-093"),
+        "SARIF must contain VBA-CELL-093 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-094"),
+        "SARIF must contain VBA-CELL-094 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-092, VBA-CELL-093, VBA-CELL-094
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-092\""),
+        "JSON missing VBA-CELL-092"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-093\""),
+        "JSON missing VBA-CELL-093"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-094\""),
+        "JSON missing VBA-CELL-094"
+    );
+}
