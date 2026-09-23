@@ -714,6 +714,16 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("imlog2")
                 || f_lower.contains("gamma")
                 || f_lower.contains("gammaln")
+                || f_lower.contains("imargument")
+                || f_lower.contains("imconjugate")
+                || f_lower.contains("erf")
+                || f_lower.contains("erfc")
+                || f_lower.contains("gauss")
+                || f_lower.contains("phi")
+                || f_lower.contains("besselj")
+                || f_lower.contains("besseli")
+                || f_lower.contains("bessely")
+                || f_lower.contains("besselk")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -7388,6 +7398,426 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_activex_binary_storage_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+
+        // 1. Smuggled PE executable binary
+        let is_pe = if data.starts_with(b"MZ") {
+            if data.len() >= 0x40 {
+                let pe_offset =
+                    u32::from_le_bytes([data[0x3c], data[0x3d], data[0x3e], data[0x3f]]) as usize;
+                if pe_offset + 4 <= data.len() && &data[pe_offset..pe_offset + 4] == b"PE\0\0" {
+                    true
+                } else {
+                    data.windows(4).take(4096).any(|w| w == b"PE\0\0")
+                }
+            } else {
+                data.windows(4).take(4096).any(|w| w == b"PE\0\0")
+            }
+        } else {
+            false
+        };
+        if is_pe {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "activexBinary:peBinary".into(),
+                "ActiveX binary storage stream contains disguised Windows PE executable binary (verified MZ/PE headers)".into(),
+            ));
+        }
+
+        // 2. Staged shell scripts or execution commands
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+            "@echo off",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "activexBinary:stagedScript".into(),
+                    format!("ActiveX binary storage stream contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 3. Remote UNC paths forcing NTLM credential coercion
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || w == b"//") && i + 4 < data.len() {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "activexBinary:uncCoercion".into(),
+                        format!("ActiveX binary storage stream references remote UNC path '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 4. Dangerous exploit protocol handlers
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "activexBinary:dangerousProtocol".into(),
+                    format!("ActiveX binary storage stream references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 5. Weaponized CLSIDs
+        for &(clsid, desc) in &[
+            (
+                "f47456e0-4d65-11ce-8874-00aa002c9f0c",
+                "Shell.Explorer / WebBrowser",
+            ),
+            (
+                "0002df01-0000-0000-c000-000000000046",
+                "InternetExplorer.Application",
+            ),
+            ("062907d0-2222-4b7e-b400-79cf3942e30e", "Scriptlet.TypeLib"),
+            (
+                "0002ce02-0000-0000-c000-000000000046",
+                "Equation Editor 3.0",
+            ),
+            (
+                "18490e78-2d0a-48f0-be41-e63092892577",
+                "CVE-2017-0199 HTA Moniker",
+            ),
+        ] {
+            if s_lower.contains(clsid) {
+                results.push((
+                    "High",
+                    entry_name.to_string(),
+                    "activexBinary:weaponizedClsid".into(),
+                    format!(
+                        "ActiveX binary storage stream embeds weaponized CLSID '{clsid}' ({desc})"
+                    ),
+                ));
+                break;
+            }
+        }
+
+        results
+    }
+
+    fn scan_xml_digital_signature_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s = String::from_utf8_lossy(data);
+        let s_lower = s.to_ascii_lowercase();
+
+        // 1. Remote UNC paths forcing NTLM credential coercion
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || w == b"//") && i + 4 < data.len() {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "xmlSignature:uncCoercion".into(),
+                        format!("Digital signature part references remote UNC path '{unc}' enabling NTLM credential coercion"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "xmlSignature:dangerousProtocol".into(),
+                    format!(
+                        "Digital signature part references dangerous exploit URI scheme '{proto}'"
+                    ),
+                ));
+            }
+        }
+
+        // 3. XSLT Transform filter in XML-DSig
+        if s_lower.contains("algorithm=\"http://www.w3.org/tr/1999/rec-xslt-19991116\"")
+            || s_lower.contains("<xsl:stylesheet")
+            || s_lower.contains("<msxsl:script")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "xmlSignature:xsltTransform".into(),
+                "Digital signature part declares XSLT transform filter enabling code execution during signature evaluation".into(),
+            ));
+        }
+
+        // 4. XXE / external entity injection in XML-DSig
+        if s_lower.contains("<!doctype") || s_lower.contains("<!entity") {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "xmlSignature:xxeInjection".into(),
+                "Digital signature part contains XXE DTD or entity declaration".into(),
+            ));
+        }
+
+        // 5. Smuggled Base64 PE binary
+        'b64_sig: for marker in &["tvqq", "tvoa", "tvpb", "tvpq"] {
+            let mut pos = 0;
+            while let Some(idx) = s_lower[pos..].find(marker) {
+                let abs = pos + idx;
+                let candidate = &s[abs..];
+                let b64_len = candidate
+                    .bytes()
+                    .take_while(|b| {
+                        b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/' || *b == b'='
+                    })
+                    .count();
+                if b64_len >= 64 {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "xmlSignature:smuggledBinary".into(),
+                        format!(
+                            "Digital signature part contains Base64-smuggled Windows PE executable binary (length: {b64_len} chars)"
+                        ),
+                    ));
+                    break 'b64_sig;
+                }
+                pos = abs + marker.len();
+            }
+        }
+
+        // 6. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "xmlSignature:stagedCommand".into(),
+                    format!(
+                        "Digital signature part contains staged shell execution command '{cmd}'"
+                    ),
+                ));
+                break;
+            }
+        }
+
+        results
+    }
+
+    fn scan_excel_control_properties_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s = String::from_utf8_lossy(data);
+        let s_lower = s.to_ascii_lowercase();
+
+        // 1. Cloaked DDE execution in control formula bindings
+        for dde in &[
+            "cmd|",
+            "powershell|",
+            "mshta|",
+            "cscript|",
+            "wscript|",
+            "certutil|",
+            "regsvr32|",
+        ] {
+            if s_lower.contains(dde) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "controlProperty:cloakedDde".into(),
+                    format!("Excel control property defines cloaked DDE execution command '{dde}'"),
+                ));
+                break;
+            }
+        }
+
+        // 2. Excel 4.0 (XLM) macro functions
+        for xlm in &["exec(", "call(", "register("] {
+            if s_lower.contains(xlm) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "controlProperty:xlmMacro".into(),
+                    format!("Excel control property defines Excel 4.0 (XLM) macro execution function '{xlm}'"),
+                ));
+                break;
+            }
+        }
+
+        // 3. Remote UNC paths forcing NTLM credential coercion
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || w == b"//") && i + 4 < data.len() {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "controlProperty:uncCoercion".into(),
+                        format!("Excel control property references remote UNC path '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 4. Dangerous exploit protocol handlers
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "controlProperty:dangerousProtocol".into(),
+                    format!(
+                        "Excel control property references dangerous exploit URI scheme '{proto}'"
+                    ),
+                ));
+            }
+        }
+
+        // 5. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "controlProperty:smuggledBinary".into(),
+                "Excel control property contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        // 6. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "controlProperty:stagedCommand".into(),
+                    format!(
+                        "Excel control property contains staged shell execution command '{cmd}'"
+                    ),
+                ));
+                break;
+            }
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -8413,6 +8843,95 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "ExcelExternalBookOrSheetPathAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for ActiveX Binary Storage or Property Stream Anomaly (VBA-CELL-068)
+        let is_activex_binary_candidate = name_lower.contains("activex")
+            && (name_lower.ends_with(".bin")
+                || name_lower.ends_with(".dat")
+                || name_lower.ends_with(".ocx")
+                || name_lower.ends_with(".ole"));
+        if is_activex_binary_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_activex_binary_storage_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "ActiveX binary storage or property stream anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "ActiveXBinary".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "ActiveXBinaryStorageOrPropertyStreamAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for XML Digital Signature or Origin Part Anomaly (VBA-CELL-069)
+        let is_xml_sig_candidate = name_lower.contains("xmlsignatures")
+            || name_lower.contains("package.sigs")
+            || (name_lower.contains("sig")
+                && (name_lower.ends_with(".xml")
+                    || name_lower.ends_with(".sigs")
+                    || name_lower.ends_with(".rels")));
+        if is_xml_sig_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_xml_digital_signature_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "XML digital signature or origin part anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "DigitalSignature".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "XmlDigitalSignatureOrOriginPartAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Excel Control Properties or Form Action Anomaly (VBA-CELL-070)
+        let is_ctrl_prop_candidate = name_lower.contains("ctrlprop")
+            || (name_lower.contains("ctrlprops") && name_lower.ends_with(".rels"))
+            || (name_lower.contains("vmldrawing") && name_lower.ends_with(".vml"));
+        if is_ctrl_prop_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_excel_control_properties_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Excel control properties or form action anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "ControlProps".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "ExcelControlPropertiesOrFormActionAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,

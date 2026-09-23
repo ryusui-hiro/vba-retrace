@@ -3154,6 +3154,18 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         | "ExcelExternalBookAnomaly"
         | "ExternalBookAnomaly"
         | "SheetPathAnomaly" => ("VBA-CELL-067", "error"),
+        "ActiveXBinaryStorageOrPropertyStreamAnomaly"
+        | "ActiveXBinaryStorageAnomaly"
+        | "ActiveXBinaryAnomaly"
+        | "PropertyStreamAnomaly" => ("VBA-CELL-068", "error"),
+        "XmlDigitalSignatureOrOriginPartAnomaly"
+        | "XmlDigitalSignatureAnomaly"
+        | "DigitalSignatureAnomaly"
+        | "OriginPartAnomaly" => ("VBA-CELL-069", "error"),
+        "ExcelControlPropertiesOrFormActionAnomaly"
+        | "ExcelControlPropertiesAnomaly"
+        | "ControlPropertiesAnomaly"
+        | "FormActionAnomaly" => ("VBA-CELL-070", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3404,7 +3416,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-066\",\"name\":\"WordOrPowerPointEmbeddedPackageAnomaly\",\"shortDescription\":{\"text\":\"Word and PowerPoint Embedded Package Anomaly\"},\"fullDescription\":{\"text\":\"Word or PowerPoint embedded packages, OLE binary streams, or auto-activation directives disguise Windows PE executables, staged shell scripts, remote UNC paths, dangerous exploit URI schemes, or auto-activating OLE handlers.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-067\",\"name\":\"ExcelExternalBookOrSheetPathAnomaly\",\"shortDescription\":{\"text\":\"Excel External Workbook and Sheet Path Anomaly\"},\"fullDescription\":{\"text\":\"Excel external workbook links, relationships, or cached datasets configure remote UNC workbook paths enabling NTLM credential coercion, dangerous exploit URI schemes, cloaked DDE execution in defined names, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-067\",\"name\":\"ExcelExternalBookOrSheetPathAnomaly\",\"shortDescription\":{\"text\":\"Excel External Workbook and Sheet Path Anomaly\"},\"fullDescription\":{\"text\":\"Excel external workbook links, relationships, or cached datasets configure remote UNC workbook paths enabling NTLM credential coercion, dangerous exploit URI schemes, cloaked DDE execution in defined names, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-068\",\"name\":\"ActiveXBinaryStorageOrPropertyStreamAnomaly\",\"shortDescription\":{\"text\":\"ActiveX Binary Storage and Property Stream Anomaly\"},\"fullDescription\":{\"text\":\"ActiveX binary property storage streams or controls contain disguised Windows PE executables, staged shell scripts, remote UNC paths enabling NTLM credential coercion, dangerous exploit URI schemes, or embedded weaponized CLSIDs.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-069\",\"name\":\"XmlDigitalSignatureOrOriginPartAnomaly\",\"shortDescription\":{\"text\":\"XML Digital Signature and Origin Part Anomaly\"},\"fullDescription\":{\"text\":\"Digital signature parts or relationships reference remote UNC paths enabling NTLM credential coercion, dangerous exploit URI schemes, XSLT transform execution triggers, XXE entity declarations, or smuggled Windows PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-070\",\"name\":\"ExcelControlPropertiesOrFormActionAnomaly\",\"shortDescription\":{\"text\":\"Excel Control Properties and Form Action Anomaly\"},\"fullDescription\":{\"text\":\"Excel form control properties or drawings define linked cell formulas containing cloaked DDE execution, Excel 4.0 macros, remote UNC workbook references, dangerous exploit URI schemes, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));
