@@ -690,6 +690,18 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("sumx2my2")
                 || f_lower.contains("sumx2py2")
                 || f_lower.contains("multinomial")
+                || f_lower.contains("imsum")
+                || f_lower.contains("imsub")
+                || f_lower.contains("improduct")
+                || f_lower.contains("imdiv")
+                || f_lower.contains("impower")
+                || f_lower.contains("imexp")
+                || f_lower.contains("imln")
+                || f_lower.contains("imsqrt")
+                || f_lower.contains("combina")
+                || f_lower.contains("permutationa")
+                || f_lower.contains("isodd")
+                || f_lower.contains("iseven")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -6352,7 +6364,8 @@ pub fn scan_ooxml_package_threats(
                     "Critical",
                     entry_name.to_string(),
                     "scenario:xlmExecution".into(),
-                    "Excel Scenario Manager contains Excel 4.0 (XLM) macro execution functions".into(),
+                    "Excel Scenario Manager contains Excel 4.0 (XLM) macro execution functions"
+                        .into(),
                 ));
             }
 
@@ -6368,7 +6381,8 @@ pub fn scan_ooxml_package_threats(
                     "Critical",
                     entry_name.to_string(),
                     "scenario:shellExecution".into(),
-                    "Excel Scenario Manager contains shell execution commands in scenario cells".into(),
+                    "Excel Scenario Manager contains shell execution commands in scenario cells"
+                        .into(),
                 ));
             }
 
@@ -6400,6 +6414,373 @@ pub fn scan_ooxml_package_threats(
                 "consolidation:uncPath".into(),
                 "Excel Data Consolidation references remote UNC workbook path enabling NTLM credential coercion".into(),
             ));
+        }
+
+        results
+    }
+
+    fn scan_powerpoint_animation_timenode_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Command execution animation nodes (<p:cmd>) in slide timing
+        if s_lower.contains("<p:cmd") || s_lower.contains(":cmd") {
+            for cmd in &[
+                "powershell",
+                "cmd.exe",
+                "wscript",
+                "cscript",
+                "mshta",
+                "rundll32",
+                "certutil",
+            ] {
+                if s_lower.contains(cmd) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "animation:cmdCall".into(),
+                        format!("PowerPoint animation timing node contains shell command '{cmd}' execution trigger"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Media nodes or animation triggers with remote UNC or exploit protocols
+        if (s_lower.contains("cmedianode")
+            || s_lower.contains("<p:media")
+            || s_lower.contains("<p:audio")
+            || s_lower.contains("<p:video"))
+            && (s_lower.contains(r"\\") || s_lower.contains("//"))
+            && (s_lower.contains(r#"target="\\"#)
+                || s_lower.contains(r#"target='\\"#)
+                || s_lower.contains(r#"target="//"#)
+                || s_lower.contains(r#"src="\\"#)
+                || s_lower.contains(r#"src="//"#))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "animation:uncMedia".into(),
+                "PowerPoint animation media node references remote UNC path enabling NTLM credential coercion".into(),
+            ));
+        }
+
+        for scheme in &[
+            "ms-msdt:",
+            "search-ms:",
+            "ms-appinstaller:",
+            "mhtml:",
+            "powershell:",
+            "vbscript:",
+        ] {
+            if s_lower.contains(scheme) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "animation:exploitProtocol".into(),
+                    format!("PowerPoint animation media node references dangerous exploit URI scheme '{scheme}'"),
+                ));
+                break;
+            }
+        }
+
+        // 3. Relationships of slides referencing remote UNC or executables
+        if entry_name.ends_with(".rels") && entry_name.contains("slide") {
+            let mut search_idx = 0;
+            while let Some(target_pos) = s_lower[search_idx..].find("target=") {
+                let actual = search_idx + target_pos + 7;
+                if actual >= s_lower.len() {
+                    break;
+                }
+                let quote = s_lower.as_bytes()[actual - 1];
+                let end_pos = match s_lower[actual..].find(quote as char) {
+                    Some(p) => actual + p,
+                    None => s_lower.len(),
+                };
+                let target = &s_lower[actual..end_pos];
+                if target.starts_with(r"\\") || target.starts_with("//") {
+                    results.push((
+                        "Critical",
+                        target.to_string(),
+                        "animation:uncMedia".into(),
+                        format!("PowerPoint slide animation relationship references remote UNC path '{target}'"),
+                    ));
+                    break;
+                }
+                if target.ends_with(".exe")
+                    || target.ends_with(".bat")
+                    || target.ends_with(".vbs")
+                    || target.ends_with(".ps1")
+                    || target.ends_with(".hta")
+                    || target.ends_with(".lnk")
+                {
+                    results.push((
+                        "Critical",
+                        target.to_string(),
+                        "animation:executableMedia".into(),
+                        format!("PowerPoint slide relationship targets executable or script payload '{target}'"),
+                    ));
+                    break;
+                }
+                search_idx = actual;
+            }
+        }
+
+        // 4. Smuggled PE binary in animation or slide parts
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "animation:smuggledBinary".into(),
+                "PowerPoint slide animation part contains smuggled Windows PE executable binary"
+                    .into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_word_header_footer_watermark_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in header/footer relationships or VML/drawing images
+        if (s_lower.contains(r"\\") || s_lower.contains("//"))
+            && (s_lower.contains(r#"src="\\"#)
+                || s_lower.contains(r#"src="//"#)
+                || s_lower.contains(r#"target="\\"#)
+                || s_lower.contains(r#"target="//"#)
+                || (s_lower.contains("v:imagedata")
+                    && (s_lower.contains(r"\\") || s_lower.contains("//"))))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "headerFooter:uncReference".into(),
+                "Word header, footer, or watermark references remote UNC path enabling NTLM credential coercion".into(),
+            ));
+        }
+
+        // 2. Exploit URI schemes in header/footer
+        for scheme in &[
+            "ms-msdt:",
+            "search-ms:",
+            "ms-appinstaller:",
+            "mhtml:",
+            "javascript:",
+            "powershell:",
+            "vbscript:",
+        ] {
+            if s_lower.contains(scheme) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "headerFooter:exploitProtocol".into(),
+                    format!("Word header/footer or watermark references dangerous exploit URI scheme '{scheme}'"),
+                ));
+                break;
+            }
+        }
+
+        // 3. Header/footer relationship targeting executables or scripts
+        if entry_name.ends_with(".rels") {
+            let mut search_idx = 0;
+            while let Some(target_pos) = s_lower[search_idx..].find("target=") {
+                let actual = search_idx + target_pos + 7;
+                if actual >= s_lower.len() {
+                    break;
+                }
+                let quote = s_lower.as_bytes()[actual - 1];
+                let end_pos = match s_lower[actual..].find(quote as char) {
+                    Some(p) => actual + p,
+                    None => s_lower.len(),
+                };
+                let target = &s_lower[actual..end_pos];
+                if target.ends_with(".exe")
+                    || target.ends_with(".bat")
+                    || target.ends_with(".vbs")
+                    || target.ends_with(".ps1")
+                    || target.ends_with(".hta")
+                    || target.ends_with(".lnk")
+                {
+                    results.push((
+                        "Critical",
+                        target.to_string(),
+                        "headerFooter:executableTarget".into(),
+                        format!("Word header/footer relationship references executable or script target '{target}'"),
+                    ));
+                    break;
+                }
+                search_idx = actual;
+            }
+        }
+
+        // 4. Embedded shell commands in watermark shapes or text
+        for cmd in &[
+            "powershell.exe",
+            "cmd.exe",
+            "mshta.exe",
+            "rundll32.exe",
+            "cscript.exe",
+            "wscript.exe",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "headerFooter:shellCommand".into(),
+                    format!(
+                        "Word header/footer or watermark contains shell execution command '{cmd}'"
+                    ),
+                ));
+                break;
+            }
+        }
+
+        // 5. Smuggled Windows PE binary in header/footer XML
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "headerFooter:smuggledBinary".into(),
+                "Word header or footer part contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_excel_datamodel_formula_cache_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. DataModel remote UNC connections or dangerous commands
+        if entry_name.contains("datamodel") || entry_name.contains("model/") {
+            if (s_lower.contains(r"\\") || s_lower.contains("//"))
+                && (s_lower.contains(r#"connection="\\"#)
+                    || s_lower.contains(r#"connection='\\"#)
+                    || s_lower.contains(r#"source="\\"#)
+                    || s_lower.contains(r#"source='\\"#)
+                    || s_lower.contains(r#"catalog="\\"#)
+                    || s_lower.contains(r#"catalog='\\"#)
+                    || s_lower.contains(r#"target="\\"#)
+                    || s_lower.contains(r#"target="//"#))
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "dataModel:uncConnection".into(),
+                    "Excel DataModel references remote UNC connection enabling NTLM credential coercion".into(),
+                ));
+            }
+
+            for cmd in &["xp_cmdshell", "sp_oacreate", "openrowset", "bulk insert"] {
+                if s_lower.contains(cmd) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "dataModel:databaseCommand".into(),
+                        format!(
+                            "Excel DataModel contains database command execution string '{cmd}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+
+            if s_lower.contains("<!doctype") || s_lower.contains("<!entity") {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "dataModel:xxeInjection".into(),
+                    "Excel DataModel contains DTD or external entity declaration (XXE vector)"
+                        .into(),
+                ));
+            }
+
+            if s_lower.contains("tvqqaa")
+                || s_lower.contains("tvqaia")
+                || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+                || s_lower.contains("this program cannot be run in dos mode")
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "dataModel:smuggledBinary".into(),
+                    "Excel DataModel contains smuggled Windows PE executable binary".into(),
+                ));
+            }
+        }
+
+        // 2. Shared formula and array formula caches in worksheets
+        if entry_name.contains("sheet")
+            && entry_name.ends_with(".xml")
+            && (s_lower.contains("<f t=\"shared\"") || s_lower.contains("<f t=\"array\""))
+        {
+            // Cloaked DDE execution in shared formula
+            if s_lower.contains("cmd|")
+                || s_lower.contains("powershell|")
+                || s_lower.contains("mshta|")
+                || s_lower.contains("cscript|")
+                || s_lower.contains("wscript|")
+                || s_lower.contains("certutil|")
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "formulaCache:cloakedExecution".into(),
+                    "Excel shared formula cache contains cloaked DDE command execution string"
+                        .into(),
+                ));
+            }
+
+            // XLM macro execution
+            if s_lower.contains("exec(")
+                || s_lower.contains("call(")
+                || s_lower.contains("register(")
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "formulaCache:xlmMacro".into(),
+                    "Excel shared formula cache contains Excel 4.0 (XLM) macro execution function"
+                        .into(),
+                ));
+            }
+
+            // Remote UNC workbook reference in shared formula
+            if s_lower.contains(r"[\\")
+                || s_lower.contains("['\\\\")
+                || s_lower.contains("[\"\\\\")
+                || s_lower.contains("[//")
+                || s_lower.contains("ms-msdt:")
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "formulaCache:uncOrExploitProtocol".into(),
+                    "Excel shared formula cache references remote UNC path or exploit URI scheme"
+                        .into(),
+                ));
+            }
         }
 
         results
@@ -7249,6 +7630,95 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "ScenarioManagerOrConsolidationAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for PowerPoint Animation & TimeNode Anomaly (VBA-CELL-062)
+        let is_ppt_animation_timenode_candidate = name_lower.contains("ppt/slides/")
+            || name_lower.contains("slidelayout")
+            || name_lower.contains("slidemaster")
+            || (name_lower.starts_with("ppt/") && name_lower.contains("timing"))
+            || (name_lower.ends_with(".rels") && name_lower.contains("slide"));
+        if is_ppt_animation_timenode_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_powerpoint_animation_timenode_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "PowerPoint animation or timenode anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "PowerPointAnimation".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "PowerPointAnimationOrTimeNodeAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word Header/Footer & Watermark Anomaly (VBA-CELL-063)
+        let is_word_header_footer_candidate = name_lower.contains("word/header")
+            || name_lower.contains("word/footer")
+            || name_lower.contains("word/_rels/header")
+            || name_lower.contains("word/_rels/footer")
+            || (name_lower.starts_with("word/")
+                && (name_lower.contains("header") || name_lower.contains("footer")));
+        if is_word_header_footer_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_word_header_footer_watermark_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Word header/footer or watermark anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "WordHeaderFooter".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "WordHeaderFooterOrWatermarkAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Excel DataModel & Formula Cache Anomaly (VBA-CELL-064)
+        let is_datamodel_or_formula_cache_candidate = name_lower.contains("datamodel")
+            || name_lower.contains("model/")
+            || (name_lower.contains("sheet") && name_lower.ends_with(".xml"));
+        if is_datamodel_or_formula_cache_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_excel_datamodel_formula_cache_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Excel DataModel or Formula Cache anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "ExcelDataModel".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "ExcelDataModelOrFormulaCacheAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,
