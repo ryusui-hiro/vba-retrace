@@ -1315,6 +1315,49 @@ impl Evaluator<'_> {
                     Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into())))
                 }
             }
+            "isformula" if arguments.len() == 1 => {
+                let (sheet, addr) = match self.eval_cell_origin(&arguments[0], depth + 1) {
+                    Ok(res) => res,
+                    Err(_) => return Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into()))),
+                };
+                let effective_sheet = sheet.as_deref().or(self.current_sheet);
+                let mut found_formula = false;
+                for c in self.cells {
+                    let sheet_matches = match (effective_sheet, &c.sheet_name) {
+                        (Some(s), target) => s.eq_ignore_ascii_case(target),
+                        (None, _) => true,
+                    };
+                    if sheet_matches
+                        && c.row == Some(addr.row)
+                        && c.column == Some(addr.column)
+                        && c.formula.as_deref().is_some_and(|f| !f.trim().is_empty())
+                    {
+                        found_formula = true;
+                        break;
+                    }
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Boolean(found_formula)))
+            }
+            "error.type" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                match val {
+                    FormulaValue::Error(ref s) => {
+                        let code = match s.to_ascii_uppercase().as_str() {
+                            "#NULL!" => 1.0,
+                            "#DIV/0!" => 2.0,
+                            "#VALUE!" => 3.0,
+                            "#REF!" => 4.0,
+                            "#NAME?" => 5.0,
+                            "#NUM!" => 6.0,
+                            "#N/A" => 7.0,
+                            "#GETTING_DATA" => 8.0,
+                            _ => 7.0,
+                        };
+                        Ok(EvalValue::Scalar(FormulaValue::Number(code)))
+                    }
+                    _ => Ok(EvalValue::Scalar(FormulaValue::Error("#N/A".into()))),
+                }
+            }
             "roman" => {
                 if !(1..=2).contains(&arguments.len()) {
                     return Err("unsupported");
@@ -3446,6 +3489,123 @@ impl Evaluator<'_> {
                         Ok(res) => Ok(EvalValue::Scalar(FormulaValue::Number(res))),
                         Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
                     }
+                }
+            }
+            "standardize" if arguments.len() == 3 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let mean = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let std_dev = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                if std_dev <= 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(
+                        (x - mean) / std_dev,
+                    )))
+                }
+            }
+            "normsdist" if arguments.len() == 1 => {
+                let z = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let cdf = 0.5 * (1.0 + erf_f64(z / std::f64::consts::SQRT_2));
+                Ok(EvalValue::Scalar(FormulaValue::Number(cdf)))
+            }
+            "norm.s.dist" if arguments.len() == 1 || arguments.len() == 2 => {
+                let z = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let cumulative = if arguments.len() == 2 {
+                    match self.eval_scalar(&arguments[1], depth + 1)? {
+                        FormulaValue::Boolean(b) => b,
+                        FormulaValue::Number(n) => n != 0.0,
+                        _ => true,
+                    }
+                } else {
+                    true
+                };
+                if cumulative {
+                    let cdf = 0.5 * (1.0 + erf_f64(z / std::f64::consts::SQRT_2));
+                    Ok(EvalValue::Scalar(FormulaValue::Number(cdf)))
+                } else {
+                    let pdf = (-0.5 * z * z).exp() / (2.0 * std::f64::consts::PI).sqrt();
+                    Ok(EvalValue::Scalar(FormulaValue::Number(pdf)))
+                }
+            }
+            "normdist" | "norm.dist" if arguments.len() == 4 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let mean = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let std_dev = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                if std_dev <= 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let cumulative = match self.eval_scalar(&arguments[3], depth + 1)? {
+                    FormulaValue::Boolean(b) => b,
+                    FormulaValue::Number(n) => n != 0.0,
+                    _ => true,
+                };
+                let z = (x - mean) / std_dev;
+                if cumulative {
+                    let cdf = 0.5 * (1.0 + erf_f64(z / std::f64::consts::SQRT_2));
+                    Ok(EvalValue::Scalar(FormulaValue::Number(cdf)))
+                } else {
+                    let pdf =
+                        (-0.5 * z * z).exp() / (std_dev * (2.0 * std::f64::consts::PI).sqrt());
+                    Ok(EvalValue::Scalar(FormulaValue::Number(pdf)))
+                }
+            }
+            "expondist" | "expon.dist" if arguments.len() == 3 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let lambda = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                if x < 0.0 || lambda <= 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let cumulative = match self.eval_scalar(&arguments[2], depth + 1)? {
+                    FormulaValue::Boolean(b) => b,
+                    FormulaValue::Number(n) => n != 0.0,
+                    _ => true,
+                };
+                if cumulative {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(
+                        1.0 - (-lambda * x).exp(),
+                    )))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(
+                        lambda * (-lambda * x).exp(),
+                    )))
+                }
+            }
+            "weibull" | "weibull.dist" if arguments.len() == 4 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let alpha = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let beta = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                if x < 0.0 || alpha <= 0.0 || beta <= 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let cumulative = match self.eval_scalar(&arguments[3], depth + 1)? {
+                    FormulaValue::Boolean(b) => b,
+                    FormulaValue::Number(n) => n != 0.0,
+                    _ => true,
+                };
+                let x_over_beta = x / beta;
+                let pow_val = x_over_beta.powf(alpha);
+                if cumulative {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(
+                        1.0 - (-pow_val).exp(),
+                    )))
+                } else {
+                    let pdf = (alpha / beta.powf(alpha)) * x.powf(alpha - 1.0) * (-pow_val).exp();
+                    Ok(EvalValue::Scalar(FormulaValue::Number(pdf)))
+                }
+            }
+            "convert" if arguments.len() == 3 => {
+                let val = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let from = match self.eval_scalar(&arguments[1], depth + 1)? {
+                    FormulaValue::String(s) => s,
+                    _ => return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                };
+                let to = match self.eval_scalar(&arguments[2], depth + 1)? {
+                    FormulaValue::String(s) => s,
+                    _ => return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                };
+                match convert_units_f64(val, &from, &to) {
+                    Ok(res) => Ok(EvalValue::Scalar(FormulaValue::Number(res))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
                 }
             }
             "sumxmy2" | "sumx2my2" | "sumx2py2" if arguments.len() == 2 => {
@@ -6460,6 +6620,139 @@ fn besselk_f64(x: f64, n: u32) -> Result<f64, &'static str> {
         curr = next;
     }
     Ok(curr)
+}
+
+fn convert_units_f64(val: f64, from: &str, to: &str) -> Result<f64, &'static str> {
+    if !val.is_finite() {
+        return Err("#NUM!");
+    }
+    let f = from.trim().to_ascii_lowercase();
+    let t = to.trim().to_ascii_lowercase();
+    if f == t {
+        return Ok(val);
+    }
+    let is_temp = |s: &str| matches!(s, "c" | "cel" | "f" | "fah" | "k" | "kel" | "rank");
+    if is_temp(&f) || is_temp(&t) {
+        if !is_temp(&f) || !is_temp(&t) {
+            return Err("#N/A");
+        }
+        let k = match f.as_str() {
+            "c" | "cel" => val + 273.15,
+            "f" | "fah" => (val - 32.0) * 5.0 / 9.0 + 273.15,
+            "k" | "kel" => val,
+            "rank" => val * 5.0 / 9.0,
+            _ => return Err("#N/A"),
+        };
+        let res = match t.as_str() {
+            "c" | "cel" => k - 273.15,
+            "f" | "fah" => (k - 273.15) * 9.0 / 5.0 + 32.0,
+            "k" | "kel" => k,
+            "rank" => k * 9.0 / 5.0,
+            _ => return Err("#N/A"),
+        };
+        return Ok(res);
+    }
+
+    const UNITS: &[(&str, u8, f64)] = &[
+        ("m", 1, 1.0),
+        ("km", 1, 1000.0),
+        ("cm", 1, 0.01),
+        ("mm", 1, 0.001),
+        ("um", 1, 1e-6),
+        ("nm", 1, 1e-9),
+        ("in", 1, 0.0254),
+        ("ft", 1, 0.3048),
+        ("yd", 1, 0.9144),
+        ("mi", 1, 1609.344),
+        ("nmi", 1, 1852.0),
+        ("ang", 1, 1e-10),
+        ("pica", 1, 0.004233333333333333),
+        ("g", 2, 1.0),
+        ("kg", 2, 1000.0),
+        ("mg", 2, 0.001),
+        ("ug", 2, 1e-6),
+        ("lbm", 2, 453.59237),
+        ("ozm", 2, 28.349523125),
+        ("grain", 2, 0.06479891),
+        ("ton", 2, 907184.74),
+        ("sg", 2, 14593.9029),
+        ("cwt", 2, 45359.237),
+        ("sec", 3, 1.0),
+        ("s", 3, 1.0),
+        ("min", 3, 60.0),
+        ("hr", 3, 3600.0),
+        ("h", 3, 3600.0),
+        ("day", 3, 86400.0),
+        ("d", 3, 86400.0),
+        ("yr", 3, 31536000.0),
+        ("ms", 3, 0.001),
+        ("us", 3, 1e-6),
+        ("pa", 4, 1.0),
+        ("kpa", 4, 1000.0),
+        ("atm", 4, 101325.0),
+        ("mmhg", 4, 133.322387415),
+        ("psi", 4, 6894.757293168),
+        ("bar", 4, 100000.0),
+        ("torr", 4, 133.322368421),
+        ("n", 5, 1.0),
+        ("dyn", 5, 1e-5),
+        ("lbf", 5, 4.4482216152605),
+        ("j", 6, 1.0),
+        ("kj", 6, 1000.0),
+        ("e", 6, 1e-7),
+        ("c", 6, 4.184),
+        ("cal", 6, 4.184),
+        ("kcal", 6, 4184.0),
+        ("ev", 6, 1.602176634e-19),
+        ("wh", 6, 3600.0),
+        ("kwh", 6, 3600000.0),
+        ("btu", 6, 1055.05585262),
+        ("w", 7, 1.0),
+        ("kw", 7, 1000.0),
+        ("hp", 7, 745.69987158227),
+        ("l", 8, 1.0),
+        ("lt", 8, 1.0),
+        ("ml", 8, 0.001),
+        ("gal", 8, 3.785411784),
+        ("qt", 8, 0.946352946),
+        ("pt", 8, 0.473176473),
+        ("cup", 8, 0.2365882365),
+        ("oz", 8, 0.0295735295625),
+        ("m3", 8, 1000.0),
+        ("m2", 9, 1.0),
+        ("km2", 9, 1000000.0),
+        ("cm2", 9, 0.0001),
+        ("mm2", 9, 1e-6),
+        ("ft2", 9, 0.09290304),
+        ("in2", 9, 0.00064516),
+        ("yd2", 9, 0.83612736),
+        ("ha", 9, 10000.0),
+        ("acre", 9, 4046.8564224),
+        ("bit", 10, 1.0),
+        ("byte", 10, 8.0),
+        ("kbyte", 10, 8192.0),
+        ("kb", 10, 8192.0),
+        ("mbyte", 10, 8388608.0),
+        ("mb", 10, 8388608.0),
+        ("gbyte", 10, 8589934592.0),
+        ("gb", 10, 8589934592.0),
+    ];
+
+    let from_info = UNITS.iter().find(|(u, _, _)| *u == f.as_str());
+    let to_info = UNITS.iter().find(|(u, _, _)| *u == t.as_str());
+
+    match (from_info, to_info) {
+        (Some((_, cat1, scale1)), Some((_, cat2, scale2))) if cat1 == cat2 => {
+            let base_val = val * scale1;
+            let result = base_val / scale2;
+            if result.is_finite() {
+                Ok(result)
+            } else {
+                Err("#NUM!")
+            }
+        }
+        _ => Err("#N/A"),
+    }
 }
 
 fn format_complex(mut real: f64, mut imag: f64, suffix: &str) -> String {
@@ -10753,6 +11046,172 @@ mod tests {
         assert_eq!(
             evaluate_formula(
                 "=CHAR(BESSELJ(0, 0) * 64 + ERFC(0))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_distribution_convert_and_error_type_functions() {
+        let test_cells = vec![
+            WorkbookCellInfo {
+                sheet_index: 0,
+                sheet_name: "Sheet1".into(),
+                cell_ref: "A1".into(),
+                row: Some(1),
+                column: Some(1),
+                cell_type: "n".into(),
+                formula: Some("=1+1".into()),
+                value: Some("2".into()),
+                ..WorkbookCellInfo::default()
+            },
+            WorkbookCellInfo {
+                sheet_index: 0,
+                sheet_name: "Sheet1".into(),
+                cell_ref: "A2".into(),
+                row: Some(2),
+                column: Some(1),
+                cell_type: "s".into(),
+                formula: None,
+                value: Some("hello".into()),
+                ..WorkbookCellInfo::default()
+            },
+        ];
+
+        // ERROR.TYPE
+        assert_eq!(
+            evaluate_formula("=ERROR.TYPE(#REF!)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(4.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ERROR.TYPE(#DIV/0!)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ERROR.TYPE(123)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#N/A".into()))
+        );
+
+        // ISFORMULA
+        assert_eq!(
+            evaluate_formula(
+                "=ISFORMULA(Sheet1!A1)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Boolean(true))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=ISFORMULA(Sheet1!A2)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Boolean(false))
+        );
+
+        // STANDARDIZE
+        assert_eq!(
+            evaluate_formula(
+                "=STANDARDIZE(10, 2, 2)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(4.0))
+        );
+
+        // NORMSDIST & NORM.S.DIST
+        assert_eq!(
+            evaluate_formula("=NORMSDIST(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.5))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=NORM.S.DIST(0, TRUE)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(0.5))
+        );
+
+        // EXPONDIST
+        assert_eq!(
+            evaluate_formula(
+                "=EXPONDIST(0, 1, TRUE)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(0.0))
+        );
+
+        // WEIBULL
+        assert_eq!(
+            evaluate_formula(
+                "=WEIBULL(0, 1, 1, TRUE)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(0.0))
+        );
+
+        // CONVERT
+        assert_eq!(
+            evaluate_formula(
+                "=CONVERT(1, \"km\", \"m\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(1000.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=CONVERT(100, \"C\", \"F\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(212.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=CONVERT(1, \"byte\", \"bit\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(8.0))
+        );
+
+        // De-obfuscation: CHAR(ERROR.TYPE(#REF!) * 10 + CONVERT(25, "km", "km")) = CHAR(40 + 25) = CHAR(65) = "A"
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(ERROR.TYPE(#REF!) * 10 + CONVERT(25, \"km\", \"km\"))",
                 None,
                 &test_cells,
                 Default::default()
