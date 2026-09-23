@@ -3110,6 +3110,15 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "ThemeFontOrEffectCoercionAnomaly" | "ThemeAnomaly" | "ThemeFontAnomaly" => {
             ("VBA-CELL-055", "error")
         }
+        "CustomXmlPropertiesOrItemSchemaAnomaly"
+        | "CustomXmlPropertyAnomaly"
+        | "CustomXmlPropAnomaly" => ("VBA-CELL-056", "error"),
+        "VbaDataStreamOrProjectRelsAnomaly" | "VbaProjectRelsAnomaly" | "VbaDataAnomaly" => {
+            ("VBA-CELL-057", "error")
+        }
+        "WordGlossaryOrBuildingBlocksRelsAnomaly"
+        | "GlossaryRelsAnomaly"
+        | "BuildingBlocksAnomaly" => ("VBA-CELL-058", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3324,7 +3333,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-054\",\"name\":\"CommentAnnotationOrAuthorAnomaly\",\"shortDescription\":{\"text\":\"Comment, Modern Annotation, or Author Anomaly\"},\"fullDescription\":{\"text\":\"Document comment parts or relationships contain remote UNC paths for NTLM credential coercion, exploit protocol handlers, shell execution commands, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-055\",\"name\":\"ThemeFontOrEffectCoercionAnomaly\",\"shortDescription\":{\"text\":\"Theme Font or Effect Coercion Anomaly\"},\"fullDescription\":{\"text\":\"Theme definitions configure remote UNC font typeface paths enabling NTLM credential coercion or font engine exploits, external theme relationships, or smuggled payloads.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-055\",\"name\":\"ThemeFontOrEffectCoercionAnomaly\",\"shortDescription\":{\"text\":\"Theme Font or Effect Coercion Anomaly\"},\"fullDescription\":{\"text\":\"Theme definitions configure remote UNC font typeface paths enabling NTLM credential coercion or font engine exploits, external theme relationships, or smuggled payloads.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-056\",\"name\":\"CustomXmlPropertiesOrItemSchemaAnomaly\",\"shortDescription\":{\"text\":\"Custom XML Properties or Item Schema Anomaly\"},\"fullDescription\":{\"text\":\"Custom XML item properties or schema references configure remote UNC schema paths enabling NTLM credential coercion, dangerous exploit URI schemes, external relationships to executables, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-057\",\"name\":\"VbaDataStreamOrProjectRelsAnomaly\",\"shortDescription\":{\"text\":\"VBA Data Stream or Project Relationship Anomaly\"},\"fullDescription\":{\"text\":\"VBA project relationship parts or vbaData streams configure external relationships to remote UNC paths or binaries, exploit protocol handlers, shell execution commands, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-058\",\"name\":\"WordGlossaryOrBuildingBlocksRelsAnomaly\",\"shortDescription\":{\"text\":\"Word Glossary or Building Blocks Relationship Anomaly\"},\"fullDescription\":{\"text\":\"Word glossary definitions or building blocks relationships configure remote template injection, remote UNC paths enabling NTLM credential coercion, exploit protocol handlers, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

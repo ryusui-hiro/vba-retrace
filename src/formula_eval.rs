@@ -2532,6 +2532,41 @@ impl Evaluator<'_> {
                     }
                 }
             }
+            "int" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(FormulaValue::Number(n.floor())))
+            }
+            "seriessum" if arguments.len() == 4 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let n = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let m = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let coeffs = match self.evaluate(&arguments[3], depth + 1)? {
+                    EvalValue::Scalar(s) => vec![s],
+                    EvalValue::Range { values, .. } => values,
+                    EvalValue::Lambda { .. } => {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                };
+                let mut sum = 0.0f64;
+                for (i, val) in coeffs.iter().enumerate() {
+                    if let FormulaValue::Error(e) = val {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error(e.clone())));
+                    }
+                    let a_i = match to_number(val) {
+                        Ok(num) => num,
+                        Err(_) => {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                        }
+                    };
+                    let power = n + (i as f64) * m;
+                    let term = a_i * x.powf(power);
+                    if !term.is_finite() {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                    }
+                    sum += term;
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Number(sum)))
+            }
             "bitand" if arguments.len() == 2 => {
                 let a = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
                 let b = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
@@ -2882,7 +2917,9 @@ impl Evaluator<'_> {
             "take" | "drop" | "chooserows" | "choosecols" | "torow" | "tocol" | "expand"
             | "wraprows" | "wrapcols" | "filter" | "sort" | "sortby" | "unique" | "arraytotext"
             | "valuetotext" | "vstack" | "hstack" | "sequence" | "single" | "transpose"
-            | "mmult" | "munit" => self.evaluate_array_manipulation(name, arguments, depth + 1),
+            | "mmult" | "munit" | "mdeterm" | "minverse" => {
+                self.evaluate_array_manipulation(name, arguments, depth + 1)
+            }
             "len" | "left" | "right" | "mid" | "concatenate" | "concat" | "value" | "trim"
             | "upper" | "lower" | "exact" | "rept" | "substitute" | "replace" | "char" | "code"
             | "clean" | "t" | "n" | "find" | "search" | "hyperlink" | "proper" | "unichar"
@@ -3843,6 +3880,167 @@ impl Evaluator<'_> {
                 values: res_values,
                 rows: rows1,
                 cols: cols2,
+            });
+        }
+        if name == "mdeterm" {
+            if arguments.len() != 1 {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
+            let (rows, cols, vals) = match self.evaluate(&arguments[0], depth + 1)? {
+                EvalValue::Scalar(s) => (1, 1, vec![s]),
+                EvalValue::Range { values, rows, cols } => (rows, cols, values),
+                EvalValue::Lambda { .. } => {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+            };
+            if rows != cols || rows == 0 || rows > 64 {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
+            let n = rows;
+            let mut matrix = Vec::with_capacity(n * n);
+            for v in &vals {
+                if let FormulaValue::Error(e) = v {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e.clone())));
+                }
+                match to_number(v) {
+                    Ok(num) => matrix.push(num),
+                    Err(_) => return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                }
+            }
+            if n == 1 {
+                return Ok(EvalValue::Scalar(FormulaValue::Number(matrix[0])));
+            }
+            if n == 2 {
+                let det = matrix[0] * matrix[3] - matrix[1] * matrix[2];
+                let rounded = if (det - det.round()).abs() < 1e-12 {
+                    det.round()
+                } else {
+                    det
+                };
+                return Ok(EvalValue::Scalar(FormulaValue::Number(rounded)));
+            }
+            let mut det = 1.0f64;
+            for i in 0..n {
+                let mut pivot = i;
+                let mut max_val = matrix[i * n + i].abs();
+                for r in (i + 1)..n {
+                    let val = matrix[r * n + i].abs();
+                    if val > max_val {
+                        max_val = val;
+                        pivot = r;
+                    }
+                }
+                if max_val < 1e-15 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Number(0.0)));
+                }
+                if pivot != i {
+                    for c in 0..n {
+                        matrix.swap(i * n + c, pivot * n + c);
+                    }
+                    det = -det;
+                }
+                let diag = matrix[i * n + i];
+                det *= diag;
+                for r in (i + 1)..n {
+                    let factor = matrix[r * n + i] / diag;
+                    for c in (i + 1)..n {
+                        matrix[r * n + c] -= factor * matrix[i * n + c];
+                    }
+                }
+            }
+            let rounded = if (det - det.round()).abs() < 1e-12 {
+                det.round()
+            } else {
+                det
+            };
+            return Ok(EvalValue::Scalar(FormulaValue::Number(rounded)));
+        }
+        if name == "minverse" {
+            if arguments.len() != 1 {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
+            let (rows, cols, vals) = match self.evaluate(&arguments[0], depth + 1)? {
+                EvalValue::Scalar(s) => (1, 1, vec![s]),
+                EvalValue::Range { values, rows, cols } => (rows, cols, values),
+                EvalValue::Lambda { .. } => {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+            };
+            if rows != cols || rows == 0 || rows > 64 {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
+            let n = rows;
+            let mut matrix = Vec::with_capacity(n * n);
+            for v in &vals {
+                if let FormulaValue::Error(e) = v {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e.clone())));
+                }
+                match to_number(v) {
+                    Ok(num) => matrix.push(num),
+                    Err(_) => return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                }
+            }
+            if n == 1 {
+                if matrix[0] == 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())));
+                }
+                return Ok(EvalValue::Scalar(FormulaValue::Number(1.0 / matrix[0])));
+            }
+            let mut aug = vec![0.0f64; n * 2 * n];
+            for r in 0..n {
+                for c in 0..n {
+                    aug[r * (2 * n) + c] = matrix[r * n + c];
+                }
+                aug[r * (2 * n) + n + r] = 1.0;
+            }
+            for i in 0..n {
+                let mut pivot = i;
+                let mut max_val = aug[i * (2 * n) + i].abs();
+                for r in (i + 1)..n {
+                    let val = aug[r * (2 * n) + i].abs();
+                    if val > max_val {
+                        max_val = val;
+                        pivot = r;
+                    }
+                }
+                if max_val < 1e-15 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                if pivot != i {
+                    for c in 0..(2 * n) {
+                        aug.swap(i * (2 * n) + c, pivot * (2 * n) + c);
+                    }
+                }
+                let diag = aug[i * (2 * n) + i];
+                for c in 0..(2 * n) {
+                    aug[i * (2 * n) + c] /= diag;
+                }
+                for r in 0..n {
+                    if r != i {
+                        let factor = aug[r * (2 * n) + i];
+                        for c in 0..(2 * n) {
+                            let sub = factor * aug[i * (2 * n) + c];
+                            aug[r * (2 * n) + c] -= sub;
+                        }
+                    }
+                }
+            }
+            let mut res_vals = Vec::with_capacity(n * n);
+            for r in 0..n {
+                for c in 0..n {
+                    let val = aug[r * (2 * n) + n + c];
+                    let rounded = if (val - val.round()).abs() < 1e-12 {
+                        val.round()
+                    } else {
+                        val
+                    };
+                    res_vals.push(FormulaValue::Number(rounded));
+                }
+            }
+            return Ok(EvalValue::Range {
+                values: res_vals,
+                rows: n,
+                cols: n,
             });
         }
         if name == "sequence" {
@@ -8761,6 +8959,75 @@ mod tests {
             )
             .value,
             Some(FormulaValue::String("B".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_matrix_determinants_inversion_and_series() {
+        let test_cells: Vec<WorkbookCellInfo> = vec![];
+
+        // INT
+        assert_eq!(
+            evaluate_formula("=INT(8.9)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(8.0))
+        );
+        assert_eq!(
+            evaluate_formula("=INT(-8.9)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(-9.0))
+        );
+
+        // SERIESSUM: 1*2^0 + 2*2^1 + 3*2^2 = 1 + 4 + 12 = 17
+        assert_eq!(
+            evaluate_formula(
+                "=SERIESSUM(2, 0, 1, {1, 2, 3})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(17.0))
+        );
+
+        // MDETERM 2x2: 5*4 - 2*3 = 14
+        assert_eq!(
+            evaluate_formula(
+                "=MDETERM({5, 2; 3, 4})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(14.0))
+        );
+
+        // MDETERM 3x3: 1*(24-0) - 2*(0-5) + 3*(0-4) = 24 + 10 - 12 = 22
+        assert_eq!(
+            evaluate_formula(
+                "=MDETERM({1, 2, 3; 0, 4, 5; 1, 0, 6})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(22.0))
+        );
+
+        // MINVERSE 1x1: 1/4 = 0.25
+        assert_eq!(
+            evaluate_formula("=MINVERSE(4)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.25))
+        );
+
+        // De-obfuscation: CHAR(MDETERM({10, 5; 3, 8}) - INT(-5.4)) = CHAR(65 - (-6)) = CHAR(71) = "G"
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(MDETERM({10, 5; 3, 8}) - INT(-5.4))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("G".into()))
         );
     }
 }

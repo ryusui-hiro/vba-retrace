@@ -677,6 +677,10 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("acoth")
                 || f_lower.contains("mmult")
                 || f_lower.contains("munit")
+                || f_lower.contains("mdeterm")
+                || f_lower.contains("minverse")
+                || f_lower.contains("int")
+                || f_lower.contains("seriessum")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -5625,6 +5629,365 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_customxml_properties_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        // 1. Remote UNC paths in custom XML itemProps or schema definitions (NTLM coercion)
+        if (s_lower.contains("ds:uri=\"\\\\")
+            || s_lower.contains("ds:uri='\\\\")
+            || s_lower.contains("ds:uri=\"//")
+            || s_lower.contains("ds:uri='//"))
+            || (s_lower.contains("schemaref") && s_lower.contains(r"\\"))
+            || (s_lower.contains("targetnamespace") && s_lower.contains(r"\\"))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "customXmlProp:uncSchema".into(),
+                "Custom XML item properties or schema references remote UNC path enabling NTLM credential coercion".into(),
+            ));
+        }
+
+        // 2. Dangerous exploit URI schemes / protocols in custom XML properties
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "ms-appinstaller:",
+            "mhtml:",
+            "javascript:",
+            "powershell:",
+            "vbscript:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    format!(
+                        "customXmlProp:dangerousProtocol:{}",
+                        proto.trim_end_matches(':')
+                    ),
+                    format!(
+                        "Custom XML properties references dangerous exploit URI scheme '{proto}'"
+                    ),
+                ));
+                break;
+            }
+        }
+
+        // 3. External relationships in customXml/_rels/*.rels
+        if entry_name.contains("_rels") && s_lower.contains("targetmode=\"external\"") {
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find("target=\"") {
+                let actual = search_idx + pos + 8;
+                if let Some(end_quote) = s_lower[actual..].find('"') {
+                    let target = &s_lossy[actual..actual + end_quote];
+                    let t_lower = target.to_ascii_lowercase();
+                    if t_lower.starts_with(r"\\") {
+                        results.push((
+                            "Critical",
+                            target.to_string(),
+                            "customXmlProp:uncRelationship".into(),
+                            format!("Custom XML relationship references remote UNC path '{target}' (NTLM coercion vector)"),
+                        ));
+                        break;
+                    }
+                    if t_lower.starts_with("http://") || t_lower.starts_with("https://") {
+                        results.push((
+                            "High",
+                            target.to_string(),
+                            "customXmlProp:remoteTemplateInjection".into(),
+                            format!("Custom XML relationship references remote target '{target}'"),
+                        ));
+                        break;
+                    }
+                    if t_lower.ends_with(".exe")
+                        || t_lower.ends_with(".bat")
+                        || t_lower.ends_with(".vbs")
+                        || t_lower.ends_with(".ps1")
+                        || t_lower.ends_with(".hta")
+                        || t_lower.ends_with(".lnk")
+                    {
+                        results.push((
+                            "Critical",
+                            target.to_string(),
+                            "customXmlProp:executableRelationship".into(),
+                            format!("Custom XML relationship references executable or script payload '{target}'"),
+                        ));
+                        break;
+                    }
+                }
+                search_idx = actual;
+            }
+        }
+
+        // 4. Smuggled Base64 PE binary or shell commands in custom XML properties
+        if s_lossy.contains("TVqQ") || s_lower.contains("this program cannot be run in dos mode") {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "customXmlProp:smuggledBinary".into(),
+                "Custom XML properties contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "customXmlProp:shellCommand".into(),
+                    format!("Custom XML properties contains shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        results
+    }
+
+    fn scan_vbaproject_rels_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        // 1. External relationships in vbaProject.bin.rels or vbaProjectSignature*.bin.rels
+        if entry_name.contains("_rels") && s_lower.contains("targetmode=\"external\"") {
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find("target=\"") {
+                let actual = search_idx + pos + 8;
+                if let Some(end_quote) = s_lower[actual..].find('"') {
+                    let target = &s_lossy[actual..actual + end_quote];
+                    let t_lower = target.to_ascii_lowercase();
+                    if t_lower.starts_with(r"\\") {
+                        results.push((
+                            "Critical",
+                            target.to_string(),
+                            "vbaRels:uncRelationship".into(),
+                            format!("VBA project relationship references remote UNC path '{target}' enabling NTLM credential coercion"),
+                        ));
+                        break;
+                    }
+                    if t_lower.starts_with("http://") || t_lower.starts_with("https://") {
+                        results.push((
+                            "Critical",
+                            target.to_string(),
+                            "vbaRels:remoteProjectLink".into(),
+                            format!("VBA project relationship references remote payload or project binary '{target}'"),
+                        ));
+                        break;
+                    }
+                    if t_lower.ends_with(".exe")
+                        || t_lower.ends_with(".dll")
+                        || t_lower.ends_with(".bin")
+                        || t_lower.ends_with(".bat")
+                        || t_lower.ends_with(".vbs")
+                        || t_lower.ends_with(".ps1")
+                        || t_lower.ends_with(".hta")
+                        || t_lower.ends_with(".ocx")
+                    {
+                        results.push((
+                            "Critical",
+                            target.to_string(),
+                            "vbaRels:executableTarget".into(),
+                            format!("VBA project relationship references executable or binary component '{target}'"),
+                        ));
+                        break;
+                    }
+                }
+                search_idx = actual;
+            }
+        }
+
+        // 2. Dangerous URI schemes in vbaProject rels or vbaData
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "ms-appinstaller:",
+            "mhtml:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    format!("vbaRels:dangerousProtocol:{}", proto.trim_end_matches(':')),
+                    format!("VBA project relationship or data part references dangerous exploit URI scheme '{proto}'"),
+                ));
+                break;
+            }
+        }
+
+        // 3. Smuggled PE binary or shell commands in vbaData.xml
+        if s_lossy.contains("TVqQ") || s_lower.contains("this program cannot be run in dos mode") {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "vbaData:smuggledBinary".into(),
+                "VBA project data part contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "vbaData:shellCommand".into(),
+                    format!("VBA project data part contains shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        results
+    }
+
+    fn scan_word_glossary_rels_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        // 1. Remote UNC paths in glossary XML markup or relationships
+        if s_lower.contains("target=\"\\\\")
+            || s_lower.contains("target='\\\\")
+            || s_lower.contains("target=\"//")
+            || s_lower.contains("target='//")
+            || (s_lower.contains(r"\\")
+                && (s_lower.contains("attachedtemplate")
+                    || s_lower.contains("hyperlink")
+                    || s_lower.contains("docpart")))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "glossaryRels:uncPath".into(),
+                "Word glossary or building blocks part references remote UNC path enabling NTLM credential coercion".into(),
+            ));
+        }
+
+        // 2. Remote template injection in glossary settings
+        if s_lower.contains("attachedtemplate")
+            && (s_lower.contains("http://") || s_lower.contains("https://"))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "glossaryRels:remoteTemplateInjection".into(),
+                "Word glossary settings references remote external template (template injection vector)".into(),
+            ));
+        }
+
+        // 3. Dangerous exploit URI schemes in glossary relationships or hyperlinks
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "ms-appinstaller:",
+            "mhtml:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    format!("glossaryRels:dangerousProtocol:{}", proto.trim_end_matches(':')),
+                    format!("Word glossary or building blocks references dangerous exploit URI scheme '{proto}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. External relationships in glossary _rels targeting executable/script files
+        if entry_name.contains("_rels") && s_lower.contains("targetmode=\"external\"") {
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find("target=\"") {
+                let actual = search_idx + pos + 8;
+                if let Some(end_quote) = s_lower[actual..].find('"') {
+                    let target = &s_lossy[actual..actual + end_quote];
+                    let t_lower = target.to_ascii_lowercase();
+                    if t_lower.ends_with(".exe")
+                        || t_lower.ends_with(".bat")
+                        || t_lower.ends_with(".vbs")
+                        || t_lower.ends_with(".ps1")
+                        || t_lower.ends_with(".hta")
+                        || t_lower.ends_with(".lnk")
+                    {
+                        results.push((
+                            "Critical",
+                            target.to_string(),
+                            "glossaryRels:executableRelationship".into(),
+                            format!("Word glossary relationship references executable or script payload '{target}'"),
+                        ));
+                        break;
+                    }
+                }
+                search_idx = actual;
+            }
+        }
+
+        // 5. Smuggled Base64 PE binary or shell commands in glossary definitions
+        if s_lossy.contains("TVqQ") || s_lower.contains("this program cannot be run in dos mode") {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "glossaryRels:smuggledBinary".into(),
+                "Word glossary or building blocks part contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "glossaryRels:shellCommand".into(),
+                    format!("Word glossary or building blocks part contains shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -6301,6 +6664,88 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "ThemeFontOrEffectCoercionAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for CustomXML Properties or Item Schema Anomaly (VBA-CELL-056)
+        let is_customxml_candidate =
+            name_lower.contains("customxml") || name_lower.contains("itemprops");
+        if is_customxml_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_customxml_properties_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "CustomXML properties or item schema anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "CustomXml".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "CustomXmlPropertiesOrItemSchemaAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for VBA Project Relationship or Data Stream Anomaly (VBA-CELL-057)
+        let is_vba_rels_or_data_candidate = name_lower.contains("vbaproject")
+            || name_lower.contains("vbadata")
+            || (name_lower.contains("vba") && name_lower.contains("_rels"));
+        if is_vba_rels_or_data_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_vbaproject_rels_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "VBA Project relationship or data stream anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "VbaProject".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "VbaDataStreamOrProjectRelsAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word Glossary or Building Blocks Relationship Anomaly (VBA-CELL-058)
+        let is_glossary_candidate =
+            name_lower.contains("glossary") || name_lower.contains("buildingblocks");
+        if is_glossary_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_word_glossary_rels_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Word glossary or building blocks relationship anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Glossary".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "WordGlossaryOrBuildingBlocksRelsAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,
