@@ -4619,6 +4619,215 @@ impl Evaluator<'_> {
                     Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
                 }
             }
+            "f.dist" if arguments.len() == 4 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let d1 = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                let d2 = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.floor() as i64;
+                let cumulative = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)? != 0.0;
+                if x < 0.0 || d1 < 1 || d2 < 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                if cumulative {
+                    match f_dist_cdf_f64(x, d1 as f64, d2 as f64) {
+                        Ok(p) => Ok(EvalValue::Scalar(FormulaValue::Number(p))),
+                        Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    }
+                } else {
+                    match f_dist_pdf_f64(x, d1 as f64, d2 as f64) {
+                        Ok(p) => Ok(EvalValue::Scalar(FormulaValue::Number(p))),
+                        Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    }
+                }
+            }
+            "fdist" | "f.dist.rt" if arguments.len() == 3 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let d1 = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                let d2 = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.floor() as i64;
+                if x < 0.0 || d1 < 1 || d2 < 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                match f_dist_cdf_f64(x, d1 as f64, d2 as f64) {
+                    Ok(p) => Ok(EvalValue::Scalar(FormulaValue::Number(
+                        (1.0 - p).clamp(0.0, 1.0),
+                    ))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "f.inv" if arguments.len() == 3 => {
+                let p = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let d1 = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                let d2 = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.floor() as i64;
+                if !(0.0..1.0).contains(&p) || d1 < 1 || d2 < 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                match f_inv_f64(p, d1 as f64, d2 as f64) {
+                    Ok(x) => Ok(EvalValue::Scalar(FormulaValue::Number(x))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "finv" | "f.inv.rt" if arguments.len() == 3 => {
+                let p = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let d1 = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                let d2 = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.floor() as i64;
+                if !(0.0..=1.0).contains(&p) || p == 0.0 || d1 < 1 || d2 < 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                match f_inv_f64(1.0 - p, d1 as f64, d2 as f64) {
+                    Ok(x) => Ok(EvalValue::Scalar(FormulaValue::Number(x))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "t.dist" if arguments.len() == 3 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let df = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                let cumulative = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)? != 0.0;
+                if df < 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                if cumulative {
+                    match t_dist_cdf_f64(x, df as f64) {
+                        Ok(p) => Ok(EvalValue::Scalar(FormulaValue::Number(p))),
+                        Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    }
+                } else {
+                    match t_dist_pdf_f64(x, df as f64) {
+                        Ok(p) => Ok(EvalValue::Scalar(FormulaValue::Number(p))),
+                        Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    }
+                }
+            }
+            "tdist" if arguments.len() == 3 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let df = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                let tails = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.floor() as i64;
+                if x < 0.0 || df < 1 || (tails != 1 && tails != 2) {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                match t_dist_cdf_f64(x, df as f64) {
+                    Ok(p) => {
+                        let rt = (1.0 - p).clamp(0.0, 1.0);
+                        let res = if tails == 1 { rt } else { 2.0 * rt };
+                        Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                    }
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "t.dist.rt" if arguments.len() == 2 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let df = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                if df < 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                match t_dist_cdf_f64(x, df as f64) {
+                    Ok(p) => Ok(EvalValue::Scalar(FormulaValue::Number(
+                        (1.0 - p).clamp(0.0, 1.0),
+                    ))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "t.dist.2t" if arguments.len() == 2 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let df = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                if x < 0.0 || df < 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                match t_dist_cdf_f64(x, df as f64) {
+                    Ok(p) => {
+                        let rt = (1.0 - p).clamp(0.0, 1.0);
+                        Ok(EvalValue::Scalar(FormulaValue::Number(2.0 * rt)))
+                    }
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "t.inv" if arguments.len() == 2 => {
+                let p = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let df = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                if !(0.0..=1.0).contains(&p) || p == 0.0 || p == 1.0 || df < 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                match t_inv_f64(p, df as f64) {
+                    Ok(x) => Ok(EvalValue::Scalar(FormulaValue::Number(x))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "tinv" | "t.inv.2t" if arguments.len() == 2 => {
+                let p = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let df = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                if !(0.0..=1.0).contains(&p) || p == 0.0 || p == 1.0 || df < 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                match t_inv_f64(1.0 - p / 2.0, df as f64) {
+                    Ok(x) => Ok(EvalValue::Scalar(FormulaValue::Number(x))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "yielddisc" if (4..=5).contains(&arguments.len()) => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let pr = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let redemption = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?;
+                let basis = if arguments.len() == 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?.floor() as i32
+                } else {
+                    0
+                };
+                match yielddisc_f64(settlement, maturity, pr, redemption, basis) {
+                    Ok(y) => Ok(EvalValue::Scalar(FormulaValue::Number(y))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "tbilleq" if arguments.len() == 3 => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let discount = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                match tbilleq_f64(settlement, maturity, discount) {
+                    Ok(y) => Ok(EvalValue::Scalar(FormulaValue::Number(y))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "fvschedule" if arguments.len() == 2 => {
+                let principal = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if !principal.is_finite() {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let mut acc = 1.0f64;
+                match self.evaluate(&arguments[1], depth + 1)? {
+                    EvalValue::Scalar(val) => {
+                        if let FormulaValue::Error(e) = val {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                        }
+                        let r = to_number(&val)?;
+                        if !r.is_finite() {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                        }
+                        acc *= 1.0 + r;
+                    }
+                    EvalValue::Range { values, .. } => {
+                        for v in values {
+                            if let FormulaValue::Error(e) = v {
+                                return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                            }
+                            if let Ok(r) = to_number(&v) {
+                                if !r.is_finite() {
+                                    return Ok(EvalValue::Scalar(FormulaValue::Error(
+                                        "#NUM!".into(),
+                                    )));
+                                }
+                                acc *= 1.0 + r;
+                            }
+                        }
+                    }
+                    EvalValue::Lambda { .. } => {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                }
+                let res = principal * acc;
+                if res.is_finite() {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                }
+            }
             "chisq.dist" if arguments.len() == 3 => {
                 let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
                 let df = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
@@ -8047,6 +8256,171 @@ fn coupdaysnc_f64(
     } else {
         Ok(rem)
     }
+}
+
+fn f_dist_cdf_f64(x: f64, d1: f64, d2: f64) -> Result<f64, &'static str> {
+    if x < 0.0 || d1 <= 0.0 || d2 <= 0.0 || !x.is_finite() || !d1.is_finite() || !d2.is_finite() {
+        return Err("#NUM!");
+    }
+    if x == 0.0 {
+        return Ok(0.0);
+    }
+    let u = (d1 * x) / (d1 * x + d2);
+    betai_f64(0.5 * d1, 0.5 * d2, u)
+}
+
+fn f_dist_pdf_f64(x: f64, d1: f64, d2: f64) -> Result<f64, &'static str> {
+    if x < 0.0 || d1 <= 0.0 || d2 <= 0.0 || !x.is_finite() || !d1.is_finite() || !d2.is_finite() {
+        return Err("#NUM!");
+    }
+    if x == 0.0 {
+        if (d1 - 2.0).abs() < 1e-9 {
+            return Ok(1.0);
+        } else if d1 > 2.0 {
+            return Ok(0.0);
+        } else {
+            return Err("#NUM!");
+        }
+    }
+    let lna = gammaln_f64(0.5 * (d1 + d2))? - gammaln_f64(0.5 * d1)? - gammaln_f64(0.5 * d2)?
+        + 0.5 * d1 * (d1 / d2).ln()
+        + (0.5 * d1 - 1.0) * x.ln()
+        - 0.5 * (d1 + d2) * (1.0 + (d1 / d2) * x).ln();
+    Ok(lna.exp())
+}
+
+fn f_inv_f64(p: f64, d1: f64, d2: f64) -> Result<f64, &'static str> {
+    if !(0.0..1.0).contains(&p)
+        || d1 <= 0.0
+        || d2 <= 0.0
+        || !p.is_finite()
+        || !d1.is_finite()
+        || !d2.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    if p == 0.0 {
+        return Ok(0.0);
+    }
+    let u = beta_inv_f64(p, 0.5 * d1, 0.5 * d2)?;
+    if u <= 0.0 {
+        return Ok(0.0);
+    }
+    if u >= 1.0 {
+        return Err("#NUM!");
+    }
+    Ok((d2 * u) / (d1 * (1.0 - u)))
+}
+
+fn t_dist_cdf_f64(x: f64, df: f64) -> Result<f64, &'static str> {
+    if df <= 0.0 || !x.is_finite() || !df.is_finite() {
+        return Err("#NUM!");
+    }
+    if x == 0.0 {
+        return Ok(0.5);
+    }
+    let u = df / (df + x * x);
+    let tail = 0.5 * betai_f64(0.5 * df, 0.5, u)?;
+    if x > 0.0 {
+        Ok((1.0 - tail).clamp(0.0, 1.0))
+    } else {
+        Ok(tail.clamp(0.0, 1.0))
+    }
+}
+
+fn t_dist_pdf_f64(x: f64, df: f64) -> Result<f64, &'static str> {
+    if df <= 0.0 || !x.is_finite() || !df.is_finite() {
+        return Err("#NUM!");
+    }
+    let lna = gammaln_f64(0.5 * (df + 1.0))?
+        - gammaln_f64(0.5 * df)?
+        - 0.5 * (std::f64::consts::PI * df).ln()
+        - 0.5 * (df + 1.0) * (1.0 + (x * x) / df).ln();
+    Ok(lna.exp())
+}
+
+fn t_inv_f64(p: f64, df: f64) -> Result<f64, &'static str> {
+    if !(0.0..1.0).contains(&p) || p == 0.0 || df <= 0.0 || !p.is_finite() || !df.is_finite() {
+        return Err("#NUM!");
+    }
+    if (p - 0.5).abs() < 1e-12 {
+        return Ok(0.0);
+    }
+    if p < 0.5 {
+        let u = beta_inv_f64(2.0 * p, 0.5 * df, 0.5)?;
+        if u <= 0.0 || u >= 1.0 {
+            return Err("#NUM!");
+        }
+        let x = -((df * (1.0 - u) / u).sqrt());
+        Ok(x)
+    } else {
+        let u = beta_inv_f64(2.0 * (1.0 - p), 0.5 * df, 0.5)?;
+        if u <= 0.0 || u >= 1.0 {
+            return Err("#NUM!");
+        }
+        let x = (df * (1.0 - u) / u).sqrt();
+        Ok(x)
+    }
+}
+
+fn tbilleq_f64(settlement: f64, maturity: f64, discount: f64) -> Result<f64, &'static str> {
+    let dsm = maturity - settlement;
+    if dsm <= 0.0
+        || dsm > 366.0
+        || discount <= 0.0
+        || !settlement.is_finite()
+        || !maturity.is_finite()
+        || !discount.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    if dsm <= 182.0 {
+        let denom = 360.0 - discount * dsm;
+        if denom <= 0.0 {
+            return Err("#NUM!");
+        }
+        Ok((365.0 * discount) / denom)
+    } else {
+        let price = 100.0 - (discount * 100.0 * dsm / 360.0);
+        if price <= 0.0 {
+            return Err("#NUM!");
+        }
+        let a = (dsm / 365.0) - 0.25;
+        let b = dsm / 365.0;
+        let c = (price - 100.0) / price;
+        let disc_root = b * b - 4.0 * a * c;
+        if disc_root < 0.0 {
+            return Err("#NUM!");
+        }
+        Ok((-b + disc_root.sqrt()) / (2.0 * a))
+    }
+}
+
+fn yielddisc_f64(
+    settlement: f64,
+    maturity: f64,
+    pr: f64,
+    redemption: f64,
+    basis: i32,
+) -> Result<f64, &'static str> {
+    let dim = maturity - settlement;
+    if dim <= 0.0
+        || pr <= 0.0
+        || redemption <= 0.0
+        || !(0..=4).contains(&basis)
+        || !settlement.is_finite()
+        || !maturity.is_finite()
+        || !pr.is_finite()
+        || !redemption.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    let b = if basis == 1 || basis == 3 {
+        365.0
+    } else {
+        360.0
+    };
+    Ok(((redemption - pr) / pr) * (b / dim))
 }
 
 fn besselj_f64(x: f64, n: u32) -> Result<f64, &'static str> {
@@ -13392,5 +13766,99 @@ mod tests {
             .value,
             Some(FormulaValue::String("A".into()))
         );
+
+        // F and T distribution, TBILLEQ, YIELDDISC, and FVSCHEDULE tests
+        let fdist_res = evaluate_formula(
+            "=F.DIST(1.0, 10, 10, TRUE)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(val)) = fdist_res {
+            assert!((val - 0.5).abs() < 1e-4, "F.DIST expected ~0.5, got {val}");
+        } else {
+            panic!("Expected number from F.DIST, got {fdist_res:?}");
+        }
+        let finv_res =
+            evaluate_formula("=F.INV(0.5, 10, 10)", None, &test_cells, Default::default()).value;
+        if let Some(FormulaValue::Number(val)) = finv_res {
+            assert!(
+                (val - 1.0).abs() < 1e-4,
+                "F.INV(0.5, 10, 10) expected ~1.0, got {val}"
+            );
+        } else {
+            panic!("Expected number from F.INV, got {finv_res:?}");
+        }
+
+        assert_eq!(
+            evaluate_formula(
+                "=T.DIST(0, 10, TRUE)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(0.5))
+        );
+        assert_eq!(
+            evaluate_formula("=T.INV(0.5, 10)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+
+        // FVSCHEDULE scalar & range
+        assert_eq!(
+            evaluate_formula(
+                "=FVSCHEDULE(100, 0.1)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(110.00000000000001))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(INT(FVSCHEDULE(50, 0.3)))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
+        );
+
+        // TBILLEQ & YIELDDISC
+        let tbilleq_res = evaluate_formula(
+            "=TBILLEQ(100, 190, 0.05)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(val)) = tbilleq_res {
+            assert!(
+                (val - 0.051336).abs() < 1e-4,
+                "TBILLEQ expected ~0.051336, got {val}"
+            );
+        } else {
+            panic!("Expected number from TBILLEQ, got {tbilleq_res:?}");
+        }
+
+        let yielddisc_res = evaluate_formula(
+            "=YIELDDISC(100, 465, 95, 100, 3)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(val)) = yielddisc_res {
+            assert!(
+                (val - 0.052631).abs() < 1e-4,
+                "YIELDDISC expected ~0.052631, got {val}"
+            );
+        } else {
+            panic!("Expected number from YIELDDISC, got {yielddisc_res:?}");
+        }
     }
 }
