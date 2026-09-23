@@ -1652,15 +1652,6 @@ impl Evaluator<'_> {
                     !true_count.is_multiple_of(2),
                 )))
             }
-            "quotient" if arguments.len() == 2 => {
-                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
-                let d = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
-                if d == 0.0 {
-                    Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())))
-                } else {
-                    Ok(EvalValue::Scalar(FormulaValue::Number((n / d).trunc())))
-                }
-            }
             "log" if (1..=2).contains(&arguments.len()) => {
                 let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
                 if n <= 0.0 {
@@ -2350,6 +2341,90 @@ impl Evaluator<'_> {
                 } else {
                     Ok(EvalValue::Scalar(FormulaValue::Number(y.atan2(x))))
                 }
+            }
+            "sinh" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let res = n.sinh();
+                if res.is_finite() {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                }
+            }
+            "cosh" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let res = n.cosh();
+                if res.is_finite() {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                }
+            }
+            "tanh" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(FormulaValue::Number(n.tanh())))
+            }
+            "asinh" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let res = n.asinh();
+                if res.is_finite() {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                }
+            }
+            "acosh" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if n < 1.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    let res = n.acosh();
+                    if res.is_finite() {
+                        Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                    }
+                }
+            }
+            "atanh" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if n <= -1.0 || n >= 1.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(n.atanh())))
+                }
+            }
+            "sqrtpi" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if n < 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(
+                        (n * std::f64::consts::PI).sqrt(),
+                    )))
+                }
+            }
+            "sumsq" if !arguments.is_empty() => {
+                let mut sum = 0.0;
+                for arg in arguments {
+                    match self.evaluate(arg, depth + 1)? {
+                        EvalValue::Scalar(s) => {
+                            let num = to_number(&s)?;
+                            sum += num * num;
+                        }
+                        EvalValue::Range { values, .. } => {
+                            for val in values {
+                                if let Ok(num) = to_number(&val) {
+                                    sum += num * num;
+                                }
+                            }
+                        }
+                        EvalValue::Lambda { .. } => {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                        }
+                    }
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Number(sum)))
             }
             "bitand" if arguments.len() == 2 => {
                 let a = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
@@ -8324,6 +8399,88 @@ mod tests {
             )
             .value,
             Some(FormulaValue::String("F".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_hyperbolic_and_sumsq_functions() {
+        let test_cells = vec![];
+
+        // SINH, COSH, TANH
+        assert_eq!(
+            evaluate_formula("=SINH(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=COSH(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=TANH(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+
+        // ASINH, ACOSH, ATANH
+        assert_eq!(
+            evaluate_formula("=ASINH(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ACOSH(1)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ACOSH(0.5)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#NUM!".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=ATANH(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ATANH(1)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#NUM!".into()))
+        );
+
+        // SQRTPI
+        if let Some(FormulaValue::Number(val)) =
+            evaluate_formula("=SQRTPI(2)", None, &test_cells, Default::default()).value
+        {
+            assert!((val - (2.0 * std::f64::consts::PI).sqrt()).abs() < 1e-10);
+        } else {
+            panic!("SQRTPI(2) failed");
+        }
+        assert_eq!(
+            evaluate_formula("=SQRTPI(-1)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#NUM!".into()))
+        );
+
+        // SUMSQ
+        assert_eq!(
+            evaluate_formula("=SUMSQ(3, 4)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(25.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=SUMSQ({1, 2; 3, 4})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(30.0))
+        );
+
+        // De-obfuscation combining SUMSQ and hyperbolic trig: CHAR(SUMSQ(8, 1) + COSH(0)) = CHAR(64 + 1 + 1) = CHAR(66) = "B"
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(SUMSQ(8, 1) + COSH(0))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("B".into()))
         );
     }
 }

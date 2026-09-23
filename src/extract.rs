@@ -659,6 +659,14 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("exp")
                 || f_lower.contains("log")
                 || f_lower.contains("ln")
+                || f_lower.contains("sinh")
+                || f_lower.contains("cosh")
+                || f_lower.contains("tanh")
+                || f_lower.contains("asinh")
+                || f_lower.contains("acosh")
+                || f_lower.contains("atanh")
+                || f_lower.contains("sqrtpi")
+                || f_lower.contains("sumsq")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -4887,6 +4895,335 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_slicer_timeline_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let name_lower = entry_name.to_ascii_lowercase();
+        let is_slicer_or_timeline =
+            name_lower.contains("slicer") || name_lower.contains("timeline");
+
+        if !is_slicer_or_timeline {
+            return results;
+        }
+
+        if name_lower.ends_with(".rels") {
+            let mut pos = 0;
+            while let Some(idx) = data[pos..]
+                .windows(8)
+                .position(|w| w.eq_ignore_ascii_case(b"<relatio"))
+            {
+                let rel_start = pos + idx;
+                pos = rel_start + 8;
+                let rel_end = match data[rel_start..]
+                    .windows(2)
+                    .position(|w| w == b"/>" || w == b"\">")
+                {
+                    Some(p) => rel_start + p + 2,
+                    None => break,
+                };
+                let rel_bytes = &data[rel_start..rel_end];
+                let rel_str = String::from_utf8_lossy(rel_bytes);
+                let target = extract_attribute_value(&rel_str, "Target").unwrap_or_default();
+                let target_mode =
+                    extract_attribute_value(&rel_str, "TargetMode").unwrap_or_default();
+
+                if !target.is_empty() {
+                    let t_lower = target.to_ascii_lowercase();
+                    let is_external = target_mode.eq_ignore_ascii_case("External")
+                        || t_lower.starts_with("http:")
+                        || t_lower.starts_with("https:")
+                        || t_lower.starts_with(r"\\")
+                        || t_lower.starts_with("//");
+
+                    if is_external {
+                        if t_lower.starts_with(r"\\") || t_lower.starts_with("//") {
+                            results.push((
+                                "High",
+                                target.clone(),
+                                "slicer:uncPath".into(),
+                                format!("Slicer / Timeline relationship references remote UNC path '{target}' (NTLM coercion vector)"),
+                            ));
+                        } else if t_lower.starts_with("ms-msdt:")
+                            || t_lower.starts_with("search-ms:")
+                            || t_lower.starts_with("mhtml:")
+                            || t_lower.starts_with("javascript:")
+                            || t_lower.starts_with("powershell:")
+                        {
+                            results.push((
+                                "Critical",
+                                target.clone(),
+                                "slicer:dangerousProtocol".into(),
+                                format!("Slicer / Timeline relationship references dangerous exploit URI scheme '{target}'"),
+                            ));
+                        } else if [".exe", ".dll", ".hta", ".ps1", ".bat", ".cmd", ".vbs"]
+                            .iter()
+                            .any(|ext| t_lower.ends_with(ext))
+                        {
+                            results.push((
+                                "Critical",
+                                target.clone(),
+                                "slicer:executableTarget".into(),
+                                format!("Slicer / Timeline relationship targets executable or script payload '{target}'"),
+                            ));
+                        } else {
+                            results.push((
+                                "High",
+                                target.clone(),
+                                "slicer:externalTarget".into(),
+                                format!("Slicer / Timeline relationship targets external remote data source '{target}'"),
+                            ));
+                        }
+                    }
+                }
+            }
+        } else if name_lower.ends_with(".xml") {
+            let s = String::from_utf8_lossy(data);
+            let s_lower = s.to_ascii_lowercase();
+
+            // 1. Database command execution in Slicer / Timeline custom query or connection
+            for cmd in &[
+                "xp_cmdshell",
+                "sp_oacreate",
+                "openrowset",
+                "bulk insert",
+                "exec(",
+                "exec master",
+            ] {
+                if s_lower.contains(cmd) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "slicer:commandExecution".into(),
+                        format!("Slicer / Timeline definition contains database shell execution command '{cmd}'"),
+                    ));
+                    break;
+                }
+            }
+
+            // 2. UNC source workbook or external connection
+            if s_lower.contains(r"sourceworkbook=\\")
+                || s_lower.contains("sourceworkbook=//")
+                || s_lower.contains(r#"sourceworkbook="\\"#)
+                || s_lower.contains(r#"connection="\\"#)
+            {
+                results.push((
+                    "High",
+                    entry_name.to_string(),
+                    "slicer:uncConnection".into(),
+                    "Slicer / Timeline definition contains external UNC source workbook connection (NTLM coercion vector)".into(),
+                ));
+            }
+
+            // 3. Environment variable exfiltration tokens
+            for env_token in &["%username%", "%userdomain%", "%computername%"] {
+                if s_lower.contains(env_token) {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "slicer:envExfiltration".into(),
+                        format!("Slicer / Timeline definition contains environment variable exfiltration token '{env_token}'"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        results
+    }
+
+    fn scan_bibliography_citation_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let name_lower = entry_name.to_ascii_lowercase();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        let is_bib_candidate = name_lower.contains("bibliography")
+            || name_lower.contains("sources.xml")
+            || s_lower.contains("<b:sources")
+            || s_lower.contains("<b:source");
+
+        if !is_bib_candidate {
+            return results;
+        }
+
+        // 1. Remote UNC paths for NTLM coercion
+        if s_lower.contains(r"\\") || s_lower.contains("<b:url>") {
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find(r"\\") {
+                let actual = search_idx + pos;
+                let rem = &s_lower[actual + 2..];
+                if let Some(first_char) = rem.chars().next()
+                    && (first_char.is_ascii_alphanumeric()
+                        || first_char == '.'
+                        || first_char == '[')
+                    && rem.contains('\\')
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "bib:uncCoercion".into(),
+                        "Bibliography citation contains remote UNC path enabling NTLM credential coercion".into(),
+                    ));
+                    break;
+                }
+                search_idx = actual + 2;
+            }
+        }
+
+        // 2. Exploit protocol handlers in citation fields
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "ms-appinstaller:",
+            "mhtml:",
+            "javascript:",
+            "powershell:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    format!("bib:protocolHandler:{}", proto.trim_end_matches(':')),
+                    format!("Bibliography citation contains dangerous exploit protocol handler '{proto}'"),
+                ));
+                break;
+            }
+        }
+
+        // 3. Shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "bib:shellCommand".into(),
+                    format!("Bibliography citation contains shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. Smuggled Base64 PE binary in citation
+        if s_lossy.contains("TVqQ") || s_lower.contains("this program cannot be run in dos mode") {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "bib:smuggledBinary".into(),
+                "Bibliography citation contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_custom_xml_databinding_xpath_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        let is_databinding_candidate = s_lower.contains("databinding")
+            || s_lower.contains("xpath=")
+            || s_lower.contains("storeitemid");
+
+        if !is_databinding_candidate {
+            return results;
+        }
+
+        // 1. XPath SSRF / External document entity injection (e.g. document('http://...'), document('\\host\share...'), doc('...'))
+        if s_lower.contains("document(") || s_lower.contains("doc(") {
+            let sev = if s_lower.contains(r"\\")
+                || s_lower.contains("http://")
+                || s_lower.contains("https://")
+            {
+                "Critical"
+            } else {
+                "High"
+            };
+            results.push((
+                sev,
+                entry_name.to_string(),
+                "xpath:ssrfInjection".into(),
+                "Custom XML data binding XPath query invokes external document resolution function (SSRF or NTLM coercion vector)".into(),
+            ));
+        }
+
+        // 2. Command injection or database execution in XPath
+        for cmd in &[
+            "xp_cmdshell",
+            "sp_oacreate",
+            "openrowset",
+            "exec(",
+            "powershell",
+            "cmd.exe",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "xpath:commandInjection".into(),
+                    format!("Custom XML data binding XPath expression contains shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 3. Remote UNC paths or exploit protocols in prefixMappings or storeItemID
+        if (s_lower.contains("prefixmappings") || s_lower.contains("storeitemid"))
+            && (s_lower.contains(r"\\") || s_lower.contains("//"))
+        {
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find(r"\\") {
+                let actual = search_idx + pos;
+                let rem = &s_lower[actual + 2..];
+                if let Some(first_char) = rem.chars().next()
+                    && (first_char.is_ascii_alphanumeric()
+                        || first_char == '.'
+                        || first_char == '[')
+                    && rem.contains('\\')
+                {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "xpath:uncNamespaceMapping".into(),
+                        "Custom XML data binding prefixMappings contains remote UNC namespace declaration enabling NTLM credential theft".into(),
+                    ));
+                    break;
+                }
+                search_idx = actual + 2;
+            }
+        }
+
+        for proto in &["ms-msdt:", "search-ms:", "ms-appinstaller:", "mhtml:"] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    format!("xpath:protocolHandler:{}", proto.trim_end_matches(':')),
+                    format!("Custom XML data binding contains exploit protocol handler '{proto}'"),
+                ));
+                break;
+            }
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -5399,6 +5736,93 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "NamespaceCloakingOrSchemaSpoofingAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Excel Slicer & Timeline Cache Hijacking (VBA-CELL-050)
+        let is_slicer_timeline_part =
+            name_lower.contains("slicer") || name_lower.contains("timeline");
+        if is_slicer_timeline_part && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_slicer_timeline_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Excel Slicer or Timeline cache anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "SlicerTimeline".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "SlicerOrTimelineCacheAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word Bibliography & Citation Threats (VBA-CELL-051)
+        let is_bib_candidate = name_lower.contains("bibliography")
+            || name_lower.contains("sources.xml")
+            || name_lower.contains("customxml");
+        if is_bib_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_bibliography_citation_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Word Bibliography or Citation anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Bibliography".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "BibliographyOrCitationAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Custom XML Data Binding & XPath Injection (VBA-CELL-052)
+        let is_databinding_candidate = name_lower.ends_with(".xml")
+            && (name_lower.contains("document")
+                || name_lower.contains("header")
+                || name_lower.contains("footer")
+                || name_lower.contains("slide")
+                || name_lower.contains("sheet")
+                || name_lower.contains("customxml"));
+        if is_databinding_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_custom_xml_databinding_xpath_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Custom XML data binding or XPath anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "DataBinding".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "CustomXmlDataBindingOrXPathAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,

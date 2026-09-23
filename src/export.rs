@@ -3092,6 +3092,15 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "NamespaceCloakingOrSchemaSpoofingAnomaly"
         | "NamespaceCloakingAnomaly"
         | "SchemaSpoofingAnomaly" => ("VBA-CELL-049", "error"),
+        "SlicerOrTimelineCacheAnomaly" | "SlicerAnomaly" | "TimelineAnomaly" => {
+            ("VBA-CELL-050", "error")
+        }
+        "BibliographyOrCitationAnomaly" | "BibliographyAnomaly" | "CitationAnomaly" => {
+            ("VBA-CELL-051", "error")
+        }
+        "CustomXmlDataBindingOrXPathAnomaly" | "CustomXmlDataBindingAnomaly" | "XPathAnomaly" => {
+            ("VBA-CELL-052", "error")
+        }
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3288,7 +3297,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-048\",\"name\":\"PackageMonikerOrActivationAnomaly\",\"shortDescription\":{\"text\":\"OLE Package Moniker or Activation Anomaly\"},\"fullDescription\":{\"text\":\"OLE object or package relationship specifies dangerous Moniker protocol handlers, automatic silent activation, deceptive icon aspect cloaking, or weaponized Packager CLSIDs.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-049\",\"name\":\"NamespaceCloakingOrSchemaSpoofingAnomaly\",\"shortDescription\":{\"text\":\"XML Namespace Cloaking or Schema Spoofing Anomaly\"},\"fullDescription\":{\"text\":\"XML package parts declare remote UNC namespaces for NTLM credential coercion, DTD/XXE entity declarations, or Unicode homoglyph/zero-width character cloaking spoofing standard Office schemas.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-049\",\"name\":\"NamespaceCloakingOrSchemaSpoofingAnomaly\",\"shortDescription\":{\"text\":\"XML Namespace Cloaking or Schema Spoofing Anomaly\"},\"fullDescription\":{\"text\":\"XML package parts declare remote UNC namespaces for NTLM credential coercion, DTD/XXE entity declarations, or Unicode homoglyph/zero-width character cloaking spoofing standard Office schemas.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-050\",\"name\":\"SlicerOrTimelineCacheAnomaly\",\"shortDescription\":{\"text\":\"Excel Slicer or Timeline Cache Anomaly\"},\"fullDescription\":{\"text\":\"Excel Slicer or Timeline definitions or relationships configure remote UNC connection targets, database command execution, or dangerous exploit URI protocols.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-051\",\"name\":\"BibliographyOrCitationAnomaly\",\"shortDescription\":{\"text\":\"Word Bibliography or Citation Anomaly\"},\"fullDescription\":{\"text\":\"Word Bibliography definitions or citation fields contain remote UNC paths for NTLM credential coercion, exploit protocol handlers, shell execution commands, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-052\",\"name\":\"CustomXmlDataBindingOrXPathAnomaly\",\"shortDescription\":{\"text\":\"Custom XML Data Binding or XPath Anomaly\"},\"fullDescription\":{\"text\":\"Custom XML data binding or Structured Document Tag (SDT) XPath queries contain external document resolution (SSRF/NTLM coercion), command injection, or remote UNC namespace mappings.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));
