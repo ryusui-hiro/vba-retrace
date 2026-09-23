@@ -744,6 +744,12 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("lognorm")
                 || f_lower.contains("poisson")
                 || f_lower.contains("binom")
+                || f_lower.contains("irr")
+                || f_lower.contains("mirr")
+                || f_lower.contains("disc")
+                || f_lower.contains("pricedisc")
+                || f_lower.contains("received")
+                || f_lower.contains("hypgeom")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -8672,6 +8678,397 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_powerpoint_sync_or_comment_authors_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in PowerPoint sync info or comment authors
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "powerpointSync:uncCoercion".into(),
+                        format!("PowerPoint sync info or comment authors references remote UNC resource '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "powerpointSync:dangerousProtocol".into(),
+                    format!("PowerPoint sync info or comment authors references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "powerpointSync:stagedCommand".into(),
+                    format!("PowerPoint sync info or comment authors contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. External relationship targets pointing to executable / macro payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "powerpointSync:executableTarget".into(),
+                        format!("PowerPoint sync relationship targets weaponized payload '{ext}'"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 5. Cloaked DDE / command formulas in author names or sync properties
+        if s_lower.contains("cmd|") || s_lower.contains("powershell|") || s_lower.contains("mshta|")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "powerpointSync:cloakedDde".into(),
+                "PowerPoint comment author or sync definition contains cloaked DDE command formula"
+                    .into(),
+            ));
+        }
+
+        // 6. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "powerpointSync:smuggledBinary".into(),
+                "PowerPoint sync info or comment authors contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_word_keymap_or_customization_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in keymap or customizations
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "wordKeyMap:uncCoercion".into(),
+                        format!("Word keymap or customization part references remote UNC resource '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "wordKeyMap:dangerousProtocol".into(),
+                    format!("Word keymap or customization part references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "wordKeyMap:stagedCommand".into(),
+                    format!("Word keymap or customization part contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. Keyboard shortcut macro / command hook binding
+        if (s_lower.contains("kcm")
+            || s_lower.contains("keymap")
+            || s_lower.contains("fkeyshortcut")
+            || s_lower.contains("w:kcm"))
+            && (s_lower.contains("macro")
+                || s_lower.contains("autoopen")
+                || s_lower.contains("autonew")
+                || s_lower.contains("document_open")
+                || s_lower.contains("shell")
+                || s_lower.contains("run"))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "wordKeyMap:macroHook".into(),
+                "Word keyboard mapping binds keystrokes or shortcuts to malicious macro execution hook".into(),
+            ));
+        }
+
+        // 5. External relationship targets pointing to executable / macro payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "wordKeyMap:executableTarget".into(),
+                        format!(
+                            "Word keymap or customization relationship targets weaponized payload '{ext}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 6. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "wordKeyMap:smuggledBinary".into(),
+                "Word keymap or customization part contains smuggled Windows PE executable binary"
+                    .into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_excel_web_publishing_or_sparkline_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in web publishing destinations or sparklines
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "excelWebPublish:uncCoercion".into(),
+                        format!("Excel web publishing or sparkline part references remote UNC resource '{unc}' (silent exfiltration / NTLM coercion)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "excelWebPublish:dangerousProtocol".into(),
+                    format!("Excel web publishing or sparkline part references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "excelWebPublish:stagedCommand".into(),
+                    format!("Excel web publishing or sparkline part contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. External relationship targets pointing to executable / macro payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "excelWebPublish:executableTarget".into(),
+                        format!(
+                            "Excel web publishing or sparkline relationship targets weaponized payload '{ext}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 5. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "excelWebPublish:smuggledBinary".into(),
+                "Excel web publishing or sparkline part contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -9962,6 +10359,95 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "OfficeThemeOverrideOrFormatSchemeAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for PowerPoint Sync or Comment Authors Anomaly (VBA-CELL-077)
+        let is_ppt_sync_candidate = (name_lower.contains("syncinfo")
+            || name_lower.contains("slidesync")
+            || name_lower.contains("commentauthors"))
+            && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels"));
+        if is_ppt_sync_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_powerpoint_sync_or_comment_authors_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "PowerPoint sync info or comment authors anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "PowerPointSync".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "PowerPointSyncOrCommentAuthorsAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word KeyMap or Customization Anomaly (VBA-CELL-078)
+        let is_word_keymap_candidate = (name_lower.contains("keymap")
+            || name_lower.contains("customizations"))
+            && (name_lower.ends_with(".xml")
+                || name_lower.ends_with(".bin")
+                || name_lower.ends_with(".rels"));
+        if is_word_keymap_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_word_keymap_or_customization_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Word keymap or customization anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "WordKeyMap".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "WordKeyMapOrCustomizationAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Excel Web Publishing or Sparkline Anomaly (VBA-CELL-079)
+        let is_excel_web_publish_candidate = (name_lower.contains("webpublishing")
+            || name_lower.contains("webpublishitems")
+            || name_lower.contains("sparklinegroup")
+            || name_lower.contains("sparklines"))
+            && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels"));
+        if is_excel_web_publish_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_excel_web_publishing_or_sparkline_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Excel web publishing or sparkline anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "ExcelWebPublish".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "ExcelWebPublishingOrSparklineAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,
