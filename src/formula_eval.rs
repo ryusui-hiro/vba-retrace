@@ -4402,6 +4402,223 @@ impl Evaluator<'_> {
                     Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
                 }
             }
+            "betadist" if (3..=5).contains(&arguments.len()) => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let alpha = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let beta = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let a = if arguments.len() >= 4 {
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?
+                } else {
+                    0.0
+                };
+                let b = if arguments.len() == 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?
+                } else {
+                    1.0
+                };
+                if a >= b || x < a || x > b || alpha <= 0.0 || beta <= 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let x_norm = (x - a) / (b - a);
+                match betai_f64(alpha, beta, x_norm) {
+                    Ok(v) => Ok(EvalValue::Scalar(FormulaValue::Number(v))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "beta.dist" if (4..=6).contains(&arguments.len()) => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let alpha = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let beta = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let cumulative = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)? != 0.0;
+                let a = if arguments.len() >= 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?
+                } else {
+                    0.0
+                };
+                let b = if arguments.len() == 6 {
+                    to_number(&self.eval_scalar(&arguments[5], depth + 1)?)?
+                } else {
+                    1.0
+                };
+                if a >= b || x < a || x > b || alpha <= 0.0 || beta <= 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let x_norm = (x - a) / (b - a);
+                if cumulative {
+                    match betai_f64(alpha, beta, x_norm) {
+                        Ok(v) => Ok(EvalValue::Scalar(FormulaValue::Number(v))),
+                        Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    }
+                } else if (x - a).abs() < 1e-12 {
+                    if alpha == 1.0 {
+                        let lnab = match gammaln_f64(1.0 + beta) {
+                            Ok(v) => v,
+                            Err(e) => return Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                        };
+                        let lnb = match gammaln_f64(beta) {
+                            Ok(v) => v,
+                            Err(e) => return Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                        };
+                        let val = (lnab - lnb).exp() / (b - a);
+                        Ok(EvalValue::Scalar(FormulaValue::Number(val)))
+                    } else if alpha > 1.0 {
+                        Ok(EvalValue::Scalar(FormulaValue::Number(0.0)))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                    }
+                } else if (x - b).abs() < 1e-12 {
+                    if beta == 1.0 {
+                        let lnab = match gammaln_f64(alpha + 1.0) {
+                            Ok(v) => v,
+                            Err(e) => return Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                        };
+                        let lna = match gammaln_f64(alpha) {
+                            Ok(v) => v,
+                            Err(e) => return Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                        };
+                        let val = (lnab - lna).exp() / (b - a);
+                        Ok(EvalValue::Scalar(FormulaValue::Number(val)))
+                    } else if beta > 1.0 {
+                        Ok(EvalValue::Scalar(FormulaValue::Number(0.0)))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                    }
+                } else {
+                    let lnab = match gammaln_f64(alpha + beta) {
+                        Ok(v) => v,
+                        Err(e) => return Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    };
+                    let lna = match gammaln_f64(alpha) {
+                        Ok(v) => v,
+                        Err(e) => return Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    };
+                    let lnb = match gammaln_f64(beta) {
+                        Ok(v) => v,
+                        Err(e) => return Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    };
+                    let ln_pdf = lnab - lna - lnb
+                        + (alpha - 1.0) * x_norm.ln()
+                        + (beta - 1.0) * (1.0 - x_norm).ln()
+                        - (b - a).ln();
+                    Ok(EvalValue::Scalar(FormulaValue::Number(ln_pdf.exp())))
+                }
+            }
+            "betainv" | "beta.inv" if (3..=5).contains(&arguments.len()) => {
+                let p = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let alpha = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let beta = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let a = if arguments.len() >= 4 {
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?
+                } else {
+                    0.0
+                };
+                let b = if arguments.len() == 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?
+                } else {
+                    1.0
+                };
+                if !(0.0..=1.0).contains(&p) || a >= b || alpha <= 0.0 || beta <= 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                match beta_inv_f64(p, alpha, beta) {
+                    Ok(x_norm) => Ok(EvalValue::Scalar(FormulaValue::Number(
+                        a + x_norm * (b - a),
+                    ))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "pricemat" if (5..=6).contains(&arguments.len()) => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let issue = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let rate = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?;
+                let yld = to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?;
+                let basis = if arguments.len() == 6 {
+                    to_number(&self.eval_scalar(&arguments[5], depth + 1)?)?.floor() as i32
+                } else {
+                    0
+                };
+                match pricemat_f64(settlement, maturity, issue, rate, yld, basis) {
+                    Ok(p) => Ok(EvalValue::Scalar(FormulaValue::Number(p))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "yieldmat" if (5..=6).contains(&arguments.len()) => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let issue = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let rate = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?;
+                let pr = to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?;
+                let basis = if arguments.len() == 6 {
+                    to_number(&self.eval_scalar(&arguments[5], depth + 1)?)?.floor() as i32
+                } else {
+                    0
+                };
+                match yieldmat_f64(settlement, maturity, issue, rate, pr, basis) {
+                    Ok(y) => Ok(EvalValue::Scalar(FormulaValue::Number(y))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "coupnum" if (3..=4).contains(&arguments.len()) => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let frequency =
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.floor() as i64;
+                let basis = if arguments.len() == 4 {
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?.floor() as i32
+                } else {
+                    0
+                };
+                match coupnum_f64(settlement, maturity, frequency, basis) {
+                    Ok(n) => Ok(EvalValue::Scalar(FormulaValue::Number(n))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "coupdays" if (3..=4).contains(&arguments.len()) => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let frequency =
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.floor() as i64;
+                let basis = if arguments.len() == 4 {
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?.floor() as i32
+                } else {
+                    0
+                };
+                match coupdays_f64(settlement, maturity, frequency, basis) {
+                    Ok(d) => Ok(EvalValue::Scalar(FormulaValue::Number(d))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "coupdaybs" if (3..=4).contains(&arguments.len()) => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let frequency =
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.floor() as i64;
+                let basis = if arguments.len() == 4 {
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?.floor() as i32
+                } else {
+                    0
+                };
+                match coupdaybs_f64(settlement, maturity, frequency, basis) {
+                    Ok(d) => Ok(EvalValue::Scalar(FormulaValue::Number(d))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "coupdaysnc" if (3..=4).contains(&arguments.len()) => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let frequency =
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.floor() as i64;
+                let basis = if arguments.len() == 4 {
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?.floor() as i32
+                } else {
+                    0
+                };
+                match coupdaysnc_f64(settlement, maturity, frequency, basis) {
+                    Ok(d) => Ok(EvalValue::Scalar(FormulaValue::Number(d))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
             "chisq.dist" if arguments.len() == 3 => {
                 let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
                 let df = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
@@ -7557,6 +7774,279 @@ fn accrintm_f64(
         360.0
     };
     Ok(par * rate * (days / b))
+}
+
+fn betacf_f64(a: f64, b: f64, x: f64) -> Result<f64, &'static str> {
+    const MAXIT: i32 = 100;
+    const EPS: f64 = 3.0e-14;
+    const FPMIN: f64 = 1.0e-30;
+
+    let qab = a + b;
+    let qap = a + 1.0;
+    let qam = a - 1.0;
+    let mut c = 1.0f64;
+    let mut d = (1.0 - qab * x / qap).max(FPMIN);
+    d = 1.0 / d;
+    let mut h = d;
+
+    for m in 1..=MAXIT {
+        let m_f = m as f64;
+        let m2 = 2.0 * m_f;
+        let aa = m_f * (b - m_f) * x / ((qam + m2) * (a + m2));
+        d = (1.0 + aa * d).max(FPMIN);
+        c = (1.0 + aa / c).max(FPMIN);
+        d = 1.0 / d;
+        h *= d * c;
+        let aa2 = -(a + m_f) * (qab + m_f) * x / ((a + m2) * (qap + m2));
+        d = (1.0 + aa2 * d).max(FPMIN);
+        c = (1.0 + aa2 / c).max(FPMIN);
+        d = 1.0 / d;
+        let del = d * c;
+        h *= del;
+        if (del - 1.0).abs() < EPS {
+            break;
+        }
+    }
+    Ok(h)
+}
+
+fn betai_f64(a: f64, b: f64, x: f64) -> Result<f64, &'static str> {
+    if !(0.0..=1.0).contains(&x)
+        || a <= 0.0
+        || b <= 0.0
+        || !a.is_finite()
+        || !b.is_finite()
+        || !x.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    if x == 0.0 {
+        return Ok(0.0);
+    }
+    if x == 1.0 {
+        return Ok(1.0);
+    }
+    let lna = gammaln_f64(a)?;
+    let lnb = gammaln_f64(b)?;
+    let lnab = gammaln_f64(a + b)?;
+    let bt = (lnab - lna - lnb + a * x.ln() + b * (1.0 - x).ln()).exp();
+
+    if x < (a + 1.0) / (a + b + 2.0) {
+        let cf = betacf_f64(a, b, x)?;
+        Ok((bt * cf / a).clamp(0.0, 1.0))
+    } else {
+        let cf = betacf_f64(b, a, 1.0 - x)?;
+        Ok((1.0 - bt * cf / b).clamp(0.0, 1.0))
+    }
+}
+
+fn beta_inv_f64(p: f64, a: f64, b: f64) -> Result<f64, &'static str> {
+    if !(0.0..=1.0).contains(&p)
+        || a <= 0.0
+        || b <= 0.0
+        || !p.is_finite()
+        || !a.is_finite()
+        || !b.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    if p == 0.0 {
+        return Ok(0.0);
+    }
+    if p == 1.0 {
+        return Ok(1.0);
+    }
+    let mut low = 0.0f64;
+    let mut high = 1.0f64;
+    for _ in 0..80 {
+        let mid = 0.5 * (low + high);
+        let cdf = betai_f64(a, b, mid)?;
+        if cdf < p {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    Ok(0.5 * (low + high))
+}
+
+fn pricemat_f64(
+    settlement: f64,
+    maturity: f64,
+    issue: f64,
+    rate: f64,
+    yld: f64,
+    basis: i32,
+) -> Result<f64, &'static str> {
+    let dim = maturity - issue;
+    let dsm = maturity - settlement;
+    let dis = settlement - issue;
+    if settlement >= maturity
+        || issue > settlement
+        || rate < 0.0
+        || yld < 0.0
+        || !(0..=4).contains(&basis)
+        || !settlement.is_finite()
+        || !maturity.is_finite()
+        || !issue.is_finite()
+        || !rate.is_finite()
+        || !yld.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    let b = if basis == 1 || basis == 3 {
+        365.0
+    } else {
+        360.0
+    };
+    let a = 100.0 + (dim / b) * rate * 100.0;
+    let d = 1.0 + (dsm / b) * yld;
+    let e = (dis / b) * rate * 100.0;
+    let price = (a / d) - e;
+    if price < 0.0 {
+        return Err("#NUM!");
+    }
+    Ok(price)
+}
+
+fn yieldmat_f64(
+    settlement: f64,
+    maturity: f64,
+    issue: f64,
+    rate: f64,
+    pr: f64,
+    basis: i32,
+) -> Result<f64, &'static str> {
+    let dim = maturity - issue;
+    let dsm = maturity - settlement;
+    let dis = settlement - issue;
+    if settlement >= maturity
+        || issue > settlement
+        || rate < 0.0
+        || pr <= 0.0
+        || !(0..=4).contains(&basis)
+        || !settlement.is_finite()
+        || !maturity.is_finite()
+        || !issue.is_finite()
+        || !rate.is_finite()
+        || !pr.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    let b = if basis == 1 || basis == 3 {
+        365.0
+    } else {
+        360.0
+    };
+    let a = 100.0 + (dim / b) * rate * 100.0;
+    let e = (dis / b) * rate * 100.0;
+    let denom = pr + e;
+    if denom <= 0.0 {
+        return Err("#NUM!");
+    }
+    Ok(((a / denom) - 1.0) / (dsm / b))
+}
+
+fn coupnum_f64(
+    settlement: f64,
+    maturity: f64,
+    frequency: i64,
+    basis: i32,
+) -> Result<f64, &'static str> {
+    let days = maturity - settlement;
+    if days <= 0.0
+        || (frequency != 1 && frequency != 2 && frequency != 4)
+        || !(0..=4).contains(&basis)
+        || !settlement.is_finite()
+        || !maturity.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    let b = if basis == 1 || basis == 3 {
+        365.0
+    } else {
+        360.0
+    };
+    let n = ((days / b) * (frequency as f64)).ceil() as i64;
+    Ok(n.max(1) as f64)
+}
+
+fn coupdays_f64(
+    settlement: f64,
+    maturity: f64,
+    frequency: i64,
+    basis: i32,
+) -> Result<f64, &'static str> {
+    if settlement >= maturity
+        || (frequency != 1 && frequency != 2 && frequency != 4)
+        || !(0..=4).contains(&basis)
+        || !settlement.is_finite()
+        || !maturity.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    let b = if basis == 1 || basis == 3 {
+        365.0
+    } else {
+        360.0
+    };
+    Ok(b / (frequency as f64))
+}
+
+fn coupdaybs_f64(
+    settlement: f64,
+    maturity: f64,
+    frequency: i64,
+    basis: i32,
+) -> Result<f64, &'static str> {
+    if settlement >= maturity
+        || (frequency != 1 && frequency != 2 && frequency != 4)
+        || !(0..=4).contains(&basis)
+        || !settlement.is_finite()
+        || !maturity.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    let b = if basis == 1 || basis == 3 {
+        365.0
+    } else {
+        360.0
+    };
+    let period = b / (frequency as f64);
+    let rem = (maturity - settlement) % period;
+    if rem.abs() < 1e-6 {
+        Ok(0.0)
+    } else {
+        Ok(period - rem)
+    }
+}
+
+fn coupdaysnc_f64(
+    settlement: f64,
+    maturity: f64,
+    frequency: i64,
+    basis: i32,
+) -> Result<f64, &'static str> {
+    if settlement >= maturity
+        || (frequency != 1 && frequency != 2 && frequency != 4)
+        || !(0..=4).contains(&basis)
+        || !settlement.is_finite()
+        || !maturity.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    let b = if basis == 1 || basis == 3 {
+        365.0
+    } else {
+        360.0
+    };
+    let period = b / (frequency as f64);
+    let rem = (maturity - settlement) % period;
+    if rem.abs() < 1e-6 {
+        Ok(period)
+    } else {
+        Ok(rem)
+    }
 }
 
 fn besselj_f64(x: f64, n: u32) -> Result<f64, &'static str> {
@@ -12785,6 +13275,116 @@ mod tests {
         assert_eq!(
             evaluate_formula(
                 "=CHAR(ACCRINTM(1, 181, 0.1, 1000, 2) + 15)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
+        );
+
+        // BETA.DIST & BETA.INV
+        let bdist_val = evaluate_formula(
+            "=BETA.DIST(0.5, 2, 2, TRUE)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(p)) = bdist_val {
+            assert!((p - 0.5).abs() < 1e-3);
+        } else {
+            panic!("Expected BETA.DIST number: {bdist_val:?}");
+        }
+
+        let binv_val = evaluate_formula(
+            "=BETA.INV(0.5, 2, 2, 60, 70)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        assert_eq!(binv_val, Some(FormulaValue::Number(65.0)));
+
+        // PRICEMAT & YIELDMAT
+        let pmat_val = evaluate_formula(
+            "=PRICEMAT(100, 460, 100, 0.05, 0.05, 0)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        assert_eq!(pmat_val, Some(FormulaValue::Number(100.0)));
+
+        let ymat_val = evaluate_formula(
+            "=YIELDMAT(100, 460, 100, 0.05, 100, 0)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(y)) = ymat_val {
+            assert!((y - 0.05).abs() < 1e-4);
+        } else {
+            panic!("Expected YIELDMAT number: {ymat_val:?}");
+        }
+
+        // COUPNUM, COUPDAYS, COUPDAYBS, COUPDAYSNC
+        assert_eq!(
+            evaluate_formula(
+                "=COUPNUM(100, 460, 2, 0)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(2.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=COUPDAYS(100, 460, 2, 0)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(180.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=COUPDAYBS(100, 460, 2, 0)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=COUPDAYSNC(100, 460, 2, 0)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(180.0))
+        );
+
+        // De-obfuscation with BETA.INV and PRICEMAT
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(BETA.INV(0.5, 2, 2, 60, 70))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(PRICEMAT(100, 460, 100, 0.05, 0.05, 0) - 35)",
                 None,
                 &test_cells,
                 Default::default()
