@@ -2426,6 +2426,112 @@ impl Evaluator<'_> {
                 }
                 Ok(EvalValue::Scalar(FormulaValue::Number(sum)))
             }
+            "sec" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let c = n.cos();
+                if c == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())))
+                } else {
+                    let res = 1.0 / c;
+                    if res.is_finite() {
+                        Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                    }
+                }
+            }
+            "csc" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let s = n.sin();
+                if s == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())))
+                } else {
+                    let res = 1.0 / s;
+                    if res.is_finite() {
+                        Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                    }
+                }
+            }
+            "cot" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let t = n.tan();
+                if t == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())))
+                } else {
+                    let res = 1.0 / t;
+                    if res.is_finite() {
+                        Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                    }
+                }
+            }
+            "sech" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let c = n.cosh();
+                let res = 1.0 / c;
+                if res.is_finite() {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                }
+            }
+            "csch" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if n == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())))
+                } else {
+                    let s = n.sinh();
+                    if s == 0.0 {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())))
+                    } else {
+                        let res = 1.0 / s;
+                        if res.is_finite() {
+                            Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                        } else {
+                            Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                        }
+                    }
+                }
+            }
+            "coth" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if n == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())))
+                } else {
+                    let t = n.tanh();
+                    if t == 0.0 {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())))
+                    } else {
+                        let res = 1.0 / t;
+                        if res.is_finite() {
+                            Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                        } else {
+                            Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                        }
+                    }
+                }
+            }
+            "acot" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let res = std::f64::consts::FRAC_PI_2 - n.atan();
+                Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+            }
+            "acoth" if arguments.len() == 1 => {
+                let n = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if n.abs() <= 1.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    let res = 0.5 * ((n + 1.0) / (n - 1.0)).ln();
+                    if res.is_finite() {
+                        Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                    }
+                }
+            }
             "bitand" if arguments.len() == 2 => {
                 let a = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
                 let b = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
@@ -2775,9 +2881,8 @@ impl Evaluator<'_> {
             }
             "take" | "drop" | "chooserows" | "choosecols" | "torow" | "tocol" | "expand"
             | "wraprows" | "wrapcols" | "filter" | "sort" | "sortby" | "unique" | "arraytotext"
-            | "valuetotext" | "vstack" | "hstack" | "sequence" | "single" | "transpose" => {
-                self.evaluate_array_manipulation(name, arguments, depth + 1)
-            }
+            | "valuetotext" | "vstack" | "hstack" | "sequence" | "single" | "transpose"
+            | "mmult" | "munit" => self.evaluate_array_manipulation(name, arguments, depth + 1),
             "len" | "left" | "right" | "mid" | "concatenate" | "concat" | "value" | "trim"
             | "upper" | "lower" | "exact" | "rept" | "substitute" | "replace" | "char" | "code"
             | "clean" | "t" | "n" | "find" | "search" | "hyperlink" | "proper" | "unichar"
@@ -3650,6 +3755,95 @@ impl Evaluator<'_> {
                     Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())))
                 }
             };
+        }
+        if name == "munit" {
+            if arguments.len() != 1 {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
+            let dim_num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
+            if dim_num <= 0 || dim_num > 256 {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
+            if dim_num == 1 {
+                return Ok(EvalValue::Scalar(FormulaValue::Number(1.0)));
+            }
+            let n = dim_num as usize;
+            let mut values = Vec::with_capacity(n * n);
+            for r in 0..n {
+                for c in 0..n {
+                    values.push(FormulaValue::Number(if r == c { 1.0 } else { 0.0 }));
+                }
+            }
+            return Ok(EvalValue::Range {
+                values,
+                rows: n,
+                cols: n,
+            });
+        }
+        if name == "mmult" {
+            if arguments.len() != 2 {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
+            let (rows1, cols1, vals1) = match self.evaluate(&arguments[0], depth + 1)? {
+                EvalValue::Scalar(s) => (1, 1, vec![s]),
+                EvalValue::Range { values, rows, cols } => (rows, cols, values),
+                EvalValue::Lambda { .. } => {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+            };
+            let (rows2, cols2, vals2) = match self.evaluate(&arguments[1], depth + 1)? {
+                EvalValue::Scalar(s) => (1, 1, vec![s]),
+                EvalValue::Range { values, rows, cols } => (rows, cols, values),
+                EvalValue::Lambda { .. } => {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                }
+            };
+            if cols1 != rows2 || rows1 * cols2 > 100_000 {
+                return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+            }
+            let mut nums1 = Vec::with_capacity(vals1.len());
+            for v in &vals1 {
+                if let FormulaValue::Error(e) = v {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e.clone())));
+                }
+                match to_number(v) {
+                    Ok(n) => nums1.push(n),
+                    Err(_) => return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                }
+            }
+            let mut nums2 = Vec::with_capacity(vals2.len());
+            for v in &vals2 {
+                if let FormulaValue::Error(e) = v {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e.clone())));
+                }
+                match to_number(v) {
+                    Ok(n) => nums2.push(n),
+                    Err(_) => return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                }
+            }
+            let mut res_values = Vec::with_capacity(rows1 * cols2);
+            for r in 0..rows1 {
+                for c in 0..cols2 {
+                    let mut sum = 0.0;
+                    for k in 0..cols1 {
+                        sum += nums1[r * cols1 + k] * nums2[k * cols2 + c];
+                    }
+                    res_values.push(FormulaValue::Number(sum));
+                }
+            }
+            if rows1 == 1 && cols2 == 1 {
+                return Ok(EvalValue::Scalar(
+                    res_values
+                        .into_iter()
+                        .next()
+                        .unwrap_or(FormulaValue::Number(0.0)),
+                ));
+            }
+            return Ok(EvalValue::Range {
+                values: res_values,
+                rows: rows1,
+                cols: cols2,
+            });
         }
         if name == "sequence" {
             if arguments.len() > 4 {
@@ -8475,6 +8669,92 @@ mod tests {
         assert_eq!(
             evaluate_formula(
                 "=CHAR(SUMSQ(8, 1) + COSH(0))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("B".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_reciprocal_trig_and_matrix_multiplication() {
+        let test_cells = vec![];
+
+        // SEC
+        assert_eq!(
+            evaluate_formula("=SEC(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+
+        // CSC
+        assert_eq!(
+            evaluate_formula("=CSC(PI() / 2)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+
+        // COT
+        let cot_res =
+            evaluate_formula("=COT(PI() / 4)", None, &test_cells, Default::default()).value;
+        if let Some(FormulaValue::Number(val)) = cot_res {
+            assert!((val - 1.0).abs() < 1e-9);
+        } else {
+            panic!("Expected Number for COT(PI()/4), got {cot_res:?}");
+        }
+
+        // SECH
+        assert_eq!(
+            evaluate_formula("=SECH(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+
+        // CSCH & COTH zero division guard
+        assert_eq!(
+            evaluate_formula("=CSCH(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#DIV/0!".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=COTH(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#DIV/0!".into()))
+        );
+
+        // ACOT
+        let acot_res = evaluate_formula("=ACOT(0)", None, &test_cells, Default::default()).value;
+        if let Some(FormulaValue::Number(val)) = acot_res {
+            assert!((val - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        } else {
+            panic!("Expected Number for ACOT(0), got {acot_res:?}");
+        }
+
+        // ACOTH domain validation
+        assert_eq!(
+            evaluate_formula("=ACOTH(0.5)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Error("#NUM!".into()))
+        );
+
+        // MUNIT identity matrix
+        assert_eq!(
+            evaluate_formula("=MUNIT(1)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+
+        // MMULT scalar dot product: {1, 2} x {3; 4} = 1*3 + 2*4 = 11
+        assert_eq!(
+            evaluate_formula(
+                "=MMULT({1, 2}, {3; 4})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(11.0))
+        );
+
+        // De-obfuscation: CHAR(MMULT({10, 5}, {6; 1}) + SEC(0)) = CHAR(65 + 1) = CHAR(66) = "B"
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(MMULT({10, 5}, {6; 1}) + SEC(0))",
                 None,
                 &test_cells,
                 Default::default()
