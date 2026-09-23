@@ -3187,6 +3187,18 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         | "OfficeThemeOverrideAnomaly"
         | "ThemeOverrideAnomaly"
         | "FormatSchemeAnomaly" => ("VBA-CELL-076", "error"),
+        "PowerPointSyncOrCommentAuthorsAnomaly"
+        | "PowerPointSyncAnomaly"
+        | "SlideSyncAnomaly"
+        | "CommentAuthorsAnomaly" => ("VBA-CELL-077", "error"),
+        "WordKeyMapOrCustomizationAnomaly"
+        | "WordKeyMapAnomaly"
+        | "KeyMapAnomaly"
+        | "WordCustomizationAnomaly" => ("VBA-CELL-078", "error"),
+        "ExcelWebPublishingOrSparklineAnomaly"
+        | "ExcelWebPublishingAnomaly"
+        | "WebPublishingAnomaly"
+        | "SparklineAnomaly" => ("VBA-CELL-079", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3464,7 +3476,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-075\",\"name\":\"ExcelThreadedCommentOrPersonAnomaly\",\"shortDescription\":{\"text\":\"Excel Threaded Comment and Person Anomaly\"},\"fullDescription\":{\"text\":\"Excel threaded comments or person metadata parts embed cloaked DDE formula strings, remote UNC mention paths enabling NTLM credential coercion, dangerous exploit URI schemes, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-076\",\"name\":\"OfficeThemeOverrideOrFormatSchemeAnomaly\",\"shortDescription\":{\"text\":\"Office Theme Override and Format Scheme Anomaly\"},\"fullDescription\":{\"text\":\"Office theme overrides or format schemes configure remote UNC resource references enabling NTLM credential coercion, dangerous exploit URI schemes, weaponized external relationship targets, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-076\",\"name\":\"OfficeThemeOverrideOrFormatSchemeAnomaly\",\"shortDescription\":{\"text\":\"Office Theme Override and Format Scheme Anomaly\"},\"fullDescription\":{\"text\":\"Office theme overrides or format schemes configure remote UNC resource references enabling NTLM credential coercion, dangerous exploit URI schemes, weaponized external relationship targets, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-077\",\"name\":\"PowerPointSyncOrCommentAuthorsAnomaly\",\"shortDescription\":{\"text\":\"PowerPoint Sync and Comment Authors Anomaly\"},\"fullDescription\":{\"text\":\"PowerPoint sync info or comment authors parts configure remote UNC resource references enabling NTLM credential coercion, dangerous exploit URI schemes, cloaked DDE command formulas, weaponized external relationship targets, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-078\",\"name\":\"WordKeyMapOrCustomizationAnomaly\",\"shortDescription\":{\"text\":\"Word KeyMap and Customization Anomaly\"},\"fullDescription\":{\"text\":\"Word keymap definitions or customization parts configure keyboard shortcut hooks bound to malicious macros or shell commands, remote UNC references enabling NTLM credential coercion, dangerous exploit URI schemes, or weaponized external relationship targets.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-079\",\"name\":\"ExcelWebPublishingOrSparklineAnomaly\",\"shortDescription\":{\"text\":\"Excel Web Publishing and Sparkline Anomaly\"},\"fullDescription\":{\"text\":\"Excel web publishing settings, web publish items, or sparkline group definitions configure remote UNC destinations enabling silent data exfiltration or NTLM credential coercion, dangerous exploit URI schemes, weaponized external relationship targets, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

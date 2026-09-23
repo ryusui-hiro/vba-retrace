@@ -3833,6 +3833,229 @@ impl Evaluator<'_> {
                     Ok(EvalValue::Scalar(FormulaValue::Number(pmt)))
                 }
             }
+            "irr" if arguments.len() == 1 || arguments.len() == 2 => {
+                let cfs = match self.evaluate(&arguments[0], depth + 1)? {
+                    EvalValue::Scalar(s) => {
+                        if let Ok(n) = to_number(&s) {
+                            vec![n]
+                        } else {
+                            vec![]
+                        }
+                    }
+                    EvalValue::Range { values, .. } => {
+                        let mut v = Vec::new();
+                        for val in values {
+                            if let Ok(n) = to_number(&val) {
+                                v.push(n);
+                            }
+                        }
+                        v
+                    }
+                    EvalValue::Lambda { .. } => {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                };
+                if cfs.is_empty() {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let guess = if arguments.len() == 2 {
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?
+                } else {
+                    0.1
+                };
+                let has_pos = cfs.iter().any(|&x| x > 0.0);
+                let has_neg = cfs.iter().any(|&x| x < 0.0);
+                if !has_pos || !has_neg {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let mut r = guess;
+                for _ in 0..50 {
+                    let mut f = 0.0;
+                    let mut df = 0.0;
+                    for (t, &cf) in cfs.iter().enumerate() {
+                        let denom = (1.0 + r).powi(t as i32);
+                        f += cf / denom;
+                        if t > 0 {
+                            df -= (t as f64) * cf / (denom * (1.0 + r));
+                        }
+                    }
+                    if df.abs() < 1e-12 {
+                        break;
+                    }
+                    let new_r = r - f / df;
+                    if (new_r - r).abs() < 1e-7 {
+                        return Ok(EvalValue::Scalar(FormulaValue::Number(new_r)));
+                    }
+                    r = new_r;
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Number(r)))
+            }
+            "mirr" if arguments.len() == 3 => {
+                let cfs = match self.evaluate(&arguments[0], depth + 1)? {
+                    EvalValue::Scalar(s) => {
+                        if let Ok(n) = to_number(&s) {
+                            vec![n]
+                        } else {
+                            vec![]
+                        }
+                    }
+                    EvalValue::Range { values, .. } => {
+                        let mut v = Vec::new();
+                        for val in values {
+                            if let Ok(n) = to_number(&val) {
+                                v.push(n);
+                            }
+                        }
+                        v
+                    }
+                    EvalValue::Lambda { .. } => {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                };
+                let finance_rate = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let reinvest_rate = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let n = cfs.len();
+                if n < 2 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())));
+                }
+                let mut fv_pos = 0.0;
+                let mut pv_neg = 0.0;
+                for (t, &cf) in cfs.iter().enumerate() {
+                    if cf > 0.0 {
+                        fv_pos += cf * (1.0 + reinvest_rate).powi((n - 1 - t) as i32);
+                    } else if cf < 0.0 {
+                        pv_neg += cf / (1.0 + finance_rate).powi(t as i32);
+                    }
+                }
+                if fv_pos == 0.0 || pv_neg == 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())));
+                }
+                let mirr = (-fv_pos / pv_neg).powf(1.0 / ((n - 1) as f64)) - 1.0;
+                Ok(EvalValue::Scalar(FormulaValue::Number(mirr)))
+            }
+            "disc" if (4..=5).contains(&arguments.len()) => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let pr = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let redemption = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?;
+                let basis = if arguments.len() == 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)? as i32
+                } else {
+                    0
+                };
+                let days = maturity - settlement;
+                if days <= 0.0 || pr <= 0.0 || redemption <= 0.0 || !(0..=4).contains(&basis) {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let b = if basis == 1 || basis == 3 {
+                    365.0
+                } else {
+                    360.0
+                };
+                let disc = ((redemption - pr) / redemption) * (b / days);
+                Ok(EvalValue::Scalar(FormulaValue::Number(disc)))
+            }
+            "pricedisc" if (4..=5).contains(&arguments.len()) => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let discount = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let redemption = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?;
+                let basis = if arguments.len() == 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)? as i32
+                } else {
+                    0
+                };
+                let days = maturity - settlement;
+                if days <= 0.0 || discount <= 0.0 || redemption <= 0.0 || !(0..=4).contains(&basis)
+                {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let b = if basis == 1 || basis == 3 {
+                    365.0
+                } else {
+                    360.0
+                };
+                let price = redemption - discount * redemption * (days / b);
+                Ok(EvalValue::Scalar(FormulaValue::Number(price)))
+            }
+            "received" if (4..=5).contains(&arguments.len()) => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let investment = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let discount = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?;
+                let basis = if arguments.len() == 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)? as i32
+                } else {
+                    0
+                };
+                let days = maturity - settlement;
+                if days <= 0.0 || investment <= 0.0 || discount <= 0.0 || !(0..=4).contains(&basis)
+                {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let b = if basis == 1 || basis == 3 {
+                    365.0
+                } else {
+                    360.0
+                };
+                let factor = 1.0 - discount * (days / b);
+                if factor <= 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let received = investment / factor;
+                Ok(EvalValue::Scalar(FormulaValue::Number(received)))
+            }
+            "hypgeomdist" | "hypgeom.dist" if (4..=5).contains(&arguments.len()) => {
+                let sample_s =
+                    to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.floor() as i64;
+                let number_sample =
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                let population_s =
+                    to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.floor() as i64;
+                let number_pop =
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?.floor() as i64;
+                let cumulative = if arguments.len() == 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)? != 0.0
+                } else {
+                    false
+                };
+                let k = sample_s;
+                let n = number_sample;
+                let cap_k = population_s;
+                let cap_n = number_pop;
+                if k < 0
+                    || n <= 0
+                    || cap_k <= 0
+                    || cap_n <= 0
+                    || k > n
+                    || cap_k > cap_n
+                    || n > cap_n
+                    || k < 0.max(n - (cap_n - cap_k))
+                {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let ln_comb = |total: i64, choose: i64| -> f64 {
+                    if choose < 0 || choose > total {
+                        return f64::NEG_INFINITY;
+                    }
+                    gammaln_f64((total + 1) as f64).unwrap_or(0.0)
+                        - gammaln_f64((choose + 1) as f64).unwrap_or(0.0)
+                        - gammaln_f64((total - choose + 1) as f64).unwrap_or(0.0)
+                };
+                let pmf = |x: i64| -> f64 {
+                    (ln_comb(cap_k, x) + ln_comb(cap_n - cap_k, n - x) - ln_comb(cap_n, n)).exp()
+                };
+                if cumulative {
+                    let min_k = 0.max(n - (cap_n - cap_k));
+                    let mut sum = 0.0;
+                    for x in min_k..=k {
+                        sum += pmf(x);
+                    }
+                    Ok(EvalValue::Scalar(FormulaValue::Number(sum.min(1.0))))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(pmf(k))))
+                }
+            }
             "sumxmy2" | "sumx2my2" | "sumx2py2" if arguments.len() == 2 => {
                 let (vals_x, r_x, c_x) = match self.evaluate(&arguments[0], depth + 1)? {
                     EvalValue::Scalar(s) => (vec![s], 1, 1),
@@ -11527,6 +11750,94 @@ mod tests {
         assert_eq!(
             evaluate_formula(
                 "=CHAR(SLN(100, 10, 10) + PMT(0, 10, -560, 0))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
+        );
+
+        // IRR & MIRR
+        let irr_val =
+            evaluate_formula("=IRR({-100, 110})", None, &test_cells, Default::default()).value;
+        if let Some(FormulaValue::Number(n)) = irr_val {
+            assert!((n - 0.10).abs() < 1e-4);
+        } else {
+            panic!("Expected IRR number result: {irr_val:?}");
+        }
+
+        let mirr_val = evaluate_formula(
+            "=MIRR({-100, 110}, 0.1, 0.1)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(n)) = mirr_val {
+            assert!((n - 0.10).abs() < 1e-4);
+        } else {
+            panic!("Expected MIRR number result: {mirr_val:?}");
+        }
+
+        // DISC, PRICEDISC, RECEIVED
+        let disc_val = evaluate_formula(
+            "=DISC(1, 91, 97.5, 100, 2)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(n)) = disc_val {
+            assert!((n - 0.10).abs() < 1e-4);
+        } else {
+            panic!("Expected DISC number result: {disc_val:?}");
+        }
+
+        let price_val = evaluate_formula(
+            "=PRICEDISC(1, 91, 0.10, 100, 2)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(n)) = price_val {
+            assert!((n - 97.5).abs() < 1e-4);
+        } else {
+            panic!("Expected PRICEDISC number result: {price_val:?}");
+        }
+
+        let rec_val = evaluate_formula(
+            "=RECEIVED(1, 91, 97.5, 0.10, 2)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(n)) = rec_val {
+            assert!((n - 100.0).abs() < 1e-4);
+        } else {
+            panic!("Expected RECEIVED number result: {rec_val:?}");
+        }
+
+        // HYPGEOM.DIST
+        let hyp_val = evaluate_formula(
+            "=HYPGEOM.DIST(1, 1, 1, 1, FALSE)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(n)) = hyp_val {
+            assert!((n - 1.0).abs() < 1e-6);
+        } else {
+            panic!("Expected HYPGEOM.DIST number result: {hyp_val:?}");
+        }
+
+        // Advanced financial de-obfuscation: CHAR(RECEIVED(1, 91, 97.5, 0.10, 2) - 35) = CHAR(100 - 35) = CHAR(65) = "A"
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(RECEIVED(1, 91, 97.5, 0.10, 2) - 35)",
                 None,
                 &test_cells,
                 Default::default()
