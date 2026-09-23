@@ -3218,6 +3218,15 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "ExcelQueryTableOrDataFeedAnomaly" | "ExcelQueryTableAnomaly" | "DataFeedAnomaly" => {
             ("VBA-CELL-085", "error")
         }
+        "PowerPointSlideGuideOrGridAnomaly"
+        | "PowerPointSlideGuideAnomaly"
+        | "SlideGuideAnomaly" => ("VBA-CELL-086", "error"),
+        "WordMailMergeHeaderFilterOrRecipientItemAnomaly"
+        | "WordMailMergeFilterAnomaly"
+        | "MailMergeFilterAnomaly" => ("VBA-CELL-087", "error"),
+        "ExcelExternalDataFeedOrDataServiceAnomaly"
+        | "ExcelExternalDataFeedAnomaly"
+        | "DataServiceAnomaly" => ("VBA-CELL-088", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3522,7 +3531,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-084\",\"name\":\"PowerPointFontTableOrEmbeddedFontAnomaly\",\"shortDescription\":{\"text\":\"PowerPoint Font Table and Embedded Font Anomaly\"},\"fullDescription\":{\"text\":\"PowerPoint font table parts, embedded font stream files, or font relationships configure remote UNC resource references enabling NTLM credential coercion, dangerous exploit URI schemes, staged shell execution commands, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-085\",\"name\":\"ExcelQueryTableOrDataFeedAnomaly\",\"shortDescription\":{\"text\":\"Excel Query Table and Data Feed Anomaly\"},\"fullDescription\":{\"text\":\"Excel query table parts, data feed connection parts, or query relationships configure remote UNC resource destinations enabling NTLM credential coercion, dangerous exploit URI schemes, database command execution procedures, cloaked DDE command formulas, staged shell execution commands, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-085\",\"name\":\"ExcelQueryTableOrDataFeedAnomaly\",\"shortDescription\":{\"text\":\"Excel Query Table and Data Feed Anomaly\"},\"fullDescription\":{\"text\":\"Excel query table parts, data feed connection parts, or query relationships configure remote UNC resource destinations enabling NTLM credential coercion, dangerous exploit URI schemes, database command execution procedures, cloaked DDE command formulas, staged shell execution commands, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-086\",\"name\":\"PowerPointSlideGuideOrGridAnomaly\",\"shortDescription\":{\"text\":\"PowerPoint Slide Guide and Grid Anomaly\"},\"fullDescription\":{\"text\":\"PowerPoint slide guide parts, grid definitions, view properties, or guide relationships configure remote UNC resource destinations enabling NTLM credential coercion, dangerous exploit URI schemes, staged shell execution commands, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-087\",\"name\":\"WordMailMergeHeaderFilterOrRecipientItemAnomaly\",\"shortDescription\":{\"text\":\"Word Mail Merge Filter and Recipient Item Anomaly\"},\"fullDescription\":{\"text\":\"Word mail merge filter parts, recipient data parts, or recipient relationships configure remote UNC resource paths enabling NTLM credential coercion, dangerous exploit URI schemes, database command execution procedures, staged shell execution commands, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-088\",\"name\":\"ExcelExternalDataFeedOrDataServiceAnomaly\",\"shortDescription\":{\"text\":\"Excel External Data Feed and Data Service Anomaly\"},\"fullDescription\":{\"text\":\"Excel external data feed definitions, data service connection parts, or service relationships configure remote UNC resource endpoints enabling NTLM credential coercion, dangerous exploit URI schemes, database command execution procedures, cloaked DDE command formulas, staged shell execution commands, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

@@ -4308,6 +4308,100 @@ impl Evaluator<'_> {
                     Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
                 }
             }
+            "tbillprice" if arguments.len() == 3 => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let discount = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                match tbillprice_f64(settlement, maturity, discount) {
+                    Ok(p) => Ok(EvalValue::Scalar(FormulaValue::Number(p))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "tbillyield" if arguments.len() == 3 => {
+                let settlement = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let maturity = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let pr = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                match tbillyield_f64(settlement, maturity, pr) {
+                    Ok(y) => Ok(EvalValue::Scalar(FormulaValue::Number(y))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "dollarde" if arguments.len() == 2 => {
+                let dollar = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let fraction =
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                match dollarde_f64(dollar, fraction) {
+                    Ok(v) => Ok(EvalValue::Scalar(FormulaValue::Number(v))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "dollarfr" if arguments.len() == 2 => {
+                let dollar = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let fraction =
+                    to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                match dollarfr_f64(dollar, fraction) {
+                    Ok(v) => Ok(EvalValue::Scalar(FormulaValue::Number(v))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "accrintm" if (3..=5).contains(&arguments.len()) => {
+                let issue = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let settlement = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let rate = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let par = if arguments.len() >= 4 {
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?
+                } else {
+                    1000.0
+                };
+                let basis = if arguments.len() == 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?.floor() as i32
+                } else {
+                    0
+                };
+                match accrintm_f64(issue, settlement, rate, par, basis) {
+                    Ok(a) => Ok(EvalValue::Scalar(FormulaValue::Number(a))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "gammadist" | "gamma.dist" if arguments.len() == 4 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let alpha = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let beta = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let cumulative = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)? != 0.0;
+                if x < 0.0 || alpha <= 0.0 || beta <= 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                if cumulative {
+                    match gammap_f64(alpha, x / beta) {
+                        Ok(p) => Ok(EvalValue::Scalar(FormulaValue::Number(p))),
+                        Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    }
+                } else if x == 0.0 {
+                    if alpha == 1.0 {
+                        Ok(EvalValue::Scalar(FormulaValue::Number(1.0 / beta)))
+                    } else if alpha > 1.0 {
+                        Ok(EvalValue::Scalar(FormulaValue::Number(0.0)))
+                    } else {
+                        Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                    }
+                } else {
+                    let lna = match gammaln_f64(alpha) {
+                        Ok(v) => v,
+                        Err(e) => return Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    };
+                    let ln_pdf = -alpha * beta.ln() - lna + (alpha - 1.0) * x.ln() - x / beta;
+                    Ok(EvalValue::Scalar(FormulaValue::Number(ln_pdf.exp())))
+                }
+            }
+            "gammainv" | "gamma.inv" if arguments.len() == 3 => {
+                let p = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let alpha = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let beta = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                match gamma_inv_f64(p, alpha, beta) {
+                    Ok(v) => Ok(EvalValue::Scalar(FormulaValue::Number(v))),
+                    Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
             "chisq.dist" if arguments.len() == 3 => {
                 let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
                 let df = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
@@ -7340,6 +7434,129 @@ fn intrate_f64(
         360.0
     };
     Ok(((redemption - investment) / investment) * (b / days))
+}
+
+fn gamma_inv_f64(p: f64, alpha: f64, beta: f64) -> Result<f64, &'static str> {
+    if !(0.0..1.0).contains(&p)
+        || alpha <= 0.0
+        || beta <= 0.0
+        || !p.is_finite()
+        || !alpha.is_finite()
+        || !beta.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    if p == 0.0 {
+        return Ok(0.0);
+    }
+    let mut low = 0.0f64;
+    let mut high = alpha.max(1.0) * 10.0;
+    while gammap_f64(alpha, high)? < p && high < 1e9 {
+        high *= 2.0;
+    }
+    for _ in 0..80 {
+        let mid = 0.5 * (low + high);
+        let cdf = gammap_f64(alpha, mid)?;
+        if cdf < p {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    Ok(0.5 * (low + high) * beta)
+}
+
+fn tbillprice_f64(settlement: f64, maturity: f64, discount: f64) -> Result<f64, &'static str> {
+    let dsm = maturity - settlement;
+    if dsm <= 0.0
+        || dsm > 360.0
+        || discount <= 0.0
+        || !settlement.is_finite()
+        || !maturity.is_finite()
+        || !discount.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    let price = 100.0 * (1.0 - discount * dsm / 360.0);
+    if price < 0.0 {
+        return Err("#NUM!");
+    }
+    Ok(price)
+}
+
+fn tbillyield_f64(settlement: f64, maturity: f64, pr: f64) -> Result<f64, &'static str> {
+    let dsm = maturity - settlement;
+    if dsm <= 0.0
+        || dsm > 360.0
+        || pr <= 0.0
+        || !settlement.is_finite()
+        || !maturity.is_finite()
+        || !pr.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    Ok(((100.0 - pr) / pr) * (360.0 / dsm))
+}
+
+fn dollarde_f64(fractional_dollar: f64, fraction: i64) -> Result<f64, &'static str> {
+    if fraction < 1 || !fractional_dollar.is_finite() {
+        return Err("#NUM!");
+    }
+    if fraction == 1 {
+        return Ok(fractional_dollar.trunc());
+    }
+    let sign = if fractional_dollar < 0.0 { -1.0 } else { 1.0 };
+    let abs_val = fractional_dollar.abs();
+    let int_part = abs_val.floor();
+    let frac_part = abs_val - int_part;
+    let digits = (fraction - 1).to_string().len() as i32;
+    let scale = 10.0f64.powi(digits);
+    let numerator = frac_part * scale;
+    Ok(sign * (int_part + numerator / (fraction as f64)))
+}
+
+fn dollarfr_f64(decimal_dollar: f64, fraction: i64) -> Result<f64, &'static str> {
+    if fraction < 1 || !decimal_dollar.is_finite() {
+        return Err("#NUM!");
+    }
+    if fraction == 1 {
+        return Ok(decimal_dollar.trunc());
+    }
+    let sign = if decimal_dollar < 0.0 { -1.0 } else { 1.0 };
+    let abs_val = decimal_dollar.abs();
+    let int_part = abs_val.floor();
+    let frac_part = abs_val - int_part;
+    let digits = (fraction - 1).to_string().len() as i32;
+    let scale = 10.0f64.powi(digits);
+    let numerator = frac_part * (fraction as f64);
+    Ok(sign * (int_part + numerator / scale))
+}
+
+fn accrintm_f64(
+    issue: f64,
+    settlement: f64,
+    rate: f64,
+    par: f64,
+    basis: i32,
+) -> Result<f64, &'static str> {
+    let days = settlement - issue;
+    if days <= 0.0
+        || rate <= 0.0
+        || par <= 0.0
+        || !(0..=4).contains(&basis)
+        || !issue.is_finite()
+        || !settlement.is_finite()
+        || !rate.is_finite()
+        || !par.is_finite()
+    {
+        return Err("#NUM!");
+    }
+    let b = if basis == 1 || basis == 3 {
+        365.0
+    } else {
+        360.0
+    };
+    Ok(par * rate * (days / b))
 }
 
 fn besselj_f64(x: f64, n: u32) -> Result<f64, &'static str> {
@@ -12468,6 +12685,106 @@ mod tests {
         assert_eq!(
             evaluate_formula(
                 "=CHAR(DURATION(0, 360, 0.08, 0.08, 1, 2) * 65)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
+        );
+
+        // DOLLARDE & DOLLARFR
+        let de_val =
+            evaluate_formula("=DOLLARDE(1.02, 16)", None, &test_cells, Default::default()).value;
+        assert_eq!(de_val, Some(FormulaValue::Number(1.125)));
+
+        let fr_val = evaluate_formula(
+            "=DOLLARFR(1.125, 16)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(v)) = fr_val {
+            assert!((v - 1.02).abs() < 1e-4);
+        } else {
+            panic!("Expected DOLLARFR number: {fr_val:?}");
+        }
+
+        // TBILLPRICE & TBILLYIELD
+        let tbill_p = evaluate_formula(
+            "=TBILLPRICE(100, 280, 0.10)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        assert_eq!(tbill_p, Some(FormulaValue::Number(95.0)));
+
+        let tbill_y = evaluate_formula(
+            "=TBILLYIELD(100, 280, 95)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(y)) = tbill_y {
+            assert!((y - (10.0 / 95.0)).abs() < 1e-4);
+        } else {
+            panic!("Expected TBILLYIELD number: {tbill_y:?}");
+        }
+
+        // ACCRINTM
+        let accr_val = evaluate_formula(
+            "=ACCRINTM(1, 181, 0.1, 1000, 2)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        assert_eq!(accr_val, Some(FormulaValue::Number(50.0)));
+
+        // GAMMA.DIST & GAMMA.INV
+        let gdist_val = evaluate_formula(
+            "=GAMMA.DIST(2, 1, 2, TRUE)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(p)) = gdist_val {
+            assert!((p - (1.0 - (-1.0f64).exp())).abs() < 1e-3);
+        } else {
+            panic!("Expected GAMMA.DIST number: {gdist_val:?}");
+        }
+
+        let ginv_val = evaluate_formula(
+            "=GAMMA.INV(0.63212, 1, 2)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(x)) = ginv_val {
+            assert!((x - 2.0).abs() < 1e-2);
+        } else {
+            panic!("Expected GAMMA.INV number: {ginv_val:?}");
+        }
+
+        // De-obfuscation with DOLLARDE and ACCRINTM
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(DOLLARDE(65.0, 16))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(ACCRINTM(1, 181, 0.1, 1000, 2) + 15)",
                 None,
                 &test_cells,
                 Default::default()
