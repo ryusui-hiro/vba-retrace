@@ -3177,6 +3177,16 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "WordMailMergeHeaderSourceOrRecipientAnomaly"
         | "WordMailMergeAnomaly"
         | "MailMergeHeaderSourceAnomaly" => ("VBA-CELL-073", "error"),
+        "PowerPointSlideShowOrPresentationPropsAnomaly"
+        | "PowerPointSlideShowAnomaly"
+        | "PresentationPropsAnomaly" => ("VBA-CELL-074", "error"),
+        "ExcelThreadedCommentOrPersonAnomaly"
+        | "ExcelThreadedCommentAnomaly"
+        | "PersonMetadataAnomaly" => ("VBA-CELL-075", "error"),
+        "OfficeThemeOverrideOrFormatSchemeAnomaly"
+        | "OfficeThemeOverrideAnomaly"
+        | "ThemeOverrideAnomaly"
+        | "FormatSchemeAnomaly" => ("VBA-CELL-076", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3445,7 +3455,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-072\",\"name\":\"ExcelTableOrSlicerNativeConnectionAnomaly\",\"shortDescription\":{\"text\":\"Excel Table and Slicer Native Connection Anomaly\"},\"fullDescription\":{\"text\":\"Excel table definitions, slicers, or timeline cache parts configure remote UNC connections enabling NTLM credential coercion, cloaked DDE execution in slicer captions or formulas, dangerous exploit URI schemes, or database command execution.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-073\",\"name\":\"WordMailMergeHeaderSourceOrRecipientAnomaly\",\"shortDescription\":{\"text\":\"Word Mail Merge Header Source and Recipient Anomaly\"},\"fullDescription\":{\"text\":\"Word mail merge settings or recipient data parts configure remote UNC header sources enabling NTLM credential coercion, dangerous exploit URI schemes, external relationship weaponization, or SQL query command injection.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-073\",\"name\":\"WordMailMergeHeaderSourceOrRecipientAnomaly\",\"shortDescription\":{\"text\":\"Word Mail Merge Header Source and Recipient Anomaly\"},\"fullDescription\":{\"text\":\"Word mail merge settings or recipient data parts configure remote UNC header sources enabling NTLM credential coercion, dangerous exploit URI schemes, external relationship weaponization, or SQL query command injection.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-074\",\"name\":\"PowerPointSlideShowOrPresentationPropsAnomaly\",\"shortDescription\":{\"text\":\"PowerPoint Slide Show and Presentation Props Anomaly\"},\"fullDescription\":{\"text\":\"PowerPoint presentation properties, view settings, or slideshow configurations configure remote UNC resources enabling NTLM credential coercion, dangerous exploit URI schemes, evasive kiosk full-screen lockup loops, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-075\",\"name\":\"ExcelThreadedCommentOrPersonAnomaly\",\"shortDescription\":{\"text\":\"Excel Threaded Comment and Person Anomaly\"},\"fullDescription\":{\"text\":\"Excel threaded comments or person metadata parts embed cloaked DDE formula strings, remote UNC mention paths enabling NTLM credential coercion, dangerous exploit URI schemes, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-076\",\"name\":\"OfficeThemeOverrideOrFormatSchemeAnomaly\",\"shortDescription\":{\"text\":\"Office Theme Override and Format Scheme Anomaly\"},\"fullDescription\":{\"text\":\"Office theme overrides or format schemes configure remote UNC resource references enabling NTLM credential coercion, dangerous exploit URI schemes, weaponized external relationship targets, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

