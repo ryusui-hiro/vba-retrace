@@ -769,6 +769,10 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("dollarfr")
                 || f_lower.contains("accrintm")
                 || f_lower.contains("gamma")
+                || f_lower.contains("beta")
+                || f_lower.contains("pricemat")
+                || f_lower.contains("yieldmat")
+                || f_lower.contains("coup")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -10314,6 +10318,415 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_powerpoint_slide_master_or_layout_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC endpoints in slide master or layout parts
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "slideMaster:uncCoercion".into(),
+                        format!("PowerPoint slide master or layout references remote UNC endpoint '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "slideMaster:dangerousProtocol".into(),
+                    format!("PowerPoint slide master or layout references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "slideMaster:stagedCommand".into(),
+                    format!("PowerPoint slide master or layout contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. Cloaked DDE / command formulas
+        if s_lower.contains("cmd|") || s_lower.contains("powershell|") || s_lower.contains("mshta|")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "slideMaster:cloakedDde".into(),
+                "PowerPoint slide master or layout contains cloaked DDE command formula".into(),
+            ));
+        }
+
+        // 5. External relationships targeting weaponized payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "slideMaster:executableTarget".into(),
+                        format!(
+                            "PowerPoint slide master relationship targets weaponized payload '{ext}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 6. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "slideMaster:smuggledBinary".into(),
+                "PowerPoint slide master or layout contains smuggled Windows PE executable binary"
+                    .into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_word_document_template_or_attached_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC endpoints in attached template or template settings
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "attachedTemplate:uncCoercion".into(),
+                        format!("Word attached template references remote UNC path '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "attachedTemplate:dangerousProtocol".into(),
+                    format!(
+                        "Word document template references dangerous exploit URI scheme '{proto}'"
+                    ),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "attachedTemplate:stagedCommand".into(),
+                    format!(
+                        "Word document template contains staged shell execution command '{cmd}'"
+                    ),
+                ));
+                break;
+            }
+        }
+
+        // 4. External relationships targeting weaponized payloads
+        if entry_name.ends_with(".rels") || s_lower.contains("attachedtemplate") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "attachedTemplate:executableTarget".into(),
+                        format!("Word attached template targets weaponized payload '{ext}'"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 5. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "attachedTemplate:smuggledBinary".into(),
+                "Word attached template contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_excel_xml_spreadsheet_or_binding_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC endpoints in XML maps or data bindings
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "xmlBinding:uncCoercion".into(),
+                        format!("Excel XML data binding references remote UNC endpoint '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "xmlBinding:dangerousProtocol".into(),
+                    format!(
+                        "Excel XML data binding references dangerous exploit URI scheme '{proto}'"
+                    ),
+                ));
+            }
+        }
+
+        // 3. Database command execution / SQL injection
+        for proc in &[
+            "xp_cmdshell",
+            "sp_oacreate",
+            "openrowset",
+            "bulk insert",
+            "into outfile",
+            "into dumpfile",
+        ] {
+            if s_lower.contains(proc) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "xmlBinding:commandInjection".into(),
+                    format!("Excel XML data binding contains dangerous database command execution procedure '{proc}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "xmlBinding:stagedCommand".into(),
+                    format!(
+                        "Excel XML data binding contains staged shell execution command '{cmd}'"
+                    ),
+                ));
+                break;
+            }
+        }
+
+        // 5. Cloaked DDE / command formulas
+        if s_lower.contains("cmd|") || s_lower.contains("powershell|") || s_lower.contains("mshta|")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "xmlBinding:cloakedDde".into(),
+                "Excel XML data binding contains cloaked DDE command formula".into(),
+            ));
+        }
+
+        // 6. External relationships targeting weaponized payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "xmlBinding:executableTarget".into(),
+                        format!(
+                            "Excel XML data binding relationship targets weaponized payload '{ext}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 7. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "xmlBinding:smuggledBinary".into(),
+                "Excel XML data binding contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -11963,6 +12376,96 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "ExcelExternalDataFeedOrDataServiceAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for PowerPoint Slide Master or Layout Anomaly (VBA-CELL-089)
+        let is_slide_master_candidate = (name_lower.contains("slidemaster")
+            || name_lower.contains("slidelayout")
+            || name_lower.contains("slide_master")
+            || name_lower.contains("slide_layout"))
+            && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels"));
+        if is_slide_master_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_powerpoint_slide_master_or_layout_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "PowerPoint slide master or layout anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "PowerPointSlideMasterOrLayout".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "PowerPointSlideMasterOrLayoutPartAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word Document Template or Attached Template Anomaly (VBA-CELL-090)
+        let is_word_template_candidate = (name_lower.contains("template")
+            || (name_lower.ends_with("settings.xml") && name_lower.contains("word")))
+            && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels"))
+            && !name_lower.ends_with("settings.xml.rels");
+        if is_word_template_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_word_document_template_or_attached_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Word document template or attached template anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "WordAttachedTemplate".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "WordDocumentTemplateOrAttachedTemplateAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Excel XML Spreadsheet or Data Binding Anomaly (VBA-CELL-091)
+        let is_xml_binding_candidate = (name_lower.contains("databinding")
+            || name_lower.contains("databindings")
+            || name_lower.contains("binding")
+            || name_lower.contains("xmlbinding"))
+            && !name_lower.contains("xmlmap")
+            && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels"));
+        if is_xml_binding_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_excel_xml_spreadsheet_or_binding_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Excel XML spreadsheet or data binding anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "ExcelXmlDataBinding".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "ExcelXmlSpreadsheetOrDataBindingAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,
