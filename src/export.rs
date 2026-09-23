@@ -3199,6 +3199,16 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         | "ExcelWebPublishingAnomaly"
         | "WebPublishingAnomaly"
         | "SparklineAnomaly" => ("VBA-CELL-079", "error"),
+        "PowerPointHandoutOrNotesMasterAnomaly"
+        | "PowerPointHandoutAnomaly"
+        | "HandoutMasterAnomaly"
+        | "NotesMasterAnomaly" => ("VBA-CELL-080", "error"),
+        "WordGlossarySettingsOrFontTableAnomaly"
+        | "WordGlossarySettingsAnomaly"
+        | "GlossaryFontTableAnomaly" => ("VBA-CELL-081", "error"),
+        "ExcelCustomPropertyOrCustomDataAnomaly"
+        | "ExcelCustomPropertyAnomaly"
+        | "ExcelCustomDataAnomaly" => ("VBA-CELL-082", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3485,7 +3495,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-078\",\"name\":\"WordKeyMapOrCustomizationAnomaly\",\"shortDescription\":{\"text\":\"Word KeyMap and Customization Anomaly\"},\"fullDescription\":{\"text\":\"Word keymap definitions or customization parts configure keyboard shortcut hooks bound to malicious macros or shell commands, remote UNC references enabling NTLM credential coercion, dangerous exploit URI schemes, or weaponized external relationship targets.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-079\",\"name\":\"ExcelWebPublishingOrSparklineAnomaly\",\"shortDescription\":{\"text\":\"Excel Web Publishing and Sparkline Anomaly\"},\"fullDescription\":{\"text\":\"Excel web publishing settings, web publish items, or sparkline group definitions configure remote UNC destinations enabling silent data exfiltration or NTLM credential coercion, dangerous exploit URI schemes, weaponized external relationship targets, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-079\",\"name\":\"ExcelWebPublishingOrSparklineAnomaly\",\"shortDescription\":{\"text\":\"Excel Web Publishing and Sparkline Anomaly\"},\"fullDescription\":{\"text\":\"Excel web publishing settings, web publish items, or sparkline group definitions configure remote UNC destinations enabling silent data exfiltration or NTLM credential coercion, dangerous exploit URI schemes, weaponized external relationship targets, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-080\",\"name\":\"PowerPointHandoutOrNotesMasterAnomaly\",\"shortDescription\":{\"text\":\"PowerPoint Handout and Notes Master Anomaly\"},\"fullDescription\":{\"text\":\"PowerPoint handout master or notes master parts configure remote UNC resource references enabling NTLM credential coercion, dangerous exploit URI schemes, cloaked DDE command formulas, weaponized external relationship targets, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-081\",\"name\":\"WordGlossarySettingsOrFontTableAnomaly\",\"shortDescription\":{\"text\":\"Word Glossary Settings and Font Table Anomaly\"},\"fullDescription\":{\"text\":\"Word glossary settings, web settings, or font table parts configure remote UNC references enabling NTLM credential coercion, dangerous exploit URI schemes, macro auto-execution hooks, weaponized external relationship targets, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-082\",\"name\":\"ExcelCustomPropertyOrCustomDataAnomaly\",\"shortDescription\":{\"text\":\"Excel Custom Property and Custom Data Anomaly\"},\"fullDescription\":{\"text\":\"Excel custom property parts, custom data parts, or data model binary streams configure remote UNC resource paths enabling NTLM credential coercion, dangerous exploit URI schemes, serialized .NET binary formatter markers, weaponized external relationship targets, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

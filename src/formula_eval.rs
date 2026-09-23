@@ -4056,6 +4056,206 @@ impl Evaluator<'_> {
                     Ok(EvalValue::Scalar(FormulaValue::Number(pmf(k))))
                 }
             }
+            "effect" if arguments.len() == 2 => {
+                let nominal_rate = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let npery = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                if nominal_rate <= 0.0 || npery < 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let eff = (1.0 + nominal_rate / (npery as f64)).powi(npery as i32) - 1.0;
+                Ok(EvalValue::Scalar(FormulaValue::Number(eff)))
+            }
+            "nominal" if arguments.len() == 2 => {
+                let effect_rate = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let npery = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                if effect_rate <= 0.0 || npery < 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let nom = (npery as f64) * ((1.0 + effect_rate).powf(1.0 / (npery as f64)) - 1.0);
+                Ok(EvalValue::Scalar(FormulaValue::Number(nom)))
+            }
+            "ipmt" if (4..=6).contains(&arguments.len()) => {
+                let rate = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let per = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                let nper = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.floor() as i64;
+                let pv = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?;
+                let fv = if arguments.len() >= 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?
+                } else {
+                    0.0
+                };
+                let pmt_type = if arguments.len() == 6 {
+                    to_number(&self.eval_scalar(&arguments[5], depth + 1)?)? != 0.0
+                } else {
+                    false
+                };
+                if per < 1 || per > nper || nper <= 0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                if rate == 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Number(0.0)));
+                }
+                let type_flag = if pmt_type { 1.0 } else { 0.0 };
+                let factor_nper = (1.0 + rate).powf(nper as f64);
+                let annuity_factor = (1.0 + rate * type_flag) * (factor_nper - 1.0) / rate;
+                let pmt = -(pv * factor_nper + fv) / annuity_factor;
+                if pmt_type && per == 1 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Number(0.0)));
+                }
+                let factor_prev = (1.0 + rate).powf((per - 1) as f64);
+                let balance_prev =
+                    pv * factor_prev + pmt * (1.0 + rate * type_flag) * (factor_prev - 1.0) / rate;
+                let ipmt = -balance_prev * rate;
+                Ok(EvalValue::Scalar(FormulaValue::Number(ipmt)))
+            }
+            "ppmt" if (4..=6).contains(&arguments.len()) => {
+                let rate = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let per = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                let nper = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?.floor() as i64;
+                let pv = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?;
+                let fv = if arguments.len() >= 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?
+                } else {
+                    0.0
+                };
+                let pmt_type = if arguments.len() == 6 {
+                    to_number(&self.eval_scalar(&arguments[5], depth + 1)?)? != 0.0
+                } else {
+                    false
+                };
+                if per < 1 || per > nper || nper <= 0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                if rate == 0.0 {
+                    let pmt = -(pv + fv) / (nper as f64);
+                    return Ok(EvalValue::Scalar(FormulaValue::Number(pmt)));
+                }
+                let type_flag = if pmt_type { 1.0 } else { 0.0 };
+                let factor_nper = (1.0 + rate).powf(nper as f64);
+                let annuity_factor = (1.0 + rate * type_flag) * (factor_nper - 1.0) / rate;
+                let pmt = -(pv * factor_nper + fv) / annuity_factor;
+                let ipmt = if pmt_type && per == 1 {
+                    0.0
+                } else {
+                    let factor_prev = (1.0 + rate).powf((per - 1) as f64);
+                    let balance_prev = pv * factor_prev
+                        + pmt * (1.0 + rate * type_flag) * (factor_prev - 1.0) / rate;
+                    -balance_prev * rate
+                };
+                let ppmt = pmt - ipmt;
+                Ok(EvalValue::Scalar(FormulaValue::Number(ppmt)))
+            }
+            "cumipmt" if arguments.len() == 6 => {
+                let rate = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let nper = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                let pv = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let start_period =
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?.floor() as i64;
+                let end_period =
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?.floor() as i64;
+                let pmt_type = to_number(&self.eval_scalar(&arguments[5], depth + 1)?)? != 0.0;
+                if rate <= 0.0
+                    || nper <= 0
+                    || pv <= 0.0
+                    || start_period < 1
+                    || end_period < start_period
+                    || end_period > nper
+                {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let type_flag = if pmt_type { 1.0 } else { 0.0 };
+                let factor_nper = (1.0 + rate).powf(nper as f64);
+                let annuity_factor = (1.0 + rate * type_flag) * (factor_nper - 1.0) / rate;
+                let pmt = -pv * factor_nper / annuity_factor;
+                let mut total_interest = 0.0;
+                for p in start_period..=end_period {
+                    let ipmt = if pmt_type && p == 1 {
+                        0.0
+                    } else {
+                        let factor_prev = (1.0 + rate).powf((p - 1) as f64);
+                        let balance_prev = pv * factor_prev
+                            + pmt * (1.0 + rate * type_flag) * (factor_prev - 1.0) / rate;
+                        -balance_prev * rate
+                    };
+                    total_interest += ipmt;
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Number(total_interest)))
+            }
+            "cumprinc" if arguments.len() == 6 => {
+                let rate = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let nper = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor() as i64;
+                let pv = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let start_period =
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?.floor() as i64;
+                let end_period =
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)?.floor() as i64;
+                let pmt_type = to_number(&self.eval_scalar(&arguments[5], depth + 1)?)? != 0.0;
+                if rate <= 0.0
+                    || nper <= 0
+                    || pv <= 0.0
+                    || start_period < 1
+                    || end_period < start_period
+                    || end_period > nper
+                {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let type_flag = if pmt_type { 1.0 } else { 0.0 };
+                let factor_nper = (1.0 + rate).powf(nper as f64);
+                let annuity_factor = (1.0 + rate * type_flag) * (factor_nper - 1.0) / rate;
+                let pmt = -pv * factor_nper / annuity_factor;
+                let mut total_principal = 0.0;
+                for p in start_period..=end_period {
+                    let ipmt = if pmt_type && p == 1 {
+                        0.0
+                    } else {
+                        let factor_prev = (1.0 + rate).powf((p - 1) as f64);
+                        let balance_prev = pv * factor_prev
+                            + pmt * (1.0 + rate * type_flag) * (factor_prev - 1.0) / rate;
+                        -balance_prev * rate
+                    };
+                    total_principal += pmt - ipmt;
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Number(total_principal)))
+            }
+            "critbinom" | "binom.inv" if arguments.len() == 3 => {
+                let trials =
+                    to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.floor() as i64;
+                let prob_s = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let alpha = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                if trials < 0
+                    || !(0.0..=1.0).contains(&prob_s)
+                    || !(0.0..=1.0).contains(&alpha)
+                    || trials > 10000
+                {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let ln_comb = |n: i64, k: i64| -> f64 {
+                    if k < 0 || k > n {
+                        return f64::NEG_INFINITY;
+                    }
+                    gammaln_f64((n + 1) as f64).unwrap_or(0.0)
+                        - gammaln_f64((k + 1) as f64).unwrap_or(0.0)
+                        - gammaln_f64((n - k + 1) as f64).unwrap_or(0.0)
+                };
+                let mut cumulative = 0.0;
+                for k in 0..=trials {
+                    let pmf = if prob_s == 0.0 {
+                        if k == 0 { 1.0 } else { 0.0 }
+                    } else if prob_s == 1.0 {
+                        if k == trials { 1.0 } else { 0.0 }
+                    } else {
+                        (ln_comb(trials, k)
+                            + (k as f64) * prob_s.ln()
+                            + ((trials - k) as f64) * (1.0 - prob_s).ln())
+                        .exp()
+                    };
+                    cumulative += pmf;
+                    if cumulative >= alpha {
+                        return Ok(EvalValue::Scalar(FormulaValue::Number(k as f64)));
+                    }
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Number(trials as f64)))
+            }
             "sumxmy2" | "sumx2my2" | "sumx2py2" if arguments.len() == 2 => {
                 let (vals_x, r_x, c_x) = match self.evaluate(&arguments[0], depth + 1)? {
                     EvalValue::Scalar(s) => (vec![s], 1, 1),
@@ -11838,6 +12038,97 @@ mod tests {
         assert_eq!(
             evaluate_formula(
                 "=CHAR(RECEIVED(1, 91, 97.5, 0.10, 2) - 35)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
+        );
+
+        // EFFECT & NOMINAL
+        let eff_val =
+            evaluate_formula("=EFFECT(0.04, 1)", None, &test_cells, Default::default()).value;
+        if let Some(FormulaValue::Number(n)) = eff_val {
+            assert!((n - 0.04).abs() < 1e-6);
+        } else {
+            panic!("Expected EFFECT number result: {eff_val:?}");
+        }
+
+        let nom_val = evaluate_formula(
+            "=NOMINAL(EFFECT(0.0525, 4), 4)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(n)) = nom_val {
+            assert!((n - 0.0525).abs() < 1e-6);
+        } else {
+            panic!("Expected NOMINAL number result: {nom_val:?}");
+        }
+
+        // IPMT & PPMT
+        let ipmt_val = evaluate_formula(
+            "=IPMT(0.1 / 12, 1, 36, 10000)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(n)) = ipmt_val {
+            assert!((n - (-83.333333)).abs() < 1e-3);
+        } else {
+            panic!("Expected IPMT number result: {ipmt_val:?}");
+        }
+
+        let ppmt_val = evaluate_formula(
+            "=PPMT(0, 1, 10, -650)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        assert_eq!(ppmt_val, Some(FormulaValue::Number(65.0)));
+
+        // CUMIPMT & CUMPRINC
+        let cumipmt_val = evaluate_formula(
+            "=CUMIPMT(0.1 / 12, 36, 10000, 1, 1, 0)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(n)) = cumipmt_val {
+            assert!((n - (-83.333333)).abs() < 1e-3);
+        } else {
+            panic!("Expected CUMIPMT number result: {cumipmt_val:?}");
+        }
+
+        // CRITBINOM / BINOM.INV
+        let crit_val = evaluate_formula(
+            "=CRITBINOM(6, 0.5, 0.5)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        assert_eq!(crit_val, Some(FormulaValue::Number(3.0)));
+
+        // De-obfuscation with PPMT and CRITBINOM
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(PPMT(0, 1, 10, -650))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(CRITBINOM(6, 0.5, 0.5) * 21 + 2)",
                 None,
                 &test_cells,
                 Default::default()

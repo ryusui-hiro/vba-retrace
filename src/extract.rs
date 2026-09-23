@@ -750,6 +750,13 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("pricedisc")
                 || f_lower.contains("received")
                 || f_lower.contains("hypgeom")
+                || f_lower.contains("effect")
+                || f_lower.contains("nominal")
+                || f_lower.contains("ipmt")
+                || f_lower.contains("ppmt")
+                || f_lower.contains("cumipmt")
+                || f_lower.contains("cumprinc")
+                || f_lower.contains("critbinom")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -9069,6 +9076,411 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_powerpoint_handout_or_notes_master_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in handout or notes master parts
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "handoutNotesMaster:uncCoercion".into(),
+                        format!("PowerPoint handout or notes master references remote UNC resource '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "handoutNotesMaster:dangerousProtocol".into(),
+                    format!("PowerPoint handout or notes master references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "handoutNotesMaster:stagedCommand".into(),
+                    format!("PowerPoint handout or notes master contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. External relationship targets pointing to executable / macro payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "handoutNotesMaster:executableTarget".into(),
+                        format!(
+                            "PowerPoint handout or notes master relationship targets weaponized payload '{ext}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 5. Cloaked DDE / command formulas in master definitions
+        if s_lower.contains("cmd|") || s_lower.contains("powershell|") || s_lower.contains("mshta|")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "handoutNotesMaster:cloakedDde".into(),
+                "PowerPoint handout or notes master contains cloaked DDE command formula".into(),
+            ));
+        }
+
+        // 6. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "handoutNotesMaster:smuggledBinary".into(),
+                "PowerPoint handout or notes master contains smuggled Windows PE executable binary"
+                    .into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_word_glossary_settings_or_font_table_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in glossary settings or font tables
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "glossarySettings:uncCoercion".into(),
+                        format!("Word glossary settings or font table references remote UNC resource '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "glossarySettings:dangerousProtocol".into(),
+                    format!("Word glossary settings or font table references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "glossarySettings:stagedCommand".into(),
+                    format!("Word glossary settings or font table contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. Macro hooks or auto-execution directives in glossary settings
+        if (s_lower.contains("attachedtemplate")
+            || s_lower.contains("autonew")
+            || s_lower.contains("autoopen")
+            || s_lower.contains("document_open"))
+            && (s_lower.contains("http://")
+                || s_lower.contains("https://")
+                || s_lower.contains("\\\\")
+                || s_lower.contains("cmd")
+                || s_lower.contains("powershell"))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "glossarySettings:macroHook".into(),
+                "Word glossary settings binds template or auto-execution hooks to remote/executable payload".into(),
+            ));
+        }
+
+        // 5. External relationship targets pointing to executable / macro payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "glossarySettings:executableTarget".into(),
+                        format!(
+                            "Word glossary settings relationship targets weaponized payload '{ext}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 6. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "glossarySettings:smuggledBinary".into(),
+                "Word glossary settings contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_excel_custom_property_or_custom_data_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in custom properties or custom data
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "customData:uncCoercion".into(),
+                        format!("Excel custom property or custom data references remote UNC resource '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "customData:dangerousProtocol".into(),
+                    format!("Excel custom property or custom data references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "customData:stagedCommand".into(),
+                    format!("Excel custom property or custom data contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. External relationship targets pointing to executable / macro payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "customData:executableTarget".into(),
+                        format!(
+                            "Excel custom property or custom data relationship targets weaponized payload '{ext}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 5. Serialized .NET binary formatters / type confusion markers
+        if s_lower.contains("system.windows.forms")
+            || s_lower.contains("aaeaaad/////")
+            || s_lower.contains("binaryformatter")
+            || s_lower.contains("typeconvertersupervisor")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "customData:serializedPayload".into(),
+                "Excel custom property or custom data contains serialized .NET binary formatter payload".into(),
+            ));
+        }
+
+        // 6. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "customData:smuggledBinary".into(),
+                "Excel custom property or custom data contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -10448,6 +10860,97 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "ExcelWebPublishingOrSparklineAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for PowerPoint Handout or Notes Master Anomaly (VBA-CELL-080)
+        let is_handout_notes_candidate = (name_lower.contains("handoutmaster")
+            || name_lower.contains("notesmaster"))
+            && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels"));
+        if is_handout_notes_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_powerpoint_handout_or_notes_master_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "PowerPoint handout or notes master anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "PowerPointHandoutNotes".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "PowerPointHandoutOrNotesMasterAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word Glossary Settings or Font Table Anomaly (VBA-CELL-081)
+        let is_glossary_candidate = (name_lower.contains("/glossary/settings")
+            || name_lower.contains("/glossary/fonttable")
+            || name_lower.contains("/glossary/websettings")
+            || name_lower.contains("glossary/settings")
+            || name_lower.contains("glossary/fonttable")
+            || name_lower.contains("glossary/websettings"))
+            && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels"));
+        if is_glossary_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_word_glossary_settings_or_font_table_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Word glossary settings or font table anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "WordGlossarySettings".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "WordGlossarySettingsOrFontTableAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Excel Custom Property or Custom Data Anomaly (VBA-CELL-082)
+        let is_custom_data_candidate = (name_lower.contains("customproperty")
+            || name_lower.contains("customdata")
+            || name_lower.contains("model/datamodel"))
+            && (name_lower.ends_with(".xml")
+                || name_lower.ends_with(".bin")
+                || name_lower.ends_with(".rels"));
+        if is_custom_data_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_excel_custom_property_or_custom_data_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Excel custom property or custom data anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "ExcelCustomData".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "ExcelCustomPropertyOrCustomDataAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,
