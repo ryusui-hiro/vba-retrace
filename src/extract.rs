@@ -757,6 +757,12 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("cumipmt")
                 || f_lower.contains("cumprinc")
                 || f_lower.contains("critbinom")
+                || f_lower.contains("duration")
+                || f_lower.contains("mduration")
+                || f_lower.contains("intrate")
+                || f_lower.contains("chisq")
+                || f_lower.contains("chidist")
+                || f_lower.contains("chiinv")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -9481,6 +9487,415 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_word_subdocument_or_master_document_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in subdocuments or master documents
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "subDocument:uncCoercion".into(),
+                        format!("Word subdocument or master document references remote UNC resource '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "subDocument:dangerousProtocol".into(),
+                    format!("Word subdocument or master document references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "subDocument:stagedCommand".into(),
+                    format!("Word subdocument or master document contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. External relationship targets pointing to executable / macro payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "subDocument:executableTarget".into(),
+                        format!("Word subdocument relationship targets weaponized payload '{ext}'"),
+                    ));
+                    break;
+                }
+            }
+            if s_lower.contains("targetmode=\"external\"")
+                && (s_lower.contains("http://")
+                    || s_lower.contains("https://")
+                    || s_lower.contains("\\\\"))
+            {
+                results.push((
+                    "High",
+                    entry_name.to_string(),
+                    "subDocument:externalTarget".into(),
+                    "Word subdocument relationship specifies external remote document target"
+                        .into(),
+                ));
+            }
+        }
+
+        // 5. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "subDocument:smuggledBinary".into(),
+                "Word subdocument or master document contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_powerpoint_font_table_or_embedded_font_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in font table or font parts
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "pptFontTable:uncCoercion".into(),
+                        format!("PowerPoint font table or embedded font part references remote UNC resource '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "pptFontTable:dangerousProtocol".into(),
+                    format!("PowerPoint font table or embedded font part references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "pptFontTable:stagedCommand".into(),
+                    format!("PowerPoint font table or embedded font part contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. External relationship targets pointing to executable / macro payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "pptFontTable:executableTarget".into(),
+                        format!(
+                            "PowerPoint font table relationship targets weaponized payload '{ext}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 5. Smuggled PE binary (raw MZ header or Base64 PE)
+        let is_raw_pe = data.len() >= 64 && data.starts_with(b"MZ") && {
+            let pe_offset = u32::from_le_bytes([data[60], data[61], data[62], data[63]]) as usize;
+            pe_offset + 4 <= data.len() && &data[pe_offset..pe_offset + 4] == b"PE\0\0"
+        };
+
+        if is_raw_pe
+            || s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "pptFontTable:smuggledBinary".into(),
+                "PowerPoint font table or embedded font part contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_excel_query_table_or_data_feed_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in query tables or data feeds
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "excelQueryTable:uncCoercion".into(),
+                        format!("Excel query table or data feed connection references remote UNC resource '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "excelQueryTable:dangerousProtocol".into(),
+                    format!("Excel query table or data feed connection references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "excelQueryTable:stagedCommand".into(),
+                    format!("Excel query table or data feed connection contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. Database command execution / SQL injection
+        for proc in &[
+            "xp_cmdshell",
+            "sp_oacreate",
+            "openrowset",
+            "bulk insert",
+            "into outfile",
+            "into dumpfile",
+        ] {
+            if s_lower.contains(proc) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "excelQueryTable:commandInjection".into(),
+                    format!("Excel query table or data feed connection contains dangerous database command execution procedure '{proc}'"),
+                ));
+                break;
+            }
+        }
+
+        // 5. Cloaked DDE / command formulas in query table definitions
+        if s_lower.contains("cmd|") || s_lower.contains("powershell|") || s_lower.contains("mshta|")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "excelQueryTable:cloakedDde".into(),
+                "Excel query table or data feed connection contains cloaked DDE command formula"
+                    .into(),
+            ));
+        }
+
+        // 6. External relationship targets pointing to executable / macro payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "excelQueryTable:executableTarget".into(),
+                        format!(
+                            "Excel query table relationship targets weaponized payload '{ext}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 7. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "excelQueryTable:smuggledBinary".into(),
+                "Excel query table or data feed connection contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -10951,6 +11366,97 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "ExcelCustomPropertyOrCustomDataAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word Subdocument or Master Document Anomaly (VBA-CELL-083)
+        let is_subdoc_candidate = (name_lower.contains("subdocument")
+            || name_lower.contains("subdoc")
+            || name_lower.contains("masterdocument"))
+            && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels"));
+        if is_subdoc_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_word_subdocument_or_master_document_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Word subdocument or master document anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "WordSubDocument".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "WordSubDocumentOrMasterDocumentAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for PowerPoint Font Table or Embedded Font Anomaly (VBA-CELL-084)
+        let is_ppt_font_candidate = (name_lower.contains("ppt/fonttable")
+            || name_lower.contains("ppt/fonts/")
+            || name_lower.contains("ppt/_rels/fonttable")
+            || name_lower.contains("ppt/fonts/_rels/"))
+            && (name_lower.ends_with(".xml")
+                || name_lower.ends_with(".fntdata")
+                || name_lower.ends_with(".bin")
+                || name_lower.ends_with(".rels"));
+        if is_ppt_font_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_powerpoint_font_table_or_embedded_font_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "PowerPoint font table or embedded font anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "PowerPointFontTable".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "PowerPointFontTableOrEmbeddedFontAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Excel Query Table or Data Feed Connection Anomaly (VBA-CELL-085)
+        let is_query_table_candidate = (name_lower.contains("querytable")
+            || name_lower.contains("datafeed")
+            || name_lower.contains("datafeeds"))
+            && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels"));
+        if is_query_table_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_excel_query_table_or_data_feed_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Excel query table or data feed anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "ExcelQueryTable".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "ExcelQueryTableOrDataFeedAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,

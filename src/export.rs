@@ -3209,6 +3209,15 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "ExcelCustomPropertyOrCustomDataAnomaly"
         | "ExcelCustomPropertyAnomaly"
         | "ExcelCustomDataAnomaly" => ("VBA-CELL-082", "error"),
+        "WordSubDocumentOrMasterDocumentAnomaly"
+        | "WordSubDocumentAnomaly"
+        | "MasterDocumentAnomaly" => ("VBA-CELL-083", "error"),
+        "PowerPointFontTableOrEmbeddedFontAnomaly"
+        | "PowerPointFontTableAnomaly"
+        | "EmbeddedFontAnomaly" => ("VBA-CELL-084", "error"),
+        "ExcelQueryTableOrDataFeedAnomaly" | "ExcelQueryTableAnomaly" | "DataFeedAnomaly" => {
+            ("VBA-CELL-085", "error")
+        }
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3504,7 +3513,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-081\",\"name\":\"WordGlossarySettingsOrFontTableAnomaly\",\"shortDescription\":{\"text\":\"Word Glossary Settings and Font Table Anomaly\"},\"fullDescription\":{\"text\":\"Word glossary settings, web settings, or font table parts configure remote UNC references enabling NTLM credential coercion, dangerous exploit URI schemes, macro auto-execution hooks, weaponized external relationship targets, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-082\",\"name\":\"ExcelCustomPropertyOrCustomDataAnomaly\",\"shortDescription\":{\"text\":\"Excel Custom Property and Custom Data Anomaly\"},\"fullDescription\":{\"text\":\"Excel custom property parts, custom data parts, or data model binary streams configure remote UNC resource paths enabling NTLM credential coercion, dangerous exploit URI schemes, serialized .NET binary formatter markers, weaponized external relationship targets, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-082\",\"name\":\"ExcelCustomPropertyOrCustomDataAnomaly\",\"shortDescription\":{\"text\":\"Excel Custom Property and Custom Data Anomaly\"},\"fullDescription\":{\"text\":\"Excel custom property parts, custom data parts, or data model binary streams configure remote UNC resource paths enabling NTLM credential coercion, dangerous exploit URI schemes, serialized .NET binary formatter markers, weaponized external relationship targets, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-083\",\"name\":\"WordSubDocumentOrMasterDocumentAnomaly\",\"shortDescription\":{\"text\":\"Word Subdocument and Master Document Anomaly\"},\"fullDescription\":{\"text\":\"Word subdocument parts, master document parts, or subdocument relationships configure remote UNC resource paths enabling NTLM credential coercion, dangerous exploit URI schemes, staged shell execution commands, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-084\",\"name\":\"PowerPointFontTableOrEmbeddedFontAnomaly\",\"shortDescription\":{\"text\":\"PowerPoint Font Table and Embedded Font Anomaly\"},\"fullDescription\":{\"text\":\"PowerPoint font table parts, embedded font stream files, or font relationships configure remote UNC resource references enabling NTLM credential coercion, dangerous exploit URI schemes, staged shell execution commands, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-085\",\"name\":\"ExcelQueryTableOrDataFeedAnomaly\",\"shortDescription\":{\"text\":\"Excel Query Table and Data Feed Anomaly\"},\"fullDescription\":{\"text\":\"Excel query table parts, data feed connection parts, or query relationships configure remote UNC resource destinations enabling NTLM credential coercion, dangerous exploit URI schemes, database command execution procedures, cloaked DDE command formulas, staged shell execution commands, weaponized external relationship targets, or smuggled executable binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));
