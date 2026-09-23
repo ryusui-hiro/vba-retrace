@@ -3166,6 +3166,17 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         | "ExcelControlPropertiesAnomaly"
         | "ControlPropertiesAnomaly"
         | "FormActionAnomaly" => ("VBA-CELL-070", "error"),
+        "PowerPointMediaTrackOrActionAnomaly"
+        | "PowerPointMediaTrackAnomaly"
+        | "MediaTrackAnomaly"
+        | "PowerPointMediaAnomaly" => ("VBA-CELL-071", "error"),
+        "ExcelTableOrSlicerNativeConnectionAnomaly"
+        | "ExcelTableConnectionAnomaly"
+        | "TableConnectionAnomaly"
+        | "SlicerConnectionAnomaly" => ("VBA-CELL-072", "error"),
+        "WordMailMergeHeaderSourceOrRecipientAnomaly"
+        | "WordMailMergeAnomaly"
+        | "MailMergeHeaderSourceAnomaly" => ("VBA-CELL-073", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3425,7 +3436,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-069\",\"name\":\"XmlDigitalSignatureOrOriginPartAnomaly\",\"shortDescription\":{\"text\":\"XML Digital Signature and Origin Part Anomaly\"},\"fullDescription\":{\"text\":\"Digital signature parts or relationships reference remote UNC paths enabling NTLM credential coercion, dangerous exploit URI schemes, XSLT transform execution triggers, XXE entity declarations, or smuggled Windows PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-070\",\"name\":\"ExcelControlPropertiesOrFormActionAnomaly\",\"shortDescription\":{\"text\":\"Excel Control Properties and Form Action Anomaly\"},\"fullDescription\":{\"text\":\"Excel form control properties or drawings define linked cell formulas containing cloaked DDE execution, Excel 4.0 macros, remote UNC workbook references, dangerous exploit URI schemes, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-070\",\"name\":\"ExcelControlPropertiesOrFormActionAnomaly\",\"shortDescription\":{\"text\":\"Excel Control Properties and Form Action Anomaly\"},\"fullDescription\":{\"text\":\"Excel form control properties or drawings define linked cell formulas containing cloaked DDE execution, Excel 4.0 macros, remote UNC workbook references, dangerous exploit URI schemes, or staged shell execution commands.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-071\",\"name\":\"PowerPointMediaTrackOrActionAnomaly\",\"shortDescription\":{\"text\":\"PowerPoint Media Track and Action Anomaly\"},\"fullDescription\":{\"text\":\"PowerPoint media tracks, slide action triggers, or media nodes disguise Windows PE executables, staged shell scripts, remote UNC media streams forcing NTLM credential coercion, or dangerous exploit URI schemes.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-072\",\"name\":\"ExcelTableOrSlicerNativeConnectionAnomaly\",\"shortDescription\":{\"text\":\"Excel Table and Slicer Native Connection Anomaly\"},\"fullDescription\":{\"text\":\"Excel table definitions, slicers, or timeline cache parts configure remote UNC connections enabling NTLM credential coercion, cloaked DDE execution in slicer captions or formulas, dangerous exploit URI schemes, or database command execution.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-073\",\"name\":\"WordMailMergeHeaderSourceOrRecipientAnomaly\",\"shortDescription\":{\"text\":\"Word Mail Merge Header Source and Recipient Anomaly\"},\"fullDescription\":{\"text\":\"Word mail merge settings or recipient data parts configure remote UNC header sources enabling NTLM credential coercion, dangerous exploit URI schemes, external relationship weaponization, or SQL query command injection.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));
