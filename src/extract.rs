@@ -681,6 +681,15 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("minverse")
                 || f_lower.contains("int")
                 || f_lower.contains("seriessum")
+                || f_lower.contains("complex")
+                || f_lower.contains("imreal")
+                || f_lower.contains("imaginary")
+                || f_lower.contains("imabs")
+                || f_lower.contains("imconjg")
+                || f_lower.contains("sumxmy2")
+                || f_lower.contains("sumx2my2")
+                || f_lower.contains("sumx2py2")
+                || f_lower.contains("multinomial")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -5988,6 +5997,414 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_word_docvars_and_notes_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        // 1. Document Variables in word/settings.xml (<w:docVars><w:docVar w:name="..." w:val="..."/></w:docVars>)
+        if s_lower.contains("docvar") {
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find("<w:docvar") {
+                let actual = search_idx + pos;
+                let end_tag = s_lower[actual..]
+                    .find('>')
+                    .map(|p| actual + p)
+                    .unwrap_or(s_lower.len());
+                let tag_str = &s_lossy[actual..end_tag];
+                let tag_lower = tag_str.to_ascii_lowercase();
+
+                // Check for smuggled PE binaries in docVar value
+                if tag_str.contains("TVqQ")
+                    || tag_lower.contains("this program cannot be run in dos mode")
+                {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "docVars:smuggledBinary".into(),
+                        "Word document variable contains smuggled Windows PE executable binary"
+                            .into(),
+                    ));
+                }
+
+                // Check for shell execution commands in docVar
+                for cmd in &[
+                    "powershell",
+                    "cmd.exe",
+                    "wscript.exe",
+                    "cscript.exe",
+                    "mshta",
+                    "rundll32",
+                    "certutil",
+                ] {
+                    if tag_lower.contains(cmd) {
+                        results.push((
+                            "Critical",
+                            entry_name.to_string(),
+                            "docVars:shellCommand".into(),
+                            format!(
+                                "Word document variable contains shell execution command '{cmd}'"
+                            ),
+                        ));
+                        break;
+                    }
+                }
+
+                // Check for dangerous URI schemes or remote UNC paths in docVar
+                for proto in &[
+                    "ms-msdt:",
+                    "search-ms:",
+                    "ms-appinstaller:",
+                    "mhtml:",
+                    "powershell:",
+                    "javascript:",
+                    "vbscript:",
+                ] {
+                    if tag_lower.contains(proto) {
+                        results.push((
+                            "Critical",
+                            entry_name.to_string(),
+                            format!("docVars:dangerousProtocol:{}", proto.trim_end_matches(':')),
+                            format!(
+                                "Word document variable references dangerous exploit URI scheme '{proto}'"
+                            ),
+                        ));
+                        break;
+                    }
+                }
+
+                if tag_lower.contains("w:val=\"\\\\")
+                    || tag_lower.contains("w:val='\\\\")
+                    || tag_lower.contains("w:val=\"//")
+                    || tag_lower.contains("w:val='//")
+                {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "docVars:uncPath".into(),
+                        "Word document variable contains remote UNC path enabling NTLM credential coercion".into(),
+                    ));
+                }
+
+                search_idx = end_tag;
+            }
+        }
+
+        // 2. Footnotes and Endnotes external relationships or UNC references
+        if entry_name.contains("footnote") || entry_name.contains("endnote") {
+            if entry_name.contains("_rels") && s_lower.contains("targetmode=\"external\"") {
+                let mut search_idx = 0;
+                while let Some(pos) = s_lower[search_idx..].find("target=\"") {
+                    let actual = search_idx + pos + 8;
+                    if let Some(end_quote) = s_lower[actual..].find('"') {
+                        let target = &s_lossy[actual..actual + end_quote];
+                        let t_lower = target.to_ascii_lowercase();
+                        if t_lower.starts_with(r"\\") || t_lower.starts_with("//") {
+                            results.push((
+                                "Critical",
+                                target.to_string(),
+                                "notesRels:uncRelationship".into(),
+                                format!("Word footnotes/endnotes relationship references remote UNC path '{target}' (NTLM coercion vector)"),
+                            ));
+                            break;
+                        }
+                        if t_lower.ends_with(".exe")
+                            || t_lower.ends_with(".bat")
+                            || t_lower.ends_with(".vbs")
+                            || t_lower.ends_with(".ps1")
+                            || t_lower.ends_with(".hta")
+                            || t_lower.ends_with(".lnk")
+                        {
+                            results.push((
+                                "Critical",
+                                target.to_string(),
+                                "notesRels:executableRelationship".into(),
+                                format!("Word footnotes/endnotes relationship references executable payload '{target}'"),
+                            ));
+                            break;
+                        }
+                    }
+                    search_idx = actual;
+                }
+            }
+
+            if s_lossy.contains("TVqQ")
+                || s_lower.contains("this program cannot be run in dos mode")
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "notes:smuggledBinary".into(),
+                    "Word footnotes or endnotes part contains smuggled Windows PE executable binary"
+                        .into(),
+                ));
+            }
+
+            for cmd in &[
+                "powershell",
+                "cmd.exe",
+                "wscript.exe",
+                "cscript.exe",
+                "mshta",
+                "rundll32",
+                "certutil",
+            ] {
+                if s_lower.contains(cmd) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "notes:shellCommand".into(),
+                        format!(
+                            "Word footnotes or endnotes part contains shell execution command '{cmd}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        results
+    }
+
+    fn scan_powerpoint_tags_and_masters_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        // 1. PowerPoint Programmable Tags (ppt/tags/tag*.xml)
+        if entry_name.contains("ppt/tags")
+            || s_lower.contains("<p:tag")
+            || s_lower.contains("taglst")
+        {
+            if s_lossy.contains("TVqQ")
+                || s_lower.contains("this program cannot be run in dos mode")
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "pptTags:smuggledBinary".into(),
+                    "PowerPoint programmable tag part contains smuggled Windows PE executable binary"
+                        .into(),
+                ));
+            }
+
+            for cmd in &[
+                "powershell",
+                "cmd.exe",
+                "wscript.exe",
+                "cscript.exe",
+                "mshta",
+                "rundll32",
+                "certutil",
+            ] {
+                if s_lower.contains(cmd) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "pptTags:shellCommand".into(),
+                        format!(
+                            "PowerPoint programmable tag contains shell execution command '{cmd}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+
+            for proto in &[
+                "ms-msdt:",
+                "search-ms:",
+                "ms-appinstaller:",
+                "mhtml:",
+                "powershell:",
+                "javascript:",
+                "vbscript:",
+            ] {
+                if s_lower.contains(proto) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        format!("pptTags:dangerousProtocol:{}", proto.trim_end_matches(':')),
+                        format!(
+                            "PowerPoint programmable tag references dangerous exploit URI scheme '{proto}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+
+            if s_lower.contains("val=\"\\\\")
+                || s_lower.contains("val='\\\\")
+                || s_lower.contains("val=\"//")
+                || s_lower.contains("val='//")
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "pptTags:uncPath".into(),
+                    "PowerPoint programmable tag contains remote UNC path enabling NTLM credential coercion".into(),
+                ));
+            }
+        }
+
+        // 2. PowerPoint Presentation Relationships or Master relationships (external templates/links)
+        if (entry_name.contains("ppt/_rels")
+            || entry_name.contains("handoutmaster")
+            || entry_name.contains("notesmaster"))
+            && s_lower.contains("targetmode=\"external\"")
+        {
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find("target=\"") {
+                let actual = search_idx + pos + 8;
+                if let Some(end_quote) = s_lower[actual..].find('"') {
+                    let target = &s_lossy[actual..actual + end_quote];
+                    let t_lower = target.to_ascii_lowercase();
+                    if t_lower.starts_with(r"\\") || t_lower.starts_with("//") {
+                        results.push((
+                            "Critical",
+                            target.to_string(),
+                            "pptRels:uncRelationship".into(),
+                            format!("PowerPoint presentation relationship references remote UNC path '{target}' (NTLM coercion vector)"),
+                        ));
+                        break;
+                    }
+                    if t_lower.ends_with(".potm")
+                        || t_lower.ends_with(".pptm")
+                        || t_lower.ends_with(".dotm")
+                        || t_lower.ends_with(".exe")
+                        || t_lower.ends_with(".bat")
+                        || t_lower.ends_with(".vbs")
+                        || t_lower.ends_with(".ps1")
+                        || t_lower.ends_with(".hta")
+                    {
+                        results.push((
+                            "Critical",
+                            target.to_string(),
+                            "pptRels:remoteTemplateOrExecutable".into(),
+                            format!("PowerPoint relationship references remote external template or executable '{target}'"),
+                        ));
+                        break;
+                    }
+                }
+                search_idx = actual;
+            }
+        }
+
+        // 3. PowerPoint Font Table remote UNC typeface
+        if entry_name.contains("fonttable")
+            && s_lower.contains(r"\\")
+            && (s_lower.contains("typeface=\"\\\\")
+                || s_lower.contains("typeface='\\\\")
+                || s_lower.contains("typeface=\"//")
+                || s_lower.contains("typeface='//"))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "pptFont:uncTypeface".into(),
+                "PowerPoint font table references remote UNC typeface enabling NTLM credential coercion".into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_scenario_manager_consolidation_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Scenario definitions in sheet*.xml (<scenarios>) or xl/scenarios/scenario*.xml
+        if entry_name.contains("scenarios")
+            || s_lower.contains("<scenarios")
+            || s_lower.contains("<scenario")
+        {
+            // DDE execution strings in input cells
+            if s_lower.contains("cmd|")
+                || s_lower.contains("powershell|")
+                || s_lower.contains("mshta|")
+                || s_lower.contains("cscript|")
+                || s_lower.contains("wscript|")
+                || s_lower.contains("certutil|")
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "scenario:ddeExecution".into(),
+                    "Excel Scenario Manager contains cloaked DDE execution command in scenario input cells".into(),
+                ));
+            }
+
+            // XLM macro execution functions
+            if s_lower.contains("exec(")
+                || s_lower.contains("call(")
+                || s_lower.contains("register(")
+                || s_lower.contains("run(")
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "scenario:xlmExecution".into(),
+                    "Excel Scenario Manager contains Excel 4.0 (XLM) macro execution functions".into(),
+                ));
+            }
+
+            // Shell execution commands
+            if s_lower.contains("powershell.exe")
+                || s_lower.contains("cmd.exe")
+                || s_lower.contains("mshta.exe")
+                || s_lower.contains("rundll32.exe")
+                || s_lower.contains("cscript.exe")
+                || s_lower.contains("wscript.exe")
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "scenario:shellExecution".into(),
+                    "Excel Scenario Manager contains shell execution commands in scenario cells".into(),
+                ));
+            }
+
+            // Smuggled PE binary
+            if s_lower.contains("tvqqaa")
+                || s_lower.contains("tvqaia")
+                || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "scenario:smuggledBinary".into(),
+                    "Excel Scenario Manager contains smuggled Windows PE executable binary".into(),
+                ));
+            }
+        }
+
+        // 2. Data Consolidation references to remote UNC paths (<consolidation>)
+        if (s_lower.contains("<consolidation") || entry_name.contains("consolidation"))
+            && (s_lower.contains(r"[\\")
+                || s_lower.contains("['\\\\")
+                || s_lower.contains("[\"\\\\")
+                || s_lower.contains("[//")
+                || (s_lower.contains("source") && s_lower.contains(r"\\")))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "consolidation:uncPath".into(),
+                "Excel Data Consolidation references remote UNC workbook path enabling NTLM credential coercion".into(),
+            ));
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -6746,6 +7163,92 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "WordGlossaryOrBuildingBlocksRelsAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word Document Variables and Footnotes/Endnotes Anomaly (VBA-CELL-059)
+        let is_word_docvars_or_notes_candidate = name_lower.contains("settings")
+            || name_lower.contains("footnote")
+            || name_lower.contains("endnote");
+        if is_word_docvars_or_notes_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_word_docvars_and_notes_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Word document variables or footnotes/endnotes anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "WordDocVars".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "WordDocVariablesOrNotesAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for PowerPoint Tags, Masters, & Font Table Anomaly (VBA-CELL-060)
+        let is_ppt_tags_or_masters_candidate = name_lower.contains("ppt/")
+            || name_lower.starts_with("ppt/")
+            || name_lower.contains("tag")
+            || name_lower.contains("handoutmaster")
+            || name_lower.contains("notesmaster");
+        if is_ppt_tags_or_masters_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_powerpoint_tags_and_masters_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "PowerPoint programmable tags or masters anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "PowerPoint".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "PowerPointTagsOrMastersAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Excel Scenario Manager & Data Consolidation Anomaly (VBA-CELL-061)
+        let is_scenario_consolidation_candidate = name_lower.contains("scenario")
+            || name_lower.contains("consolidation")
+            || (name_lower.contains("sheet") && name_lower.ends_with(".xml"));
+        if is_scenario_consolidation_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_scenario_manager_consolidation_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Excel Scenario Manager or Data Consolidation anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "ScenarioManager".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "ScenarioManagerOrConsolidationAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,

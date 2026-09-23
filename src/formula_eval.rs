@@ -2567,6 +2567,171 @@ impl Evaluator<'_> {
                 }
                 Ok(EvalValue::Scalar(FormulaValue::Number(sum)))
             }
+            "complex" if arguments.len() == 2 || arguments.len() == 3 => {
+                let real = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let imag = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let suffix = if arguments.len() == 3 {
+                    match self.eval_scalar(&arguments[2], depth + 1)? {
+                        FormulaValue::String(t) => {
+                            let t_lower = t.to_ascii_lowercase();
+                            if t_lower == "i" || t_lower == "j" {
+                                t_lower
+                            } else if t.is_empty() {
+                                "i".to_string()
+                            } else {
+                                return Ok(EvalValue::Scalar(FormulaValue::Error(
+                                    "#VALUE!".into(),
+                                )));
+                            }
+                        }
+                        _ => return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into()))),
+                    }
+                } else {
+                    "i".to_string()
+                };
+                let s = format_complex(real, imag, &suffix);
+                Ok(EvalValue::Scalar(FormulaValue::String(s)))
+            }
+            "imreal" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                if let FormulaValue::Error(e) = val {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                match parse_complex(&val) {
+                    Ok((r, _)) => Ok(EvalValue::Scalar(FormulaValue::Number(r))),
+                    Err(_) => Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into()))),
+                }
+            }
+            "imaginary" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                if let FormulaValue::Error(e) = val {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                match parse_complex(&val) {
+                    Ok((_, im)) => Ok(EvalValue::Scalar(FormulaValue::Number(im))),
+                    Err(_) => Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into()))),
+                }
+            }
+            "imabs" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                if let FormulaValue::Error(e) = val {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                match parse_complex(&val) {
+                    Ok((r, im)) => {
+                        let res = (r * r + im * im).sqrt();
+                        Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                    }
+                    Err(_) => Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into()))),
+                }
+            }
+            "imconjg" if arguments.len() == 1 => {
+                let val = self.eval_scalar(&arguments[0], depth + 1)?;
+                if let FormulaValue::Error(e) = val {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                match parse_complex(&val) {
+                    Ok((r, im)) => {
+                        let s = format_complex(r, -im, "i");
+                        Ok(EvalValue::Scalar(FormulaValue::String(s)))
+                    }
+                    Err(_) => Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into()))),
+                }
+            }
+            "sumxmy2" | "sumx2my2" | "sumx2py2" if arguments.len() == 2 => {
+                let (vals_x, r_x, c_x) = match self.evaluate(&arguments[0], depth + 1)? {
+                    EvalValue::Scalar(s) => (vec![s], 1, 1),
+                    EvalValue::Range { values, rows, cols } => (values, rows, cols),
+                    EvalValue::Lambda { .. } => {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                };
+                let (vals_y, r_y, c_y) = match self.evaluate(&arguments[1], depth + 1)? {
+                    EvalValue::Scalar(s) => (vec![s], 1, 1),
+                    EvalValue::Range { values, rows, cols } => (values, rows, cols),
+                    EvalValue::Lambda { .. } => {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                    }
+                };
+                if r_x != r_y || c_x != c_y || vals_x.len() != vals_y.len() {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#N/A!".into())));
+                }
+                let mut sum = 0.0f64;
+                for (vx, vy) in vals_x.iter().zip(vals_y.iter()) {
+                    if let FormulaValue::Error(e) = vx {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error(e.clone())));
+                    }
+                    if let FormulaValue::Error(e) = vy {
+                        return Ok(EvalValue::Scalar(FormulaValue::Error(e.clone())));
+                    }
+                    if let (Ok(nx), Ok(ny)) = (to_number(vx), to_number(vy)) {
+                        let term = match name {
+                            "sumxmy2" => (nx - ny) * (nx - ny),
+                            "sumx2my2" => (nx * nx) - (ny * ny),
+                            "sumx2py2" => (nx * nx) + (ny * ny),
+                            _ => 0.0,
+                        };
+                        sum += term;
+                    }
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Number(sum)))
+            }
+            "multinomial" if !arguments.is_empty() => {
+                let mut nums = Vec::new();
+                for arg in arguments {
+                    match self.evaluate(arg, depth + 1)? {
+                        EvalValue::Scalar(s) => {
+                            if let FormulaValue::Error(e) = s {
+                                return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                            }
+                            if let Ok(n) = to_number(&s) {
+                                if n < 0.0 {
+                                    return Ok(EvalValue::Scalar(FormulaValue::Error(
+                                        "#NUM!".into(),
+                                    )));
+                                }
+                                nums.push(n.trunc() as u64);
+                            }
+                        }
+                        EvalValue::Range { values, .. } => {
+                            for v in values {
+                                if let FormulaValue::Error(e) = v {
+                                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                                }
+                                if let Ok(n) = to_number(&v) {
+                                    if n < 0.0 {
+                                        return Ok(EvalValue::Scalar(FormulaValue::Error(
+                                            "#NUM!".into(),
+                                        )));
+                                    }
+                                    nums.push(n.trunc() as u64);
+                                }
+                            }
+                        }
+                        EvalValue::Lambda { .. } => {
+                            return Ok(EvalValue::Scalar(FormulaValue::Error("#VALUE!".into())));
+                        }
+                    }
+                }
+                let total: u64 = nums.iter().sum();
+                if total > 170 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                fn fact_f64(n: u64) -> f64 {
+                    let mut res = 1.0f64;
+                    for i in 2..=n {
+                        res *= i as f64;
+                    }
+                    res
+                }
+                let mut denom = 1.0f64;
+                for &n in &nums {
+                    denom *= fact_f64(n);
+                }
+                let num = fact_f64(total);
+                let result = (num / denom).round();
+                Ok(EvalValue::Scalar(FormulaValue::Number(result)))
+            }
             "bitand" if arguments.len() == 2 => {
                 let a = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.trunc() as i64;
                 let b = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc() as i64;
@@ -5198,6 +5363,92 @@ fn to_number(value: &FormulaValue) -> Result<f64, &'static str> {
         FormulaValue::String(value) => value.trim().parse::<f64>().map_err(|_| "unsupported"),
         FormulaValue::Error(_) => Err("unresolved_reference"),
         FormulaValue::Number(_) => Err("unsupported"),
+    }
+}
+
+fn format_complex(real: f64, imag: f64, suffix: &str) -> String {
+    fn fmt_num(n: f64) -> String {
+        if n.fract() == 0.0 && n.abs() < 1e15 {
+            format!("{}", n as i64)
+        } else {
+            format!("{n}")
+        }
+    }
+
+    if real == 0.0 && imag == 0.0 {
+        "0".to_string()
+    } else if imag == 0.0 {
+        fmt_num(real)
+    } else if real == 0.0 {
+        if imag == 1.0 {
+            suffix.to_string()
+        } else if imag == -1.0 {
+            format!("-{suffix}")
+        } else {
+            format!("{}{suffix}", fmt_num(imag))
+        }
+    } else {
+        let r_str = fmt_num(real);
+        if imag == 1.0 {
+            format!("{r_str}+{suffix}")
+        } else if imag == -1.0 {
+            format!("{r_str}-{suffix}")
+        } else if imag > 0.0 {
+            format!("{r_str}+{}{suffix}", fmt_num(imag))
+        } else {
+            format!("{r_str}{}{suffix}", fmt_num(imag))
+        }
+    }
+}
+
+fn parse_complex(val: &FormulaValue) -> Result<(f64, f64), ()> {
+    match val {
+        FormulaValue::Number(n) if n.is_finite() => Ok((*n, 0.0)),
+        FormulaValue::Boolean(b) => Ok((if *b { 1.0 } else { 0.0 }, 0.0)),
+        FormulaValue::String(raw) => {
+            let s = raw.trim();
+            if s.is_empty() {
+                return Err(());
+            }
+            let s_lower = s.to_ascii_lowercase();
+            if !s_lower.ends_with('i') && !s_lower.ends_with('j') {
+                return s.parse::<f64>().map(|r| (r, 0.0)).map_err(|_| ());
+            }
+            let without_suffix = &s_lower[..s_lower.len() - 1];
+            if without_suffix.is_empty() || without_suffix == "+" {
+                return Ok((0.0, 1.0));
+            }
+            if without_suffix == "-" {
+                return Ok((0.0, -1.0));
+            }
+            let bytes = without_suffix.as_bytes();
+            let mut split_pos = None;
+            for i in (1..bytes.len()).rev() {
+                if (bytes[i] == b'+' || bytes[i] == b'-')
+                    && bytes[i - 1] != b'e'
+                    && bytes[i - 1] != b'E'
+                {
+                    split_pos = Some(i);
+                    break;
+                }
+            }
+            if let Some(pos) = split_pos {
+                let real_part = without_suffix[..pos].parse::<f64>().map_err(|_| ())?;
+                let imag_str = &without_suffix[pos..];
+                let imag_part = if imag_str == "+" {
+                    1.0
+                } else if imag_str == "-" {
+                    -1.0
+                } else {
+                    imag_str.parse::<f64>().map_err(|_| ())?
+                };
+                Ok((real_part, imag_part))
+            } else {
+                let imag_part = without_suffix.parse::<f64>().map_err(|_| ())?;
+                Ok((0.0, imag_part))
+            }
+        }
+        _ => Err(()),
     }
 }
 
@@ -9028,6 +9279,115 @@ mod tests {
             )
             .value,
             Some(FormulaValue::String("G".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_complex_numbers_difference_sums_and_multinomial() {
+        let test_cells = vec![];
+
+        // COMPLEX
+        assert_eq!(
+            evaluate_formula("=COMPLEX(3, 4)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::String("3+4i".into()))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=COMPLEX(3, -4, \"j\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("3-4j".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=COMPLEX(0, 1)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::String("i".into()))
+        );
+        assert_eq!(
+            evaluate_formula("=COMPLEX(0, -1)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::String("-i".into()))
+        );
+
+        // IMREAL & IMAGINARY & IMABS & IMCONJG
+        assert_eq!(
+            evaluate_formula("=IMREAL(\"3+4i\")", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(3.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=IMAGINARY(\"3+4i\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(4.0))
+        );
+        assert_eq!(
+            evaluate_formula("=IMABS(\"3+4i\")", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(5.0))
+        );
+        assert_eq!(
+            evaluate_formula("=IMCONJG(\"3+4i\")", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::String("3-4i".into()))
+        );
+
+        // SUMXMY2, SUMX2MY2, SUMX2PY2
+        assert_eq!(
+            evaluate_formula(
+                "=SUMXMY2({2, 3}, {4, 1})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(8.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=SUMX2MY2({2, 3}, {4, 1})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(-4.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=SUMX2PY2({2, 3}, {4, 1})",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(30.0))
+        );
+
+        // MULTINOMIAL
+        assert_eq!(
+            evaluate_formula(
+                "=MULTINOMIAL(2, 3, 4)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(1260.0))
+        );
+
+        // De-obfuscation: CHAR(IMREAL("65+10i")) = "A"
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(IMREAL(\"65+10i\"))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
         );
     }
 }
