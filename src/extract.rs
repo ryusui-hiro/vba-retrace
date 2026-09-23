@@ -702,6 +702,18 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("permutationa")
                 || f_lower.contains("isodd")
                 || f_lower.contains("iseven")
+                || f_lower.contains("imsin")
+                || f_lower.contains("imcos")
+                || f_lower.contains("imtan")
+                || f_lower.contains("imsinh")
+                || f_lower.contains("imcosh")
+                || f_lower.contains("imsec")
+                || f_lower.contains("imcsc")
+                || f_lower.contains("imcot")
+                || f_lower.contains("imlog10")
+                || f_lower.contains("imlog2")
+                || f_lower.contains("gamma")
+                || f_lower.contains("gammaln")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -6786,6 +6798,596 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_excel_pivot_cache_and_definition_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let name_lower = entry_name.to_ascii_lowercase();
+
+        if name_lower.ends_with(".rels") {
+            let s = String::from_utf8_lossy(data);
+            let s_lower = s.to_ascii_lowercase();
+
+            for (i, w) in data.windows(2).enumerate() {
+                if (w == b"\\\\" || w == b"//") && i + 4 < data.len() {
+                    let rest = &data[i..];
+                    let end = rest
+                        .iter()
+                        .position(|&b| {
+                            b == 0
+                                || b == b' '
+                                || b == b'"'
+                                || b == b'\''
+                                || b == b'<'
+                                || b == b'>'
+                                || b == b'\r'
+                                || b == b'\n'
+                        })
+                        .unwrap_or(rest.len().min(128));
+                    if let Some(unc) = (end > 4)
+                        .then(|| std::str::from_utf8(&rest[..end]).ok())
+                        .flatten()
+                        .filter(|u| u.contains('\\') || u.contains('/'))
+                    {
+                        results.push((
+                            "High",
+                            entry_name.to_string(),
+                            "pivotCache:uncCoercion".into(),
+                            format!(
+                                "Pivot table or cache relationship references external UNC path '{unc}' (NTLM coercion vector)"
+                            ),
+                        ));
+                        break;
+                    }
+                }
+            }
+
+            for proto in &[
+                "ms-msdt:",
+                "search-ms:",
+                "mhtml:",
+                "ms-appinstaller:",
+                "file:////",
+                "javascript:",
+                "vbscript:",
+            ] {
+                if s_lower.contains(proto) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "pivotCache:dangerousProtocol".into(),
+                        format!(
+                            "Pivot table or cache relationship targets dangerous URI scheme '{proto}'"
+                        ),
+                    ));
+                }
+            }
+
+            for ext in &[
+                ".exe\"", ".dll\"", ".bat\"", ".cmd\"", ".ps1\"", ".vbs\"", ".js\"", ".hta\"",
+                ".cpl\"", ".scr\"", ".msi\"",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "pivotCache:executableTarget".into(),
+                        format!(
+                            "Pivot table or cache relationship targets executable payload '{ext}'"
+                        ),
+                    ));
+                }
+            }
+        } else {
+            let s = String::from_utf8_lossy(data);
+            let s_lower = s.to_ascii_lowercase();
+
+            for db_cmd in &["xp_cmdshell", "sp_oacreate", "openrowset"] {
+                if s_lower.contains(db_cmd) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "pivotCache:databaseCommand".into(),
+                        format!(
+                            "Pivot table or cache definition contains database command execution procedure '{db_cmd}'"
+                        ),
+                    ));
+                }
+            }
+
+            'b64: for marker in &["tvqq", "tvoa", "tvpb", "tvpq"] {
+                let mut pos = 0;
+                while let Some(idx) = s_lower[pos..].find(marker) {
+                    let abs = pos + idx;
+                    let candidate = &s[abs..];
+                    let b64_len = candidate
+                        .bytes()
+                        .take_while(|b| {
+                            b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/' || *b == b'='
+                        })
+                        .count();
+                    if b64_len >= 64 {
+                        results.push((
+                            "Critical",
+                            entry_name.to_string(),
+                            "pivotCache:base64PePayload".into(),
+                            format!(
+                                "Pivot cache records contain smuggled Base64 Windows PE binary (length: {b64_len} chars)"
+                            ),
+                        ));
+                        break 'b64;
+                    }
+                    pos = abs + 4;
+                }
+            }
+
+            if s_lower.contains("4d5a9000")
+                || (s_lower.contains("4d5a")
+                    && s_lower.contains("this program cannot be run in dos mode"))
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "pivotCache:hexPePayload".into(),
+                    "Pivot cache records contain hex-encoded Windows PE executable binary header"
+                        .into(),
+                ));
+            }
+
+            for dde_pat in &[
+                "=cmd|",
+                "=powershell|",
+                "=mshta|",
+                "=certutil|",
+                "dde(",
+                "dde.execute(",
+            ] {
+                if s_lower.contains(dde_pat) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "pivotCache:cloakedDde".into(),
+                        format!(
+                            "Pivot cache records contain cloaked DDE execution formula '{dde_pat}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+
+            for cmd in &[
+                "powershell",
+                "cmd.exe",
+                "wscript.exe",
+                "cscript.exe",
+                "mshta",
+                "rundll32",
+                "certutil",
+                "bitsadmin",
+                "regsvr32",
+            ] {
+                if s_lower.contains(cmd) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "pivotCache:stagedCommand".into(),
+                        format!(
+                            "Pivot cache definition contains staged shell execution command '{cmd}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+
+            for (i, w) in data.windows(2).enumerate() {
+                if (w == b"\\\\" || w == b"//") && i + 4 < data.len() {
+                    let rest = &data[i..];
+                    let end = rest
+                        .iter()
+                        .position(|&b| {
+                            b == 0
+                                || b == b' '
+                                || b == b'"'
+                                || b == b'\''
+                                || b == b'<'
+                                || b == b'>'
+                                || b == b'\r'
+                                || b == b'\n'
+                        })
+                        .unwrap_or(rest.len().min(128));
+                    if let Some(unc) = (end > 4)
+                        .then(|| std::str::from_utf8(&rest[..end]).ok())
+                        .flatten()
+                        .filter(|u| u.contains('\\') || u.contains('/'))
+                    {
+                        results.push((
+                            "High",
+                            entry_name.to_string(),
+                            "pivotCache:uncCoercion".into(),
+                            format!(
+                                "Pivot cache definition contains external UNC path '{unc}' (NTLM coercion vector)"
+                            ),
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    fn scan_word_powerpoint_embedded_package_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let name_lower = entry_name.to_ascii_lowercase();
+
+        if name_lower.ends_with(".bin") {
+            if data.starts_with(b"MZ") || data.starts_with(b"ZM") {
+                let pe_valid = if data.len() >= 0x40 {
+                    let pe_off = u32::from_le_bytes(data[0x3c..0x40].try_into().unwrap_or_default())
+                        as usize;
+                    pe_off + 4 <= data.len() && &data[pe_off..pe_off + 4] == b"PE\0\0"
+                } else {
+                    false
+                };
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "embeddedPackage:peBinary".into(),
+                    format!(
+                        "Embedded OLE package is a disguised Windows PE executable binary (size: {} bytes, verified_pe: {})",
+                        data.len(),
+                        pe_valid
+                    ),
+                ));
+            }
+
+            let s = String::from_utf8_lossy(data);
+            let s_lower = s.to_ascii_lowercase();
+            if s_lower.starts_with("@echo off")
+                || s_lower.contains("powershell -enc")
+                || s_lower.contains("powershell.exe")
+                || s_lower.contains("cmd.exe /c")
+                || s_lower.contains("wscript.createobject")
+                || s_lower.contains("wscript.shell")
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "embeddedPackage:stagedScript".into(),
+                    "Embedded OLE package contains disguised script or shell execution payload"
+                        .into(),
+                ));
+            }
+        }
+
+        for ext in &[
+            ".exe", ".scr", ".hta", ".vbs", ".js", ".bat", ".cmd", ".ps1", ".cpl", ".msi", ".jar",
+            ".lnk",
+        ] {
+            if name_lower.ends_with(ext) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "embeddedPackage:executableExtension".into(),
+                    format!(
+                        "Disguised executable or script embedded in document package directory: '{ext}'"
+                    ),
+                ));
+            }
+        }
+
+        if name_lower.ends_with(".rels") {
+            let s = String::from_utf8_lossy(data);
+            let s_lower = s.to_ascii_lowercase();
+
+            if s_lower.contains("relationships/oleobject")
+                || s_lower.contains("relationships/package")
+            {
+                for (i, w) in data.windows(2).enumerate() {
+                    if (w == b"\\\\" || w == b"//") && i + 4 < data.len() {
+                        let rest = &data[i..];
+                        let end = rest
+                            .iter()
+                            .position(|&b| {
+                                b == 0
+                                    || b == b' '
+                                    || b == b'"'
+                                    || b == b'\''
+                                    || b == b'<'
+                                    || b == b'>'
+                                    || b == b'\r'
+                                    || b == b'\n'
+                            })
+                            .unwrap_or(rest.len().min(128));
+                        if let Some(unc) = (end > 4)
+                            .then(|| std::str::from_utf8(&rest[..end]).ok())
+                            .flatten()
+                            .filter(|u| u.contains('\\') || u.contains('/'))
+                        {
+                            results.push((
+                                "High",
+                                entry_name.to_string(),
+                                "embeddedPackage:uncCoercion".into(),
+                                format!(
+                                    "Embedded OLE relationship targets external UNC path '{unc}' (NTLM coercion vector)"
+                                ),
+                            ));
+                            break;
+                        }
+                    }
+                }
+
+                for proto in &[
+                    "ms-msdt:",
+                    "search-ms:",
+                    "mhtml:",
+                    "ms-appinstaller:",
+                    "file:////",
+                    "javascript:",
+                    "vbscript:",
+                ] {
+                    if s_lower.contains(proto) {
+                        results.push((
+                            "Critical",
+                            entry_name.to_string(),
+                            "embeddedPackage:dangerousProtocol".into(),
+                            format!(
+                                "Embedded OLE relationship targets dangerous URI scheme '{proto}'"
+                            ),
+                        ));
+                    }
+                }
+
+                for ext in &[
+                    ".exe\"", ".dll\"", ".bat\"", ".cmd\"", ".ps1\"", ".vbs\"", ".js\"", ".hta\"",
+                    ".cpl\"", ".scr\"", ".msi\"",
+                ] {
+                    if s_lower.contains(ext) {
+                        results.push((
+                            "Critical",
+                            entry_name.to_string(),
+                            "embeddedPackage:executableTarget".into(),
+                            format!("Embedded OLE relationship targets executable payload '{ext}'"),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if name_lower.ends_with(".xml")
+            && (name_lower.contains("document") || name_lower.contains("slide"))
+        {
+            let s = String::from_utf8_lossy(data);
+            let s_lower = s.to_ascii_lowercase();
+
+            if (s_lower.contains("updatemode=\"always\"") || s_lower.contains("autoload=\"true\""))
+                && (s_lower.contains("oleobject")
+                    || s_lower.contains("oleobj")
+                    || s_lower.contains("progid=\"package\""))
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "embeddedPackage:autoActivate".into(),
+                    "Auto-activating embedded OLE object configured to execute on document load"
+                        .into(),
+                ));
+            }
+        }
+
+        results
+    }
+
+    fn scan_excel_external_book_and_sheet_path_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let name_lower = entry_name.to_ascii_lowercase();
+
+        if name_lower.ends_with(".rels") {
+            let s = String::from_utf8_lossy(data);
+            let s_lower = s.to_ascii_lowercase();
+
+            for (i, w) in data.windows(2).enumerate() {
+                if (w == b"\\\\" || w == b"//") && i + 4 < data.len() {
+                    let rest = &data[i..];
+                    let end = rest
+                        .iter()
+                        .position(|&b| {
+                            b == 0
+                                || b == b' '
+                                || b == b'"'
+                                || b == b'\''
+                                || b == b'<'
+                                || b == b'>'
+                                || b == b'\r'
+                                || b == b'\n'
+                        })
+                        .unwrap_or(rest.len().min(128));
+                    if let Some(unc) = (end > 4)
+                        .then(|| std::str::from_utf8(&rest[..end]).ok())
+                        .flatten()
+                        .filter(|u| u.contains('\\') || u.contains('/'))
+                    {
+                        results.push((
+                            "High",
+                            entry_name.to_string(),
+                            "externalBook:uncCoercion".into(),
+                            format!(
+                                "External workbook relationship references remote UNC path '{unc}' (NTLM coercion vector)"
+                            ),
+                        ));
+                        break;
+                    }
+                }
+            }
+
+            for proto in &[
+                "ms-msdt:",
+                "search-ms:",
+                "mhtml:",
+                "ms-appinstaller:",
+                "file:////",
+                "powershell:",
+                "cmd:",
+            ] {
+                if s_lower.contains(proto) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "externalBook:dangerousProtocol".into(),
+                        format!(
+                            "External workbook relationship references dangerous URI scheme '{proto}'"
+                        ),
+                    ));
+                }
+            }
+
+            for ext in &[
+                ".exe\"", ".dll\"", ".bat\"", ".cmd\"", ".ps1\"", ".vbs\"", ".js\"", ".hta\"",
+                ".cpl\"", ".scr\"", ".msi\"",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "externalBook:executableTarget".into(),
+                        format!(
+                            "External workbook relationship references executable target '{ext}'"
+                        ),
+                    ));
+                }
+            }
+        } else {
+            let s = String::from_utf8_lossy(data);
+            let s_lower = s.to_ascii_lowercase();
+
+            for dde_pat in &[
+                "=cmd|",
+                "=powershell|",
+                "=mshta|",
+                "=certutil|",
+                "dde(",
+                "dde.execute(",
+            ] {
+                if s_lower.contains(dde_pat) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "externalBook:cloakedDde".into(),
+                        format!(
+                            "External workbook defined names contain cloaked DDE execution formula '{dde_pat}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+
+            'b64: for marker in &["tvqq", "tvoa", "tvpb", "tvpq"] {
+                let mut pos = 0;
+                while let Some(idx) = s_lower[pos..].find(marker) {
+                    let abs = pos + idx;
+                    let candidate = &s[abs..];
+                    let b64_len = candidate
+                        .bytes()
+                        .take_while(|b| {
+                            b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/' || *b == b'='
+                        })
+                        .count();
+                    if b64_len >= 64 {
+                        results.push((
+                            "Critical",
+                            entry_name.to_string(),
+                            "externalBook:base64PePayload".into(),
+                            format!(
+                                "External workbook cached dataset contains smuggled Base64 Windows PE binary (length: {b64_len} chars)"
+                            ),
+                        ));
+                        break 'b64;
+                    }
+                    pos = abs + 4;
+                }
+            }
+
+            if s_lower.contains("4d5a9000")
+                || (s_lower.contains("4d5a")
+                    && s_lower.contains("this program cannot be run in dos mode"))
+            {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "externalBook:hexPePayload".into(),
+                    "External workbook cached dataset contains hex-encoded Windows PE executable binary header".into(),
+                ));
+            }
+
+            for cmd in &[
+                "powershell",
+                "cmd.exe",
+                "wscript.exe",
+                "cscript.exe",
+                "mshta",
+                "rundll32",
+                "certutil",
+                "regsvr32",
+            ] {
+                if s_lower.contains(cmd) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "externalBook:stagedCommand".into(),
+                        format!(
+                            "External workbook cached dataset contains staged shell execution command '{cmd}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+
+            for (i, w) in data.windows(2).enumerate() {
+                if (w == b"\\\\" || w == b"//") && i + 4 < data.len() {
+                    let rest = &data[i..];
+                    let end = rest
+                        .iter()
+                        .position(|&b| {
+                            b == 0
+                                || b == b' '
+                                || b == b'"'
+                                || b == b'\''
+                                || b == b'<'
+                                || b == b'>'
+                                || b == b'\r'
+                                || b == b'\n'
+                        })
+                        .unwrap_or(rest.len().min(128));
+                    if let Some(unc) = (end > 4)
+                        .then(|| std::str::from_utf8(&rest[..end]).ok())
+                        .flatten()
+                        .filter(|u| u.contains('\\') || u.contains('/'))
+                    {
+                        results.push((
+                            "High",
+                            entry_name.to_string(),
+                            "externalBook:uncCoercion".into(),
+                            format!(
+                                "External workbook definition references remote UNC path '{unc}' (NTLM coercion vector)"
+                            ),
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -7719,6 +8321,98 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "ExcelDataModelOrFormulaCacheAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Excel PivotCache and Definition Anomaly (VBA-CELL-065)
+        let is_pivot_cache_candidate = name_lower.contains("pivotcache")
+            || name_lower.contains("pivottable")
+            || (name_lower.contains("pivot")
+                && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels")));
+        if is_pivot_cache_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_excel_pivot_cache_and_definition_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Excel PivotCache or definition anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "PivotCache".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "ExcelPivotCacheOrDefinitionAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word & PowerPoint Embedded Package Anomaly (VBA-CELL-066)
+        let is_embedded_package_candidate = name_lower.contains("/embeddings/")
+            || name_lower.contains("/embedding/")
+            || name_lower.starts_with("embeddings/")
+            || name_lower.starts_with("word/embeddings/")
+            || name_lower.starts_with("ppt/embeddings/")
+            || ((name_lower.contains("oleobject") || name_lower.contains("package"))
+                && (name_lower.ends_with(".bin") || name_lower.ends_with(".rels")))
+            || (name_lower.ends_with(".rels")
+                && (name_lower.contains("document") || name_lower.contains("slide")))
+            || (name_lower.ends_with(".xml")
+                && (name_lower.contains("document") || name_lower.contains("slide")));
+        if is_embedded_package_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_word_powerpoint_embedded_package_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Word or PowerPoint embedded package anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "EmbeddedPackage".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "WordOrPowerPointEmbeddedPackageAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Excel External Workbook & Sheet Path Anomaly (VBA-CELL-067)
+        let is_external_link_candidate = name_lower.contains("externallink")
+            || (name_lower.contains("externallinks") && name_lower.ends_with(".rels"));
+        if is_external_link_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_excel_external_book_and_sheet_path_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Excel external workbook or sheet path anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "ExternalBook".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "ExcelExternalBookOrSheetPathAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,

@@ -3142,6 +3142,18 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         | "ExcelDataModelAnomaly"
         | "DataModelAnomaly"
         | "FormulaCacheAnomaly" => ("VBA-CELL-064", "error"),
+        "ExcelPivotCacheOrDefinitionAnomaly"
+        | "ExcelPivotCacheDefinitionAnomaly"
+        | "PivotCacheDefinitionAnomaly"
+        | "PivotTableDefinitionAnomaly" => ("VBA-CELL-065", "error"),
+        "WordOrPowerPointEmbeddedPackageAnomaly"
+        | "WordEmbeddedPackageAnomaly"
+        | "PowerPointEmbeddedPackageAnomaly"
+        | "EmbeddedPackageAnomaly" => ("VBA-CELL-066", "error"),
+        "ExcelExternalBookOrSheetPathAnomaly"
+        | "ExcelExternalBookAnomaly"
+        | "ExternalBookAnomaly"
+        | "SheetPathAnomaly" => ("VBA-CELL-067", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3383,7 +3395,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-063\",\"name\":\"WordHeaderFooterOrWatermarkAnomaly\",\"shortDescription\":{\"text\":\"Word Header, Footer, and Watermark Anomaly\"},\"fullDescription\":{\"text\":\"Word headers, footers, watermarks, or their relationships configure remote UNC paths enabling NTLM credential coercion, dangerous exploit URI schemes, executable or script targets, shell commands, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-064\",\"name\":\"ExcelDataModelOrFormulaCacheAnomaly\",\"shortDescription\":{\"text\":\"Excel DataModel and Shared Formula Cache Anomaly\"},\"fullDescription\":{\"text\":\"Excel DataModel definitions or worksheet shared formula caches contain remote UNC connections enabling NTLM credential coercion, database command execution strings, XXE declarations, cloaked DDE execution, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-064\",\"name\":\"ExcelDataModelOrFormulaCacheAnomaly\",\"shortDescription\":{\"text\":\"Excel DataModel and Shared Formula Cache Anomaly\"},\"fullDescription\":{\"text\":\"Excel DataModel definitions or worksheet shared formula caches contain remote UNC connections enabling NTLM credential coercion, database command execution strings, XXE declarations, cloaked DDE execution, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-065\",\"name\":\"ExcelPivotCacheOrDefinitionAnomaly\",\"shortDescription\":{\"text\":\"Excel PivotCache and Definition Anomaly\"},\"fullDescription\":{\"text\":\"Excel PivotCache definitions, records, or relationships configure remote UNC connection targets enabling NTLM credential coercion, database command execution strings, dangerous exploit URI schemes, cloaked DDE execution, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-066\",\"name\":\"WordOrPowerPointEmbeddedPackageAnomaly\",\"shortDescription\":{\"text\":\"Word and PowerPoint Embedded Package Anomaly\"},\"fullDescription\":{\"text\":\"Word or PowerPoint embedded packages, OLE binary streams, or auto-activation directives disguise Windows PE executables, staged shell scripts, remote UNC paths, dangerous exploit URI schemes, or auto-activating OLE handlers.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-067\",\"name\":\"ExcelExternalBookOrSheetPathAnomaly\",\"shortDescription\":{\"text\":\"Excel External Workbook and Sheet Path Anomaly\"},\"fullDescription\":{\"text\":\"Excel external workbook links, relationships, or cached datasets configure remote UNC workbook paths enabling NTLM credential coercion, dangerous exploit URI schemes, cloaked DDE execution in defined names, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));
