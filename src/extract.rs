@@ -667,6 +667,16 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("atanh")
                 || f_lower.contains("sqrtpi")
                 || f_lower.contains("sumsq")
+                || f_lower.contains("sec")
+                || f_lower.contains("csc")
+                || f_lower.contains("cot")
+                || f_lower.contains("sech")
+                || f_lower.contains("csch")
+                || f_lower.contains("coth")
+                || f_lower.contains("acot")
+                || f_lower.contains("acoth")
+                || f_lower.contains("mmult")
+                || f_lower.contains("munit")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -5224,6 +5234,397 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_xmlmaps_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        // 1. Remote UNC paths in SchemaRef, schemaLocation, targetNamespace, RootElement, or table column XPath
+        if s_lower.contains(r"\\") {
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find(r"\\") {
+                let actual = search_idx + pos;
+                let rem = &s_lower[actual + 2..];
+                if let Some(first_char) = rem.chars().next()
+                    && (first_char.is_ascii_alphanumeric()
+                        || first_char == '.'
+                        || first_char == '[')
+                    && rem.contains('\\')
+                {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "xmlMap:uncPath".into(),
+                        "Excel XML Map or Table definition contains remote UNC path enabling NTLM credential coercion".into(),
+                    ));
+                    break;
+                }
+                search_idx = actual + 2;
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes / protocols
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "ms-appinstaller:",
+            "mhtml:",
+            "javascript:",
+            "powershell:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    format!("xmlMap:dangerousProtocol:{}", proto.trim_end_matches(':')),
+                    format!("Excel XML Map or Table definition contains dangerous exploit URI scheme '{proto}'"),
+                ));
+                break;
+            }
+        }
+
+        // 3. XXE / DTD entity declarations in embedded schema
+        if s_lower.contains("<!doctype") || s_lower.contains("<!entity") {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "xmlMap:xxeDtdDeclaration".into(),
+                "Excel XML Map embedded schema contains DTD or XML entity declaration enabling XXE injection".into(),
+            ));
+        }
+
+        // 4. Smuggled Base64 PE binary or shell commands in schema annotation / documentation
+        if s_lossy.contains("TVqQ") || s_lower.contains("this program cannot be run in dos mode") {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "xmlMap:smuggledBinary".into(),
+                "Excel XML Map contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        for cmd in &[
+            "xp_cmdshell",
+            "sp_oacreate",
+            "openrowset",
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "xmlMap:commandExecution".into(),
+                    format!("Excel XML Map or Table column binding contains shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 5. Table column XML bindings with XPath external document resolution
+        if (s_lower.contains("document(") || s_lower.contains("doc("))
+            && (s_lower.contains("xpath=") || s_lower.contains("xmlcolumnpr"))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "xmlMap:xpathSsrf".into(),
+                "Excel Table XML column binding contains XPath external document resolution function (SSRF or NTLM coercion vector)".into(),
+            ));
+        }
+
+        // 6. External relationship targets in xmlMaps/tables .rels
+        if entry_name.contains("_rels") && s_lower.contains("targetmode=\"external\"") {
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find("target=\"") {
+                let actual = search_idx + pos + 8;
+                if let Some(end_quote) = s_lower[actual..].find('"') {
+                    let target = &s_lossy[actual..actual + end_quote];
+                    let t_lower = target.to_ascii_lowercase();
+                    if t_lower.starts_with(r"\\") {
+                        results.push((
+                            "Critical",
+                            target.to_string(),
+                            "xmlMap:uncRelationship".into(),
+                            format!("Excel XML Map relationship references remote UNC path '{target}' (NTLM coercion vector)"),
+                        ));
+                        break;
+                    }
+                    if t_lower.ends_with(".exe")
+                        || t_lower.ends_with(".bat")
+                        || t_lower.ends_with(".vbs")
+                        || t_lower.ends_with(".ps1")
+                        || t_lower.ends_with(".hta")
+                    {
+                        results.push((
+                            "Critical",
+                            target.to_string(),
+                            "xmlMap:executableRelationship".into(),
+                            format!("Excel XML Map relationship references executable or script payload '{target}'"),
+                        ));
+                        break;
+                    }
+                }
+                search_idx = actual;
+            }
+        }
+
+        results
+    }
+
+    fn scan_comment_annotation_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        // 1. Remote UNC paths in comments (NTLM coercion)
+        if s_lower.contains(r"\\") {
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find(r"\\") {
+                let actual = search_idx + pos;
+                let rem = &s_lower[actual + 2..];
+                if let Some(first_char) = rem.chars().next()
+                    && (first_char.is_ascii_alphanumeric()
+                        || first_char == '.'
+                        || first_char == '[')
+                    && rem.contains('\\')
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "comment:uncPath".into(),
+                        "Document comment or modern annotation contains remote UNC path enabling NTLM credential coercion".into(),
+                    ));
+                    break;
+                }
+                search_idx = actual + 2;
+            }
+        }
+
+        // 2. Exploit protocols in comments or comment relationships
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "ms-appinstaller:",
+            "mhtml:",
+            "javascript:",
+            "powershell:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    format!("comment:dangerousProtocol:{}", proto.trim_end_matches(':')),
+                    format!("Document comment or relationship references dangerous exploit URI scheme '{proto}'"),
+                ));
+                break;
+            }
+        }
+
+        // 3. Smuggled Base64 PE binary in comments
+        if s_lossy.contains("TVqQ") || s_lower.contains("this program cannot be run in dos mode") {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "comment:smuggledBinary".into(),
+                "Document comment contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        // 4. Shell execution commands in comments
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+            "bitsadmin",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "comment:shellCommand".into(),
+                    format!("Document comment contains shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 5. Executable or script targets in comment relationship files
+        if entry_name.contains("_rels") && s_lower.contains("targetmode=\"external\"") {
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find("target=\"") {
+                let actual = search_idx + pos + 8;
+                if let Some(end_quote) = s_lower[actual..].find('"') {
+                    let target = &s_lossy[actual..actual + end_quote];
+                    let t_lower = target.to_ascii_lowercase();
+                    if t_lower.starts_with(r"\\") {
+                        results.push((
+                            "High",
+                            target.to_string(),
+                            "comment:uncRelationship".into(),
+                            format!("Comment relationship references remote UNC path '{target}' (NTLM coercion vector)"),
+                        ));
+                        break;
+                    }
+                    if t_lower.ends_with(".exe")
+                        || t_lower.ends_with(".bat")
+                        || t_lower.ends_with(".vbs")
+                        || t_lower.ends_with(".ps1")
+                        || t_lower.ends_with(".hta")
+                        || t_lower.ends_with(".lnk")
+                    {
+                        results.push((
+                            "Critical",
+                            target.to_string(),
+                            "comment:executableRelationship".into(),
+                            format!("Comment relationship references executable or script payload '{target}'"),
+                        ));
+                        break;
+                    }
+                }
+                search_idx = actual;
+            }
+        }
+
+        results
+    }
+
+    fn scan_theme_font_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lossy = String::from_utf8_lossy(data);
+        let s_lower = s_lossy.to_ascii_lowercase();
+
+        // 1. Remote UNC paths in theme typeface declarations (NTLM coercion / DirectWrite exploit vector)
+        if (s_lower.contains("typeface=\"\\\\")
+            || s_lower.contains("typeface='\\\\")
+            || s_lower.contains("typeface=\"//")
+            || s_lower.contains("typeface='//"))
+            || (s_lower.contains("typeface=") && s_lower.contains(r"\\"))
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "theme:uncTypeface".into(),
+                "Office theme declares font typeface with remote UNC path enabling NTLM credential coercion or font engine exploitation".into(),
+            ));
+        }
+
+        // 2. Dangerous exploit URI schemes / protocols in themes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "ms-appinstaller:",
+            "mhtml:",
+            "javascript:",
+            "powershell:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    format!("theme:dangerousProtocol:{}", proto.trim_end_matches(':')),
+                    format!("Office theme or relationship references dangerous exploit URI scheme '{proto}'"),
+                ));
+                break;
+            }
+        }
+
+        // 3. External theme relationships linking to remote HTTP/HTTPS/SMB target URLs
+        if entry_name.contains("_rels") && s_lower.contains("targetmode=\"external\"") {
+            let mut search_idx = 0;
+            while let Some(pos) = s_lower[search_idx..].find("target=\"") {
+                let actual = search_idx + pos + 8;
+                if let Some(end_quote) = s_lower[actual..].find('"') {
+                    let target = &s_lossy[actual..actual + end_quote];
+                    let t_lower = target.to_ascii_lowercase();
+                    if t_lower.starts_with(r"\\") {
+                        results.push((
+                            "Critical",
+                            target.to_string(),
+                            "theme:uncRelationship".into(),
+                            format!("Theme relationship references remote UNC path '{target}' (NTLM coercion vector)"),
+                        ));
+                        break;
+                    }
+                    if t_lower.starts_with("http://") || t_lower.starts_with("https://") {
+                        results.push((
+                            "Critical",
+                            target.to_string(),
+                            "theme:remoteTemplateInjection".into(),
+                            format!("Theme relationship references external remote template or theme '{target}'"),
+                        ));
+                        break;
+                    }
+                    if t_lower.ends_with(".exe")
+                        || t_lower.ends_with(".bat")
+                        || t_lower.ends_with(".vbs")
+                        || t_lower.ends_with(".ps1")
+                        || t_lower.ends_with(".hta")
+                    {
+                        results.push((
+                            "Critical",
+                            target.to_string(),
+                            "theme:executableRelationship".into(),
+                            format!("Theme relationship references executable or script payload '{target}'"),
+                        ));
+                        break;
+                    }
+                }
+                search_idx = actual;
+            }
+        }
+
+        // 4. Smuggled Base64 PE binary or shell commands in theme
+        if s_lossy.contains("TVqQ") || s_lower.contains("this program cannot be run in dos mode") {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "theme:smuggledBinary".into(),
+                "Office theme contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "theme:shellCommand".into(),
+                    format!("Office theme contains shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -5823,6 +6224,83 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "CustomXmlDataBindingOrXPathAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for XML Maps & Schema Definition Anomaly (VBA-CELL-053)
+        let is_xmlmaps_candidate = name_lower.contains("xmlmap")
+            || (name_lower.contains("table")
+                && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels")));
+        if is_xmlmaps_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in scan_xmlmaps_threats(&entry.name, data) {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Excel XML Map or Schema definition anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "XmlMap".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "XmlMapsOrSchemaDefinitionAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Document Comment & Modern Annotation Anomaly (VBA-CELL-054)
+        let is_comment_candidate = name_lower.contains("comment");
+        if is_comment_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_comment_annotation_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Document Comment or Annotation anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Comment".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "CommentAnnotationOrAuthorAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Office Theme Font & Effect Coercion Anomaly (VBA-CELL-055)
+        let is_theme_candidate = name_lower.contains("theme");
+        if is_theme_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in scan_theme_font_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Office Theme Font or Effect coercion anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "Theme".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "ThemeFontOrEffectCoercionAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,

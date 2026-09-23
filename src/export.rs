@@ -3101,6 +3101,15 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "CustomXmlDataBindingOrXPathAnomaly" | "CustomXmlDataBindingAnomaly" | "XPathAnomaly" => {
             ("VBA-CELL-052", "error")
         }
+        "XmlMapsOrSchemaDefinitionAnomaly" | "XmlMapAnomaly" | "XmlMapsAnomaly" => {
+            ("VBA-CELL-053", "error")
+        }
+        "CommentAnnotationOrAuthorAnomaly" | "CommentAnomaly" | "ThreadedCommentAnomaly" => {
+            ("VBA-CELL-054", "error")
+        }
+        "ThemeFontOrEffectCoercionAnomaly" | "ThemeAnomaly" | "ThemeFontAnomaly" => {
+            ("VBA-CELL-055", "error")
+        }
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3306,7 +3315,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-051\",\"name\":\"BibliographyOrCitationAnomaly\",\"shortDescription\":{\"text\":\"Word Bibliography or Citation Anomaly\"},\"fullDescription\":{\"text\":\"Word Bibliography definitions or citation fields contain remote UNC paths for NTLM credential coercion, exploit protocol handlers, shell execution commands, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-052\",\"name\":\"CustomXmlDataBindingOrXPathAnomaly\",\"shortDescription\":{\"text\":\"Custom XML Data Binding or XPath Anomaly\"},\"fullDescription\":{\"text\":\"Custom XML data binding or Structured Document Tag (SDT) XPath queries contain external document resolution (SSRF/NTLM coercion), command injection, or remote UNC namespace mappings.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-052\",\"name\":\"CustomXmlDataBindingOrXPathAnomaly\",\"shortDescription\":{\"text\":\"Custom XML Data Binding or XPath Anomaly\"},\"fullDescription\":{\"text\":\"Custom XML data binding or Structured Document Tag (SDT) XPath queries contain external document resolution (SSRF/NTLM coercion), command injection, or remote UNC namespace mappings.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-053\",\"name\":\"XmlMapsOrSchemaDefinitionAnomaly\",\"shortDescription\":{\"text\":\"Excel XML Map or Schema Definition Anomaly\"},\"fullDescription\":{\"text\":\"Excel XML Map definitions or table XML column bindings configure remote UNC schema locations, XXE DTD entity declarations, exploit protocol handlers, or smuggled executable payloads.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-054\",\"name\":\"CommentAnnotationOrAuthorAnomaly\",\"shortDescription\":{\"text\":\"Comment, Modern Annotation, or Author Anomaly\"},\"fullDescription\":{\"text\":\"Document comment parts or relationships contain remote UNC paths for NTLM credential coercion, exploit protocol handlers, shell execution commands, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-055\",\"name\":\"ThemeFontOrEffectCoercionAnomaly\",\"shortDescription\":{\"text\":\"Theme Font or Effect Coercion Anomaly\"},\"fullDescription\":{\"text\":\"Theme definitions configure remote UNC font typeface paths enabling NTLM credential coercion or font engine exploits, external theme relationships, or smuggled payloads.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));
