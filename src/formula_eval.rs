@@ -2651,7 +2651,7 @@ impl Evaluator<'_> {
                     Err(_) => Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into()))),
                 }
             }
-            "imconjg" if arguments.len() == 1 => {
+            "imconjg" | "imconjugate" if arguments.len() == 1 => {
                 let val = self.eval_scalar(&arguments[0], depth + 1)?;
                 if let FormulaValue::Error(e) = val {
                     return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
@@ -3345,6 +3345,107 @@ impl Evaluator<'_> {
                 match gamma_f64(n) {
                     Ok(res) => Ok(EvalValue::Scalar(FormulaValue::Number(res))),
                     Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                }
+            }
+            "imargument" if arguments.len() == 1 => {
+                let v = self.eval_scalar(&arguments[0], depth + 1)?;
+                if let FormulaValue::Error(e) = v {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error(e)));
+                }
+                match parse_complex(&v) {
+                    Ok((x, y)) => {
+                        if x == 0.0 && y == 0.0 {
+                            Ok(EvalValue::Scalar(FormulaValue::Error("#DIV/0!".into())))
+                        } else {
+                            let theta = y.atan2(x);
+                            Ok(EvalValue::Scalar(FormulaValue::Number(theta)))
+                        }
+                    }
+                    Err(_) => Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into()))),
+                }
+            }
+            "erf" if arguments.len() == 1 || arguments.len() == 2 => {
+                let lower = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if arguments.len() == 2 {
+                    let upper = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                    let res = erf_f64(upper) - erf_f64(lower);
+                    Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(erf_f64(lower))))
+                }
+            }
+            "erf.precise" if arguments.len() == 1 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(FormulaValue::Number(erf_f64(x))))
+            }
+            "erfc" if arguments.len() == 1 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if x < 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(1.0 - erf_f64(x))))
+                }
+            }
+            "erfc.precise" if arguments.len() == 1 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                Ok(EvalValue::Scalar(FormulaValue::Number(1.0 - erf_f64(x))))
+            }
+            "gauss" if arguments.len() == 1 => {
+                let z = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let res = 0.5 * erf_f64(z / std::f64::consts::SQRT_2);
+                Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+            }
+            "phi" if arguments.len() == 1 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let res = (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt();
+                Ok(EvalValue::Scalar(FormulaValue::Number(res)))
+            }
+            "besselj" if arguments.len() == 2 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let n = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc();
+                if !(0.0..=100.0).contains(&n) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    match besselj_f64(x, n as u32) {
+                        Ok(res) => Ok(EvalValue::Scalar(FormulaValue::Number(res))),
+                        Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    }
+                }
+            }
+            "besseli" if arguments.len() == 2 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let n = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc();
+                if !(0.0..=100.0).contains(&n) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    match besseli_f64(x, n as u32) {
+                        Ok(res) => Ok(EvalValue::Scalar(FormulaValue::Number(res))),
+                        Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    }
+                }
+            }
+            "bessely" if arguments.len() == 2 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let n = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc();
+                if x <= 0.0 || !(0.0..=100.0).contains(&n) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    match bessely_f64(x, n as u32) {
+                        Ok(res) => Ok(EvalValue::Scalar(FormulaValue::Number(res))),
+                        Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    }
+                }
+            }
+            "besselk" if arguments.len() == 2 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let n = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.trunc();
+                if x <= 0.0 || !(0.0..=100.0).contains(&n) {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    match besselk_f64(x, n as u32) {
+                        Ok(res) => Ok(EvalValue::Scalar(FormulaValue::Number(res))),
+                        Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
+                    }
                 }
             }
             "sumxmy2" | "sumx2my2" | "sumx2py2" if arguments.len() == 2 => {
@@ -6146,6 +6247,219 @@ fn gamma_f64(x: f64) -> Result<f64, &'static str> {
             Ok(res)
         }
     }
+}
+
+fn erf_f64(x: f64) -> f64 {
+    if !x.is_finite() {
+        return x;
+    }
+    if x == 0.0 {
+        return 0.0;
+    }
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let ax = x.abs();
+    if ax >= 6.0 {
+        return sign;
+    }
+    let x2 = ax * ax;
+    let two_x2 = 2.0 * x2;
+    let mut sum = 1.0f64;
+    let mut term = 1.0f64;
+    for m in 1..=100 {
+        term *= two_x2 / ((2 * m + 1) as f64);
+        sum += term;
+        if term < sum * 1e-16 {
+            break;
+        }
+    }
+    let factor = 2.0 / std::f64::consts::PI.sqrt() * (-x2).exp() * ax;
+    let res = (factor * sum).min(1.0);
+    sign * res
+}
+
+fn besselj_f64(x: f64, n: u32) -> Result<f64, &'static str> {
+    if !x.is_finite() {
+        return Err("#NUM!");
+    }
+    let sign = if x < 0.0 && n % 2 == 1 { -1.0 } else { 1.0 };
+    let ax = x.abs();
+    let z = ax / 2.0;
+    let mut term = 1.0f64;
+    for i in 1..=n {
+        term *= z / (i as f64);
+    }
+    let mut sum = term;
+    let z2 = z * z;
+    for m in 1..=120 {
+        term = -term * z2 / ((m as f64) * ((m + n) as f64));
+        sum += term;
+        if term.abs() < sum.abs() * 1e-16 && m > 5 {
+            break;
+        }
+    }
+    if !sum.is_finite() {
+        Err("#NUM!")
+    } else {
+        Ok(sign * sum)
+    }
+}
+
+fn besseli_f64(x: f64, n: u32) -> Result<f64, &'static str> {
+    if !x.is_finite() {
+        return Err("#NUM!");
+    }
+    let sign = if x < 0.0 && n % 2 == 1 { -1.0 } else { 1.0 };
+    let ax = x.abs();
+    let z = ax / 2.0;
+    let mut term = 1.0f64;
+    for i in 1..=n {
+        term *= z / (i as f64);
+    }
+    let mut sum = term;
+    let z2 = z * z;
+    for m in 1..=120 {
+        term = term * z2 / ((m as f64) * ((m + n) as f64));
+        sum += term;
+        if term.abs() < sum.abs() * 1e-16 && m > 5 {
+            break;
+        }
+    }
+    if !sum.is_finite() {
+        Err("#NUM!")
+    } else {
+        Ok(sign * sum)
+    }
+}
+
+fn bessely_f64(x: f64, n: u32) -> Result<f64, &'static str> {
+    if x <= 0.0 || !x.is_finite() {
+        return Err("#NUM!");
+    }
+    let z = x / 2.0;
+    let z2 = z * z;
+    const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
+    let j0 = besselj_f64(x, 0)?;
+    let j1 = besselj_f64(x, 1)?;
+
+    let mut sum0 = 0.0f64;
+    let mut term0 = 1.0f64;
+    let mut hm0 = 0.0f64;
+    for m in 1..=120 {
+        term0 = -term0 * z2 / ((m as f64) * (m as f64));
+        hm0 += 1.0 / (m as f64);
+        let cur = term0 * hm0;
+        sum0 += cur;
+        if cur.abs() < sum0.abs() * 1e-16 && m > 5 {
+            break;
+        }
+    }
+    let y0 = (2.0 / std::f64::consts::PI) * ((z.ln() + EULER_GAMMA) * j0 - sum0);
+    if n == 0 {
+        return Ok(y0);
+    }
+
+    let mut sum1 = 0.0f64;
+    let mut fact_m = 1.0f64;
+    let mut fact_m1 = 1.0f64;
+    let mut hm = 0.0f64;
+    let mut hm1 = 1.0f64;
+    let mut z_pow = z;
+    for m in 0..=120 {
+        if m > 0 {
+            fact_m *= m as f64;
+            fact_m1 *= (m + 1) as f64;
+            hm += 1.0 / (m as f64);
+            hm1 += 1.0 / ((m + 1) as f64);
+            z_pow *= z2;
+        }
+        let sign_m = if m % 2 == 1 { -1.0 } else { 1.0 };
+        let cur = sign_m * (hm + hm1) / (fact_m * fact_m1) * z_pow;
+        sum1 += cur;
+        if cur.abs() < sum1.abs() * 1e-16 && m > 5 {
+            break;
+        }
+    }
+    let y1 = (2.0 / std::f64::consts::PI) * ((z.ln() + EULER_GAMMA) * j1 - 1.0 / x - 0.5 * sum1);
+    if n == 1 {
+        return Ok(y1);
+    }
+
+    let mut prev = y0;
+    let mut curr = y1;
+    for k in 1..n {
+        let next = (2.0 * (k as f64) / x) * curr - prev;
+        if !next.is_finite() {
+            return Err("#NUM!");
+        }
+        prev = curr;
+        curr = next;
+    }
+    Ok(curr)
+}
+
+fn besselk_f64(x: f64, n: u32) -> Result<f64, &'static str> {
+    if x <= 0.0 || !x.is_finite() {
+        return Err("#NUM!");
+    }
+    let z = x / 2.0;
+    let z2 = z * z;
+    const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
+    let i0 = besseli_f64(x, 0)?;
+    let i1 = besseli_f64(x, 1)?;
+
+    let mut sum0 = 0.0f64;
+    let mut term0 = 1.0f64;
+    let mut hm0 = 0.0f64;
+    for m in 1..=120 {
+        term0 = term0 * z2 / ((m as f64) * (m as f64));
+        hm0 += 1.0 / (m as f64);
+        let cur = term0 * hm0;
+        sum0 += cur;
+        if cur.abs() < sum0.abs() * 1e-16 && m > 5 {
+            break;
+        }
+    }
+    let k0 = -(z.ln() + EULER_GAMMA) * i0 + sum0;
+    if n == 0 {
+        return Ok(k0);
+    }
+
+    let mut sum1 = 0.0f64;
+    let mut fact_m = 1.0f64;
+    let mut fact_m1 = 1.0f64;
+    let mut hm = 0.0f64;
+    let mut hm1 = 1.0f64;
+    let mut z_pow = z;
+    for m in 0..=120 {
+        if m > 0 {
+            fact_m *= m as f64;
+            fact_m1 *= (m + 1) as f64;
+            hm += 1.0 / (m as f64);
+            hm1 += 1.0 / ((m + 1) as f64);
+            z_pow *= z2;
+        }
+        let cur = (hm + hm1) / (fact_m * fact_m1) * z_pow;
+        sum1 += cur;
+        if cur.abs() < sum1.abs() * 1e-16 && m > 5 {
+            break;
+        }
+    }
+    let k1 = 1.0 / x + (z.ln() + EULER_GAMMA) * i1 - 0.5 * sum1;
+    if n == 1 {
+        return Ok(k1);
+    }
+
+    let mut prev = k0;
+    let mut curr = k1;
+    for k in 1..n {
+        let next = (2.0 * (k as f64) / x) * curr + prev;
+        if !next.is_finite() {
+            return Err("#NUM!");
+        }
+        prev = curr;
+        curr = next;
+    }
+    Ok(curr)
 }
 
 fn format_complex(mut real: f64, mut imag: f64, suffix: &str) -> String {
@@ -10358,6 +10672,87 @@ mod tests {
         assert_eq!(
             evaluate_formula(
                 "=CHAR(IMREAL(IMLOG2(8)) * 10 + IMREAL(IMLOG10(100)) * 17 + GAMMA(1))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
+        );
+    }
+
+    #[test]
+    fn evaluates_bessel_error_and_distribution_functions() {
+        let test_cells = vec![];
+
+        // IMARGUMENT & IMCONJUGATE
+        assert_eq!(
+            evaluate_formula(
+                "=IMCONJUGATE(\"3+4i\")",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("3-4i".into()))
+        );
+        let arg_val = evaluate_formula(
+            "=IMARGUMENT(\"0+1i\")",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(theta)) = arg_val {
+            assert!((theta - std::f64::consts::FRAC_PI_2).abs() < 1e-10);
+        } else {
+            panic!("Expected Number for IMARGUMENT");
+        }
+
+        // ERF & ERFC
+        assert_eq!(
+            evaluate_formula("=ERF(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ERFC(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ERF.PRECISE(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        assert_eq!(
+            evaluate_formula("=ERFC.PRECISE(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+
+        // GAUSS & PHI
+        assert_eq!(
+            evaluate_formula("=GAUSS(0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(0.0))
+        );
+        let phi_zero = evaluate_formula("=PHI(0)", None, &test_cells, Default::default()).value;
+        if let Some(FormulaValue::Number(p)) = phi_zero {
+            assert!((p - 0.398_942_280_401_432_7).abs() < 1e-10);
+        } else {
+            panic!("Expected Number for PHI(0)");
+        }
+
+        // BESSELJ, BESSELI, BESSELY, BESSELK
+        assert_eq!(
+            evaluate_formula("=BESSELJ(0, 0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+        assert_eq!(
+            evaluate_formula("=BESSELI(0, 0)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(1.0))
+        );
+
+        // De-obfuscation: CHAR(BESSELJ(0, 0) * 64 + ERFC(0)) = CHAR(65) = "A"
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(BESSELJ(0, 0) * 64 + ERFC(0))",
                 None,
                 &test_cells,
                 Default::default()
