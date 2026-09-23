@@ -3608,6 +3608,231 @@ impl Evaluator<'_> {
                     Err(e) => Ok(EvalValue::Scalar(FormulaValue::Error(e.into()))),
                 }
             }
+            "lognormdist" if arguments.len() == 3 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let mean = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let std_dev = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                if x <= 0.0 || std_dev <= 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let z = (x.ln() - mean) / std_dev;
+                let cdf = 0.5 * (1.0 + erf_f64(z / std::f64::consts::SQRT_2));
+                Ok(EvalValue::Scalar(FormulaValue::Number(cdf)))
+            }
+            "lognorm.dist" if arguments.len() == 4 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let mean = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let std_dev = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                if x <= 0.0 || std_dev <= 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let cumulative = match self.eval_scalar(&arguments[3], depth + 1)? {
+                    FormulaValue::Boolean(b) => b,
+                    FormulaValue::Number(n) => n != 0.0,
+                    _ => true,
+                };
+                let z = (x.ln() - mean) / std_dev;
+                if cumulative {
+                    let cdf = 0.5 * (1.0 + erf_f64(z / std::f64::consts::SQRT_2));
+                    Ok(EvalValue::Scalar(FormulaValue::Number(cdf)))
+                } else {
+                    let pdf =
+                        (-0.5 * z * z).exp() / (x * std_dev * (2.0 * std::f64::consts::PI).sqrt());
+                    Ok(EvalValue::Scalar(FormulaValue::Number(pdf)))
+                }
+            }
+            "poisson" | "poisson.dist" if arguments.len() == 3 => {
+                let x = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.floor();
+                let mean = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                if x < 0.0 || mean <= 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let cumulative = match self.eval_scalar(&arguments[2], depth + 1)? {
+                    FormulaValue::Boolean(b) => b,
+                    FormulaValue::Number(n) => n != 0.0,
+                    _ => true,
+                };
+                let k = x as u64;
+                if cumulative {
+                    let mut sum = 0.0;
+                    let mut term = (-mean).exp();
+                    sum += term;
+                    for i in 1..=k {
+                        term *= mean / (i as f64);
+                        sum += term;
+                    }
+                    Ok(EvalValue::Scalar(FormulaValue::Number(sum.min(1.0))))
+                } else {
+                    let mut term = (-mean).exp();
+                    for i in 1..=k {
+                        term *= mean / (i as f64);
+                    }
+                    Ok(EvalValue::Scalar(FormulaValue::Number(term)))
+                }
+            }
+            "binomdist" | "binom.dist" if arguments.len() == 4 => {
+                let k_num = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?.floor();
+                let n_num = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?.floor();
+                let p = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                if k_num < 0.0 || n_num < 0.0 || k_num > n_num || !(0.0..=1.0).contains(&p) {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let cumulative = match self.eval_scalar(&arguments[3], depth + 1)? {
+                    FormulaValue::Boolean(b) => b,
+                    FormulaValue::Number(n) => n != 0.0,
+                    _ => true,
+                };
+                let k = k_num as u64;
+                let n = n_num as u64;
+                let pmf = |i: u64| -> f64 {
+                    if p == 0.0 {
+                        if i == 0 { 1.0 } else { 0.0 }
+                    } else if p == 1.0 {
+                        if i == n { 1.0 } else { 0.0 }
+                    } else {
+                        let ln_comb = gammaln_f64((n + 1) as f64).unwrap_or(0.0)
+                            - gammaln_f64((i + 1) as f64).unwrap_or(0.0)
+                            - gammaln_f64((n - i + 1) as f64).unwrap_or(0.0);
+                        (ln_comb + (i as f64) * p.ln() + ((n - i) as f64) * (1.0 - p).ln()).exp()
+                    }
+                };
+                if cumulative {
+                    let mut sum = 0.0;
+                    for i in 0..=k {
+                        sum += pmf(i);
+                    }
+                    Ok(EvalValue::Scalar(FormulaValue::Number(sum.min(1.0))))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(pmf(k))))
+                }
+            }
+            "sln" if arguments.len() == 3 => {
+                let cost = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let salvage = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let life = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                if life <= 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(
+                        (cost - salvage) / life,
+                    )))
+                }
+            }
+            "syd" if arguments.len() == 4 => {
+                let cost = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let salvage = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let life = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let per = to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?;
+                if life <= 0.0 || per < 1.0 || per > life {
+                    Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())))
+                } else {
+                    let val = (cost - salvage) * (life - per + 1.0) * 2.0 / (life * (life + 1.0));
+                    Ok(EvalValue::Scalar(FormulaValue::Number(val)))
+                }
+            }
+            "npv" if arguments.len() >= 2 => {
+                let rate = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                if rate <= -1.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let mut sum = 0.0;
+                let mut t = 1;
+                for arg in &arguments[1..] {
+                    match self.evaluate(arg, depth + 1)? {
+                        EvalValue::Scalar(val) => {
+                            if let Ok(n) = to_number(&val) {
+                                sum += n / (1.0 + rate).powi(t);
+                                t += 1;
+                            }
+                        }
+                        EvalValue::Range { values, .. } => {
+                            for c in values {
+                                if let Ok(n) = to_number(&c) {
+                                    sum += n / (1.0 + rate).powi(t);
+                                    t += 1;
+                                }
+                            }
+                        }
+                        EvalValue::Lambda { .. } => {}
+                    }
+                }
+                Ok(EvalValue::Scalar(FormulaValue::Number(sum)))
+            }
+            "pv" if (3..=5).contains(&arguments.len()) => {
+                let rate = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let nper = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let pmt = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let fv = if arguments.len() >= 4 {
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?
+                } else {
+                    0.0
+                };
+                let pmt_type = if arguments.len() == 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)? != 0.0
+                } else {
+                    false
+                };
+                if rate == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(-(fv + pmt * nper))))
+                } else {
+                    let type_flag = if pmt_type { 1.0 } else { 0.0 };
+                    let factor = (1.0 + rate).powf(nper);
+                    let annuity_factor = (1.0 + rate * type_flag) * (factor - 1.0) / rate;
+                    let pv = -(fv + pmt * annuity_factor) / factor;
+                    Ok(EvalValue::Scalar(FormulaValue::Number(pv)))
+                }
+            }
+            "fv" if (3..=5).contains(&arguments.len()) => {
+                let rate = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let nper = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let pmt = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                let pv = if arguments.len() >= 4 {
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?
+                } else {
+                    0.0
+                };
+                let pmt_type = if arguments.len() == 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)? != 0.0
+                } else {
+                    false
+                };
+                if rate == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(-(pv + pmt * nper))))
+                } else {
+                    let type_flag = if pmt_type { 1.0 } else { 0.0 };
+                    let factor = (1.0 + rate).powf(nper);
+                    let annuity_factor = (1.0 + rate * type_flag) * (factor - 1.0) / rate;
+                    let fv = -pv * factor - pmt * annuity_factor;
+                    Ok(EvalValue::Scalar(FormulaValue::Number(fv)))
+                }
+            }
+            "pmt" if (3..=5).contains(&arguments.len()) => {
+                let rate = to_number(&self.eval_scalar(&arguments[0], depth + 1)?)?;
+                let nper = to_number(&self.eval_scalar(&arguments[1], depth + 1)?)?;
+                let pv = to_number(&self.eval_scalar(&arguments[2], depth + 1)?)?;
+                if nper == 0.0 {
+                    return Ok(EvalValue::Scalar(FormulaValue::Error("#NUM!".into())));
+                }
+                let fv = if arguments.len() >= 4 {
+                    to_number(&self.eval_scalar(&arguments[3], depth + 1)?)?
+                } else {
+                    0.0
+                };
+                let pmt_type = if arguments.len() == 5 {
+                    to_number(&self.eval_scalar(&arguments[4], depth + 1)?)? != 0.0
+                } else {
+                    false
+                };
+                if rate == 0.0 {
+                    Ok(EvalValue::Scalar(FormulaValue::Number(-(pv + fv) / nper)))
+                } else {
+                    let type_flag = if pmt_type { 1.0 } else { 0.0 };
+                    let factor = (1.0 + rate).powf(nper);
+                    let annuity_factor = (1.0 + rate * type_flag) * (factor - 1.0) / rate;
+                    let pmt = -(pv * factor + fv) / annuity_factor;
+                    Ok(EvalValue::Scalar(FormulaValue::Number(pmt)))
+                }
+            }
             "sumxmy2" | "sumx2my2" | "sumx2py2" if arguments.len() == 2 => {
                 let (vals_x, r_x, c_x) = match self.evaluate(&arguments[0], depth + 1)? {
                     EvalValue::Scalar(s) => (vec![s], 1, 1),
@@ -11212,6 +11437,96 @@ mod tests {
         assert_eq!(
             evaluate_formula(
                 "=CHAR(ERROR.TYPE(#REF!) * 10 + CONVERT(25, \"km\", \"km\"))",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::String("A".into()))
+        );
+
+        // SLN & SYD
+        assert_eq!(
+            evaluate_formula(
+                "=SLN(10000, 2000, 5)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(1600.0))
+        );
+        assert_eq!(
+            evaluate_formula("=SYD(100, 10, 3, 1)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(45.0))
+        );
+
+        // NPV
+        let npv_val =
+            evaluate_formula("=NPV(0.1, 110, 121)", None, &test_cells, Default::default()).value;
+        if let Some(FormulaValue::Number(n)) = npv_val {
+            assert!((n - 200.0).abs() < 1e-6);
+        } else {
+            panic!("Expected NPV number result");
+        }
+
+        // PV, FV, PMT
+        assert_eq!(
+            evaluate_formula("=PV(0, 10, 50, 100)", None, &test_cells, Default::default()).value,
+            Some(FormulaValue::Number(-600.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=FV(0, 10, -100, -500)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(1500.0))
+        );
+        assert_eq!(
+            evaluate_formula(
+                "=PMT(0, 10, -560, 0)",
+                None,
+                &test_cells,
+                Default::default()
+            )
+            .value,
+            Some(FormulaValue::Number(56.0))
+        );
+
+        // POISSON & BINOM.DIST
+        let pois = evaluate_formula(
+            "=POISSON(0, 2, FALSE)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(n)) = pois {
+            assert!((n - (-2.0f64).exp()).abs() < 1e-6);
+        } else {
+            panic!("Expected POISSON number result");
+        }
+
+        let binom = evaluate_formula(
+            "=BINOM.DIST(2, 2, 0.5, TRUE)",
+            None,
+            &test_cells,
+            Default::default(),
+        )
+        .value;
+        if let Some(FormulaValue::Number(n)) = binom {
+            assert!((n - 1.0).abs() < 1e-6);
+        } else {
+            panic!("Expected BINOM.DIST number result");
+        }
+
+        // Financial de-obfuscation: CHAR(SLN(100, 10, 10) + PMT(0, 10, -560, 0)) = CHAR(9 + 56) = CHAR(65) = "A"
+        assert_eq!(
+            evaluate_formula(
+                "=CHAR(SLN(100, 10, 10) + PMT(0, 10, -560, 0))",
                 None,
                 &test_cells,
                 Default::default()

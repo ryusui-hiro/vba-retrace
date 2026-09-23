@@ -735,6 +735,15 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("expon.dist")
                 || f_lower.contains("weibull")
                 || f_lower.contains("convert")
+                || f_lower.contains("sln")
+                || f_lower.contains("syd")
+                || f_lower.contains("npv")
+                || f_lower.contains("pv")
+                || f_lower.contains("fv")
+                || f_lower.contains("pmt")
+                || f_lower.contains("lognorm")
+                || f_lower.contains("poisson")
+                || f_lower.contains("binom")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -8282,6 +8291,387 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_powerpoint_slideshow_or_presentation_props_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in presentation properties or broadcast configuration
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "presentationProps:uncCoercion".into(),
+                        format!("PowerPoint presentation properties reference remote UNC resource '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "presentationProps:dangerousProtocol".into(),
+                    format!("PowerPoint presentation properties reference dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "presentationProps:stagedCommand".into(),
+                    format!("PowerPoint presentation properties contain staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. Kiosk mode lockup or forced full screen loop anomaly with external broadcast
+        if (s_lower.contains("showtype=\"kiosk\"")
+            || s_lower.contains("<p:kiosk")
+            || s_lower.contains("kiosk=\"1\""))
+            && (s_lower.contains("loop=\"1\"")
+                || s_lower.contains("loop=\"true\"")
+                || s_lower.contains("broadcast")
+                || s_lower.contains("htmlpubpr"))
+        {
+            results.push((
+                "High",
+                entry_name.to_string(),
+                "presentationProps:kioskLockup".into(),
+                "PowerPoint presentation properties configure kiosk full-screen mode combined with loop/broadcast behavior (evasive UI lockup vector)".into(),
+            ));
+        }
+
+        // 5. External relationship targets pointing to executable / macro payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".ppam", ".pptm", ".hta", ".vbs", ".bat",
+                ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "presentationProps:executableTarget".into(),
+                        format!("PowerPoint presentation relationship targets weaponized payload '{ext}'"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 6. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "presentationProps:smuggledBinary".into(),
+                "PowerPoint presentation properties contain smuggled Windows PE executable binary"
+                    .into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_excel_threaded_comment_or_person_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in threaded comments or person identifiers
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "threadedComment:uncCoercion".into(),
+                        format!("Excel threaded comment or person metadata references remote UNC path '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Cloaked DDE / command execution formulas
+        for dde in &[
+            "=cmd|",
+            "=powershell|",
+            "+cmd|",
+            "@powershell|",
+            "=dde(",
+            "cmd /c",
+            "powershell.exe",
+        ] {
+            if s_lower.contains(dde) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "threadedComment:cloakedDde".into(),
+                    format!("Excel threaded comment embeds cloaked DDE formula or execution string '{dde}'"),
+                ));
+                break;
+            }
+        }
+
+        // 3. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "threadedComment:dangerousProtocol".into(),
+                    format!("Excel threaded comment or person metadata references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 4. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "threadedComment:stagedCommand".into(),
+                    format!(
+                        "Excel threaded comment contains staged shell execution command '{cmd}'"
+                    ),
+                ));
+                break;
+            }
+        }
+
+        // 5. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "threadedComment:smuggledBinary".into(),
+                "Excel threaded comment contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_office_theme_override_or_format_scheme_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in theme overrides or format schemes
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "themeOverride:uncCoercion".into(),
+                        format!("Office theme override or format scheme references remote UNC resource '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "themeOverride:dangerousProtocol".into(),
+                    format!("Office theme override or format scheme references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "themeOverride:stagedCommand".into(),
+                    format!("Office theme override or format scheme contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. External relationship targets pointing to executable / macro payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "themeOverride:executableTarget".into(),
+                        format!(
+                            "Office theme override relationship targets weaponized payload '{ext}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 5. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "themeOverride:smuggledBinary".into(),
+                "Office theme override contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -9484,6 +9874,94 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "WordMailMergeHeaderSourceOrRecipientAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for PowerPoint Slide Show or Presentation Props Anomaly (VBA-CELL-074)
+        let is_pres_props_candidate = (name_lower.contains("ppt/presprops")
+            || name_lower.contains("ppt/viewprops")
+            || name_lower.contains("presentation.xml")
+            || name_lower.contains("presprops.xml")
+            || name_lower.contains("viewprops.xml"))
+            && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels"));
+        if is_pres_props_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_powerpoint_slideshow_or_presentation_props_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "PowerPoint presentation properties or slideshow anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "PresProps".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "PowerPointSlideShowOrPresentationPropsAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Excel Threaded Comment or Person Anomaly (VBA-CELL-075)
+        let is_threaded_comment_candidate = name_lower.contains("threadedcomment")
+            || name_lower.contains("xl/persons/")
+            || name_lower.contains("person.xml");
+        if is_threaded_comment_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_excel_threaded_comment_or_person_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Excel threaded comment or person anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "ThreadedComment".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "ExcelThreadedCommentOrPersonAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Office Theme Override or Format Scheme Anomaly (VBA-CELL-076)
+        let is_theme_candidate = name_lower.contains("themeoverride")
+            || name_lower.contains("fmtscheme")
+            || (name_lower.contains("/theme/")
+                && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels")));
+        if is_theme_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_office_theme_override_or_format_scheme_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Office theme override or format scheme anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "ThemeOverride".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "OfficeThemeOverrideOrFormatSchemeAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,
