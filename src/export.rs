@@ -3119,6 +3119,17 @@ fn cell_threat_to_sarif_rule(threat: &crate::extract::CellThreat) -> (&'static s
         "WordGlossaryOrBuildingBlocksRelsAnomaly"
         | "GlossaryRelsAnomaly"
         | "BuildingBlocksAnomaly" => ("VBA-CELL-058", "error"),
+        "WordDocVariablesOrNotesAnomaly"
+        | "WordDocVarsAnomaly"
+        | "DocVariablesAnomaly"
+        | "FootnotesEndnotesAnomaly" => ("VBA-CELL-059", "error"),
+        "PowerPointTagsOrMastersAnomaly"
+        | "PowerPointTagsAnomaly"
+        | "PptTagsAnomaly"
+        | "PptMastersAnomaly" => ("VBA-CELL-060", "error"),
+        "ScenarioManagerOrConsolidationAnomaly"
+        | "ScenarioManagerAnomaly"
+        | "DataConsolidationAnomaly" => ("VBA-CELL-061", "error"),
         _ => ("VBA-CELL-001", "warning"),
     };
     let level = match threat.severity.as_str() {
@@ -3342,7 +3353,16 @@ pub fn inspection_to_sarif(inspection: &crate::ComprehensiveInspection, file_uri
         "{\"id\":\"VBA-CELL-057\",\"name\":\"VbaDataStreamOrProjectRelsAnomaly\",\"shortDescription\":{\"text\":\"VBA Data Stream or Project Relationship Anomaly\"},\"fullDescription\":{\"text\":\"VBA project relationship parts or vbaData streams configure external relationships to remote UNC paths or binaries, exploit protocol handlers, shell execution commands, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
     );
     out.push_str(
-        "{\"id\":\"VBA-CELL-058\",\"name\":\"WordGlossaryOrBuildingBlocksRelsAnomaly\",\"shortDescription\":{\"text\":\"Word Glossary or Building Blocks Relationship Anomaly\"},\"fullDescription\":{\"text\":\"Word glossary definitions or building blocks relationships configure remote template injection, remote UNC paths enabling NTLM credential coercion, exploit protocol handlers, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
+        "{\"id\":\"VBA-CELL-058\",\"name\":\"WordGlossaryOrBuildingBlocksRelsAnomaly\",\"shortDescription\":{\"text\":\"Word Glossary or Building Blocks Relationship Anomaly\"},\"fullDescription\":{\"text\":\"Word glossary definitions or building blocks relationships configure remote template injection, remote UNC paths enabling NTLM credential coercion, exploit protocol handlers, or smuggled PE binaries.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-059\",\"name\":\"WordDocVariablesOrNotesAnomaly\",\"shortDescription\":{\"text\":\"Word Document Variables and Notes Anomaly\"},\"fullDescription\":{\"text\":\"Word document variable definitions (docVars) or footnotes and endnotes parts contain smuggled Windows PE binaries, shell execution commands, remote UNC paths, or dangerous exploit URI schemes.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-060\",\"name\":\"PowerPointTagsOrMastersAnomaly\",\"shortDescription\":{\"text\":\"PowerPoint Tags, Masters, and Font Table Anomaly\"},\"fullDescription\":{\"text\":\"PowerPoint programmable tags, presentation relationships, masters, or font tables contain smuggled Windows PE binaries, shell execution commands, remote template injection, or remote UNC paths.\"},\"defaultConfiguration\":{\"level\":\"error\"}},"
+    );
+    out.push_str(
+        "{\"id\":\"VBA-CELL-061\",\"name\":\"ScenarioManagerOrConsolidationAnomaly\",\"shortDescription\":{\"text\":\"Excel Scenario Manager and Data Consolidation Anomaly\"},\"fullDescription\":{\"text\":\"Excel Scenario Manager replacement cells or Data Consolidation definitions contain cloaked DDE execution formulas, Excel 4.0 macros, shell commands, or remote UNC workbook paths enabling NTLM credential coercion.\"},\"defaultConfiguration\":{\"level\":\"error\"}}"
     );
     out.push_str("]}},\"artifacts\":[{\"location\":{\"uri\":");
     out.push_str(&q(file_uri));

