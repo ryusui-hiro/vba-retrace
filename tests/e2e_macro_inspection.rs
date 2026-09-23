@@ -7460,3 +7460,187 @@ fn e2e_subdoc_fonttable_datafeed_and_chisq_duration_inspection() {
         "JSON missing VBA-CELL-085"
     );
 }
+
+#[test]
+fn e2e_slideguide_mailfilter_dataservice_and_gamma_tbill_inspection() {
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/ppt/guides/guide1.xml" ContentType="application/xml"/>
+  <Override PartName="/word/mailMergeFilter1.xml" ContentType="application/xml"/>
+  <Override PartName="/xl/dataServices/dataService1.xml" ContentType="application/xml"/>
+</Types>"#;
+
+    let package_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+    let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>
+</Relationships>"#;
+
+    // Formulas de-obfuscating threats:
+    // A1: TBILLPRICE(100, 280, 0.10) = 95.0 -> 95 + 4 = 99 ('c') & "md.exe" -> "cmd.exe"
+    // B1: DOLLARDE(1.02, 16) = 1.125 -> 1.125 * 64 = 72 -> 72 + 40 = 112 ('p') & "owershell" -> "powershell"
+    // C1: ACCRINTM(1, 181, 0.1, 1000, 2) = 50.0 -> 50 * 1.98 = 99 ('c') & "ertutil" -> "certutil"
+    // D1: GAMMA.INV(0, 1, 2) = 0.0 -> 0 + 109 = 109 ('m') & "shta" -> "mshta"
+    let sheet1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1"><f>=CHAR(TBILLPRICE(100, 280, 0.10) + 4) &amp; &quot;md.exe&quot;</f></c>
+      <c r="B1"><f>=CHAR(DOLLARDE(1.02, 16) * 64 + 40) &amp; &quot;owershell&quot;</f></c>
+      <c r="C1"><f>=CHAR(ACCRINTM(1, 181, 0.1, 1000, 2) * 1.98) &amp; &quot;ertutil&quot;</f></c>
+      <c r="D1"><f>=CHAR(GAMMA.INV(0, 1, 2) + 109) &amp; &quot;shta&quot;</f></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    // 1. PowerPoint slide guide with remote UNC resource and staged command (VBA-CELL-086)
+    let ppt_guide_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:guide xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+  target="\\remote-guide-server\guides\layout.xml">
+  <p:desc>powershell.exe -w hidden -enc JABzAD0ATgBlAHcALQBPAGIAagBlAGMAdA==</p:desc>
+</p:guide>"#;
+
+    // 2. Word mail merge filter with remote UNC resource and database command injection (VBA-CELL-087)
+    let word_filter_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:mailMergeFilter xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  source="\\remote-mailmerge-server\filters\recipients.csv">
+  <w:query text="EXEC xp_cmdshell 'powershell.exe -enc AAAA'"/>
+</w:mailMergeFilter>"#;
+
+    // 3. Excel data service with remote UNC endpoint and database procedure (VBA-CELL-088)
+    let xl_dataservice_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<dataService xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+  endpoint="\\remote-dataservice-server\services\endpoint.svc">
+  <serviceCommand text="EXEC sp_oacreate 'WScript.Shell'"/>
+</dataService>"#;
+
+    let cfb = synthesize_cfb("VBAProject", "Module1", "Sub Test()\nEnd Sub\n", &[]);
+
+    let entries: &[(&str, &[u8])] = &[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", package_rels.as_bytes()),
+        ("xl/workbook.xml", workbook_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/vbaProject.bin", cfb.as_slice()),
+        ("xl/worksheets/sheet1.xml", sheet1_xml.as_bytes()),
+        ("ppt/guides/guide1.xml", ppt_guide_xml.as_bytes()),
+        ("word/mailMergeFilter1.xml", word_filter_xml.as_bytes()),
+        (
+            "xl/dataServices/dataService1.xml",
+            xl_dataservice_xml.as_bytes(),
+        ),
+    ];
+
+    let zip_bytes = synthesize_zip(entries);
+    let options = AnalysisOptions::default();
+    let inspection = inspect_macro_file(&zip_bytes, &options).expect("inspection should succeed");
+
+    let threats = &inspection.extracted.cell_threats;
+
+    // 1. Verify PowerPoint Slide Guide threats (VBA-CELL-086)
+    assert!(
+        threats
+            .iter()
+            .any(|t| t.threat_kind == "PowerPointSlideGuideOrGridAnomaly"
+                && (t.coordinate.contains("slideGuide:uncCoercion")
+                    || t.coordinate.contains("slideGuide:stagedCommand"))),
+        "Should detect PowerPointSlideGuideOrGridAnomaly (VBA-CELL-086): {threats:?}"
+    );
+
+    // 2. Verify Word Mail Merge Filter threats (VBA-CELL-087)
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "WordMailMergeHeaderFilterOrRecipientItemAnomaly"
+                && (t.coordinate.contains("mailMergeFilter:uncCoercion")
+                    || t.coordinate.contains("mailMergeFilter:commandInjection"))
+        ),
+        "Should detect WordMailMergeHeaderFilterOrRecipientItemAnomaly (VBA-CELL-087): {threats:?}"
+    );
+
+    // 3. Verify Excel Data Service threats (VBA-CELL-088)
+    assert!(
+        threats.iter().any(
+            |t| t.threat_kind == "ExcelExternalDataFeedOrDataServiceAnomaly"
+                && (t.coordinate.contains("excelDataService:uncCoercion")
+                    || t.coordinate.contains("excelDataService:commandInjection"))
+        ),
+        "Should detect ExcelExternalDataFeedOrDataServiceAnomaly (VBA-CELL-088): {threats:?}"
+    );
+
+    // 4. Verify dynamic formula de-obfuscation
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "A1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("cmd")),
+        "Cell A1 should resolve cmd threat through TBILLPRICE evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "B1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("powershell")),
+        "Cell B1 should resolve powershell threat through DOLLARDE evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "C1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("certutil")),
+        "Cell C1 should resolve certutil threat through ACCRINTM evaluation: {threats:?}"
+    );
+    assert!(
+        threats.iter().any(|t| t.cell_ref == "D1"
+            && t.threat_kind == "DeobfuscatedThreat"
+            && t.description.contains("mshta")),
+        "Cell D1 should resolve mshta threat through GAMMA.INV evaluation: {threats:?}"
+    );
+
+    // 5. Verify SARIF contains rules VBA-CELL-086, VBA-CELL-087, VBA-CELL-088
+    let sarif = inspection_to_sarif(
+        &inspection,
+        "file:///test/slideguide_mailfilter_dataservice_gamma_tbill.xlsm",
+    );
+    assert!(
+        sarif.contains("VBA-CELL-086"),
+        "SARIF must contain VBA-CELL-086 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-087"),
+        "SARIF must contain VBA-CELL-087 rule"
+    );
+    assert!(
+        sarif.contains("VBA-CELL-088"),
+        "SARIF must contain VBA-CELL-088 rule"
+    );
+
+    // 6. Verify JSON contains rule_id VBA-CELL-086, VBA-CELL-087, VBA-CELL-088
+    let json = inspect_to_json(&inspection, Disclosure::IncludeSource);
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-086\""),
+        "JSON missing VBA-CELL-086"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-087\""),
+        "JSON missing VBA-CELL-087"
+    );
+    assert!(
+        json.contains("\"rule_id\":\"VBA-CELL-088\""),
+        "JSON missing VBA-CELL-088"
+    );
+}

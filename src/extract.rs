@@ -763,6 +763,12 @@ pub fn extract_xlsm(data: &[u8], limits: &Limits) -> Result<ExtractedProject, St
                 || f_lower.contains("chisq")
                 || f_lower.contains("chidist")
                 || f_lower.contains("chiinv")
+                || f_lower.contains("tbillprice")
+                || f_lower.contains("tbillyield")
+                || f_lower.contains("dollarde")
+                || f_lower.contains("dollarfr")
+                || f_lower.contains("accrintm")
+                || f_lower.contains("gamma")
                 || has_fn("hyperlink")
             {
                 let eval_res = crate::formula_eval::evaluate_formula(
@@ -9896,6 +9902,418 @@ pub fn scan_ooxml_package_threats(
         results
     }
 
+    fn scan_powerpoint_slide_guide_or_grid_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in slide guides or grid definitions
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "slideGuide:uncCoercion".into(),
+                        format!("PowerPoint slide guide or grid definition references remote UNC resource '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "slideGuide:dangerousProtocol".into(),
+                    format!("PowerPoint slide guide or grid definition references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "slideGuide:stagedCommand".into(),
+                    format!("PowerPoint slide guide or grid definition contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. External relationships targeting weaponized payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "slideGuide:executableTarget".into(),
+                        format!(
+                            "PowerPoint slide guide relationship targets weaponized payload '{ext}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 5. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "slideGuide:smuggledBinary".into(),
+                "PowerPoint slide guide or grid definition contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_word_mail_merge_filter_or_recipient_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC paths in mail merge filter or recipient data
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "mailMergeFilter:uncCoercion".into(),
+                        format!("Word mail merge filter or recipient data references remote UNC resource '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "mailMergeFilter:dangerousProtocol".into(),
+                    format!("Word mail merge filter or recipient data references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "mailMergeFilter:stagedCommand".into(),
+                    format!("Word mail merge filter or recipient data contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. Database command execution / SQL injection
+        for proc in &[
+            "xp_cmdshell",
+            "sp_oacreate",
+            "openrowset",
+            "bulk insert",
+            "into outfile",
+            "into dumpfile",
+        ] {
+            if s_lower.contains(proc) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "mailMergeFilter:commandInjection".into(),
+                    format!("Word mail merge filter or recipient data contains dangerous database command execution procedure '{proc}'"),
+                ));
+                break;
+            }
+        }
+
+        // 5. External relationships targeting weaponized payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "mailMergeFilter:executableTarget".into(),
+                        format!(
+                            "Word mail merge filter relationship targets weaponized payload '{ext}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 6. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "mailMergeFilter:smuggledBinary".into(),
+                "Word mail merge filter or recipient data contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
+    fn scan_excel_external_data_feed_or_service_threats(
+        entry_name: &str,
+        data: &[u8],
+    ) -> Vec<(&'static str, String, String, String)> {
+        let mut results = Vec::new();
+        let s_lower = String::from_utf8_lossy(data).to_ascii_lowercase();
+
+        // 1. Remote UNC endpoints in external data feeds or data services
+        for (i, w) in data.windows(2).enumerate() {
+            if (w == b"\\\\" || (w == b"//" && (i == 0 || data[i - 1] != b':')))
+                && i + 4 < data.len()
+            {
+                let rest = &data[i..];
+                let end = rest
+                    .iter()
+                    .position(|&b| {
+                        b == 0
+                            || b == b' '
+                            || b == b'"'
+                            || b == b'\''
+                            || b == b'<'
+                            || b == b'>'
+                            || b == b'\r'
+                            || b == b'\n'
+                    })
+                    .unwrap_or(rest.len().min(128));
+                if let Some(unc) = (end > 4)
+                    .then(|| std::str::from_utf8(&rest[..end]).ok())
+                    .flatten()
+                    .filter(|u| u.contains('\\') || u.contains('/'))
+                {
+                    results.push((
+                        "High",
+                        entry_name.to_string(),
+                        "excelDataService:uncCoercion".into(),
+                        format!("Excel external data feed or data service references remote UNC endpoint '{unc}' (NTLM coercion vector)"),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 2. Dangerous exploit URI schemes
+        for proto in &[
+            "ms-msdt:",
+            "search-ms:",
+            "mhtml:",
+            "ms-appinstaller:",
+            "powershell:",
+            "javascript:",
+            "vbscript:",
+            "cmd:",
+        ] {
+            if s_lower.contains(proto) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "excelDataService:dangerousProtocol".into(),
+                    format!("Excel external data feed or data service references dangerous exploit URI scheme '{proto}'"),
+                ));
+            }
+        }
+
+        // 3. Staged shell execution commands
+        for cmd in &[
+            "powershell",
+            "cmd.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta",
+            "rundll32",
+            "certutil",
+        ] {
+            if s_lower.contains(cmd) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "excelDataService:stagedCommand".into(),
+                    format!("Excel external data feed or data service contains staged shell execution command '{cmd}'"),
+                ));
+                break;
+            }
+        }
+
+        // 4. Database command execution / SQL injection
+        for proc in &[
+            "xp_cmdshell",
+            "sp_oacreate",
+            "openrowset",
+            "bulk insert",
+            "into outfile",
+            "into dumpfile",
+        ] {
+            if s_lower.contains(proc) {
+                results.push((
+                    "Critical",
+                    entry_name.to_string(),
+                    "excelDataService:commandInjection".into(),
+                    format!("Excel external data feed or data service contains dangerous database command execution procedure '{proc}'"),
+                ));
+                break;
+            }
+        }
+
+        // 5. Cloaked DDE / command formulas in data services
+        if s_lower.contains("cmd|") || s_lower.contains("powershell|") || s_lower.contains("mshta|")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "excelDataService:cloakedDde".into(),
+                "Excel external data feed or data service contains cloaked DDE command formula"
+                    .into(),
+            ));
+        }
+
+        // 6. External relationship targets pointing to executable / macro payloads
+        if entry_name.ends_with(".rels") {
+            for ext in &[
+                ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".hta", ".vbs", ".bat", ".ps1", ".exe",
+            ] {
+                if s_lower.contains(ext) {
+                    results.push((
+                        "Critical",
+                        entry_name.to_string(),
+                        "excelDataService:executableTarget".into(),
+                        format!(
+                            "Excel external data feed relationship targets weaponized payload '{ext}'"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // 7. Smuggled PE binary
+        if s_lower.contains("tvqqaa")
+            || s_lower.contains("tvqaia")
+            || (s_lower.contains("tvq") && s_lower.contains("aaaa"))
+            || s_lower.contains("this program cannot be run in dos mode")
+        {
+            results.push((
+                "Critical",
+                entry_name.to_string(),
+                "excelDataService:smuggledBinary".into(),
+                "Excel external data feed or data service contains smuggled Windows PE executable binary".into(),
+            ));
+        }
+
+        results
+    }
+
     // 1. Inspect package parts / entry names for embedded binaries and controls
     for entry in zip.entries.iter().take(max_entries) {
         let name_lower = entry.name.to_ascii_lowercase();
@@ -11457,6 +11875,94 @@ pub fn scan_ooxml_package_threats(
                         cell_ref: target_id,
                         coordinate: coord,
                         threat_kind: "ExcelQueryTableOrDataFeedAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for PowerPoint Slide Guide or Grid Anomaly (VBA-CELL-086)
+        let is_slide_guide_candidate = (name_lower.contains("slideguide")
+            || name_lower.contains("slideguides")
+            || (name_lower.contains("guides") && name_lower.starts_with("ppt/"))
+            || (name_lower.contains("viewprops") && name_lower.starts_with("ppt/")))
+            && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels"));
+        if is_slide_guide_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_powerpoint_slide_guide_or_grid_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "PowerPoint slide guide or grid anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "PowerPointSlideGuide".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "PowerPointSlideGuideOrGridAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Word Mail Merge Header Filter or Recipient Item Anomaly (VBA-CELL-087)
+        let is_mail_merge_filter_candidate = (name_lower.contains("mailmergefilter")
+            || name_lower.contains("recipientdata"))
+            && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels"));
+        if is_mail_merge_filter_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_word_mail_merge_filter_or_recipient_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Word mail merge filter or recipient data anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "WordMailMergeFilter".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "WordMailMergeHeaderFilterOrRecipientItemAnomaly".into(),
+                        severity: sev.into(),
+                        formula: reason.clone(),
+                        description: desc,
+                    });
+                }
+            }
+        }
+
+        // Check for Excel External Data Feed or Data Service Anomaly (VBA-CELL-088)
+        let is_data_service_candidate = (name_lower.contains("dataservice")
+            || name_lower.contains("dataservices")
+            || name_lower.contains("externaldatafeed")
+            || name_lower.contains("externaldatafeeds"))
+            && (name_lower.ends_with(".xml") || name_lower.ends_with(".rels"));
+        if is_data_service_candidate && let Ok(ref data) = entry_bytes_res {
+            for (sev, target_id, coord_suffix, reason) in
+                scan_excel_external_data_feed_or_service_threats(&entry.name, data)
+            {
+                let coord = format!("part:{}:{}", entry.name, coord_suffix);
+                if !threats.iter().any(|t| t.coordinate == coord) {
+                    let desc = format!(
+                        "Excel external data feed or data service anomaly detected in part '{}': {reason}",
+                        entry.name
+                    );
+                    diagnostics.push(format!("Security warning: {desc}"));
+                    threats.push(CellThreat {
+                        sheet_name: "ExcelDataService".into(),
+                        cell_ref: target_id,
+                        coordinate: coord,
+                        threat_kind: "ExcelExternalDataFeedOrDataServiceAnomaly".into(),
                         severity: sev.into(),
                         formula: reason.clone(),
                         description: desc,
