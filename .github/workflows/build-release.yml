@@ -167,7 +167,7 @@ jobs:
           python -m pytest -q bindings/python/tests
       - name: Stage tested artifacts
         run: python3 scripts/release-artifacts.py stage-target --tag ${{ matrix.tag }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: native-${{ matrix.tag }}
           path: dist/artifacts/${{ matrix.tag }}
@@ -191,7 +191,7 @@ jobs:
           python -m maturin sdist --manifest-path bindings/python/Cargo.toml --out dist/artifacts/source
           cp target/package/vba-insight-*.crate dist/artifacts/source/
           python -m twine check --strict dist/artifacts/source/*.tar.gz
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: source
           path: dist/artifacts/source
